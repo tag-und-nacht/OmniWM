@@ -1013,6 +1013,37 @@ private func prepareNiriState(
         #expect(recorder.windowRemovalReasons == [.windowDestroyed])
     }
 
+    @Test @MainActor func frameChangedBurstReachesRefreshSchedulingAsSingleRelayout() async {
+        let controller = makeRefreshTestController()
+        let recorder = RefreshEventRecorder()
+        installRefreshSpies(on: controller, recorder: recorder)
+        guard let workspaceId = controller.activeWorkspace()?.id else {
+            Issue.record("Missing active workspace")
+            return
+        }
+
+        _ = addWindow(on: controller, workspaceId: workspaceId, pid: getpid(), windowId: 6403)
+
+        let observer = CGSEventObserver.shared
+        observer.resetDebugStateForTests()
+        observer.delegate = controller.axEventHandler
+        defer {
+            observer.delegate = nil
+            observer.resetDebugStateForTests()
+        }
+
+        observer.enqueueEventForTests(.frameChanged(windowId: 6403))
+        observer.enqueueEventForTests(.frameChanged(windowId: 6403))
+        observer.flushPendingCGSEventsForTests()
+        await waitForRefreshWork(on: controller)
+
+        #expect(recorder.relayoutEvents.map(\.0) == [.axWindowChanged])
+        #expect(recorder.relayoutEvents.map(\.1) == [.relayout])
+        #expect(recorder.fullRescanReasons.isEmpty)
+        #expect(recorder.visibilityReasons.isEmpty)
+        assertNoLegacyReasons(recorder)
+    }
+
     @Test @MainActor func relayoutQueuedBehindActiveImmediateRelayoutStillExecutes() async {
         let controller = makeRefreshTestController()
         let gate = AsyncGate()

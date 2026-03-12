@@ -3,6 +3,11 @@ import Foundation
 
 @MainActor
 final class AXEventHandler: CGSEventDelegate {
+    struct DebugCounters {
+        var geometryRelayoutRequests = 0
+        var geometryRelayoutsSuppressedDuringGesture = 0
+    }
+
     weak var controller: WMController?
     private var deferredCreatedWindowIds: Set<UInt32> = []
     private var deferredCreatedWindowOrder: [UInt32] = []
@@ -11,6 +16,8 @@ final class AXEventHandler: CGSEventDelegate {
     var windowSubscriptionHandler: (([UInt32]) -> Void)?
     var focusedWindowValueProvider: ((pid_t) -> CFTypeRef?)?
     var windowTypeProvider: ((AXWindowRef, pid_t) -> AXWindowType)?
+    var frameProvider: ((AXWindowRef) -> CGRect?)?
+    private(set) var debugCounters = DebugCounters()
 
     init(controller: WMController) {
         self.controller = controller
@@ -39,17 +46,8 @@ final class AXEventHandler: CGSEventDelegate {
         case let .closed(windowId):
             handleCGSWindowDestroyed(windowId: windowId)
 
-        case let .moved(windowId):
-            handleWindowMoveOrResize(windowId: windowId)
-            if isWindowDisplayable(windowId: windowId) {
-                controller.layoutRefreshController.requestRelayout(reason: .axWindowChanged)
-            }
-
-        case let .resized(windowId):
-            handleWindowMoveOrResize(windowId: windowId)
-            if isWindowDisplayable(windowId: windowId) {
-                controller.layoutRefreshController.requestRelayout(reason: .axWindowChanged)
-            }
+        case let .frameChanged(windowId):
+            handleFrameChanged(windowId: windowId)
 
         case let .frontAppChanged(pid):
             handleAppActivation(pid: pid)
@@ -91,14 +89,36 @@ final class AXEventHandler: CGSEventDelegate {
         }
     }
 
-    private func handleWindowMoveOrResize(windowId: UInt32) {
+    func resetDebugStateForTests() {
+        debugCounters = .init()
+    }
+
+    private func handleFrameChanged(windowId: UInt32) {
+        guard let controller else { return }
+
+        updateFocusedBorderForFrameChange(windowId: windowId)
+
+        guard isWindowDisplayable(windowId: windowId) else {
+            return
+        }
+
+        if controller.isInteractiveGestureActive {
+            debugCounters.geometryRelayoutsSuppressedDuringGesture += 1
+            return
+        }
+
+        debugCounters.geometryRelayoutRequests += 1
+        controller.layoutRefreshController.requestRelayout(reason: .axWindowChanged)
+    }
+
+    private func updateFocusedBorderForFrameChange(windowId: UInt32) {
         guard let controller else { return }
         guard let focusedHandle = controller.workspaceManager.focusedHandle,
               let entry = controller.workspaceManager.entry(for: focusedHandle),
               entry.windowId == Int(windowId)
         else { return }
 
-        if let frame = try? AXWindowService.frame(entry.axRef) {
+        if let frame = frameProvider?(entry.axRef) ?? (try? AXWindowService.frame(entry.axRef)) {
             controller.borderCoordinator.updateBorderIfAllowed(handle: focusedHandle, frame: frame, windowId: Int(windowId))
         }
     }

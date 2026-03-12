@@ -610,4 +610,8 @@ extension WMController {
     var isDiscoveryInProgress: Bool {
         layoutRefreshController.isDiscoveryInProgress
     }
+
+    var isInteractiveGestureActive: Bool {
+        mouseEventHandler.isInteractiveGestureActive
+    }
 }

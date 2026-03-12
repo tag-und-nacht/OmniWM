@@ -115,9 +115,7 @@ final class ServiceLifecycleManager {
     private func setupDisplayObserver() {
         displayObserver = DisplayConfigurationObserver()
         displayObserver?.setEventHandler { [weak self] event in
-            Task { @MainActor in
-                self?.handleDisplayEvent(event)
-            }
+            self?.handleDisplayEvent(event)
         }
     }
 
@@ -211,7 +209,7 @@ final class ServiceLifecycleManager {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in
+            MainActor.assumeIsolated {
                 self?.handleActiveSpaceDidChange()
             }
         }
@@ -228,7 +226,7 @@ final class ServiceLifecycleManager {
                 return
             }
             let pid = app.processIdentifier
-            Task { @MainActor in
+            MainActor.assumeIsolated {
                 controller?.axEventHandler.handleAppActivation(pid: pid)
             }
         }
@@ -244,7 +242,7 @@ final class ServiceLifecycleManager {
             guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else {
                 return
             }
-            Task { @MainActor in
+            MainActor.assumeIsolated {
                 controller?.axEventHandler.handleAppHidden(pid: app.processIdentifier)
             }
         }
@@ -257,7 +255,7 @@ final class ServiceLifecycleManager {
             guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else {
                 return
             }
-            Task { @MainActor in
+            MainActor.assumeIsolated {
                 controller?.axEventHandler.handleAppUnhidden(pid: app.processIdentifier)
             }
         }

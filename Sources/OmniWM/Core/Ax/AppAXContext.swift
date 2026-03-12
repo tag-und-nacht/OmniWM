@@ -180,7 +180,7 @@ final class AppAXContext {
             return
         }
 
-        Task { @MainActor in
+        scheduleOnMainRunLoop {
             if let handler {
                 handler(pid, windowId)
             } else {
@@ -410,7 +410,17 @@ private func axFocusedWindowChangedCallback(
     var pid: pid_t = 0
     guard AXUIElementGetPid(element, &pid) == .success else { return }
 
-    Task { @MainActor in
+    scheduleOnMainRunLoop {
         AppAXContext.onFocusedWindowChanged?(pid)
     }
+}
+
+private func scheduleOnMainRunLoop(_ work: @escaping @MainActor () -> Void) {
+    let mainRunLoop = CFRunLoopGetMain()
+    CFRunLoopPerformBlock(mainRunLoop, CFRunLoopMode.commonModes.rawValue) {
+        MainActor.assumeIsolated {
+            work()
+        }
+    }
+    CFRunLoopWakeUp(mainRunLoop)
 }

@@ -1,10 +1,10 @@
 import Foundation
+import os
 
-enum CGSWindowEvent {
+enum CGSWindowEvent: Equatable {
     case created(windowId: UInt32, spaceId: UInt64)
     case destroyed(windowId: UInt32, spaceId: UInt64)
-    case moved(windowId: UInt32)
-    case resized(windowId: UInt32)
+    case frameChanged(windowId: UInt32)
     case closed(windowId: UInt32)
     case frontAppChanged(pid: pid_t)
     case titleChanged(windowId: UInt32)
@@ -17,6 +17,15 @@ protocol CGSEventDelegate: AnyObject {
 
 @MainActor
 final class CGSEventObserver {
+    struct DebugCounters: Equatable {
+        var decodedEvents = 0
+        var coalescedFrameEvents = 0
+        var malformedPayloadDrops = 0
+        var clearedFrameEventsOnDestroy = 0
+        var drainedEvents = 0
+        var drainRuns = 0
+    }
+
     static let shared = CGSEventObserver()
 
     weak var delegate: CGSEventDelegate?
@@ -67,6 +76,7 @@ final class CGSEventObserver {
         }
 
         isRegistered = successCount > 0
+        updateCallbackRegistrationState(isRegistered)
     }
 
     func stop() {
@@ -101,6 +111,8 @@ final class CGSEventObserver {
                 isWindowClosedNotifyRegistered = false
             }
         }
+
+        updateCallbackRegistrationState(false)
     }
 
     @discardableResult
@@ -108,56 +120,294 @@ final class CGSEventObserver {
         SkyLight.shared.subscribeToWindowNotifications(windowIds)
     }
 
-    fileprivate func handleEventFromCopy(_ eventType: UInt32, data: [UInt8]?) {
-        guard isRegistered else {
-            return
-        }
-        guard let cgsEvent = CGSEventType(rawValue: eventType) else {
-            return
-        }
+    func flushPendingCGSEventsForTests() {
+        drainPendingEventsOnMainRunLoop(ignoreRegistration: true)
+    }
 
-        switch cgsEvent {
-        case .spaceWindowCreated:
-            guard let data, data.count >= 12 else { return }
-            let spaceId = data.withUnsafeBytes { $0.load(as: UInt64.self) }
-            let windowId = data.withUnsafeBytes { $0.load(fromByteOffset: 8, as: UInt32.self) }
-            delegate?.cgsEventObserver(self, didReceive: .created(windowId: windowId, spaceId: spaceId))
+    func enqueueEventForTests(_ event: CGSWindowEvent) {
+        enqueueDecodedCGSEvent(event, requireRegistration: false)
+    }
 
-        case .spaceWindowDestroyed:
-            guard let data, data.count >= 12 else { return }
-            let spaceId = data.withUnsafeBytes { $0.load(as: UInt64.self) }
-            let windowId = data.withUnsafeBytes { $0.load(fromByteOffset: 8, as: UInt32.self) }
-            delegate?.cgsEventObserver(self, didReceive: .destroyed(windowId: windowId, spaceId: spaceId))
-
-        case .windowClosed:
-            guard let data, data.count >= 4 else { return }
-            let windowId = data.withUnsafeBytes { $0.load(as: UInt32.self) }
-            delegate?.cgsEventObserver(self, didReceive: .closed(windowId: windowId))
-
-        case .windowMoved:
-            guard let data, data.count >= 4 else { return }
-            let windowId = data.withUnsafeBytes { $0.load(as: UInt32.self) }
-            delegate?.cgsEventObserver(self, didReceive: .moved(windowId: windowId))
-
-        case .windowResized:
-            guard let data, data.count >= 4 else { return }
-            let windowId = data.withUnsafeBytes { $0.load(as: UInt32.self) }
-            delegate?.cgsEventObserver(self, didReceive: .resized(windowId: windowId))
-
-        case .frontmostApplicationChanged:
-            guard let data, data.count >= 4 else { return }
-            let pid = data.withUnsafeBytes { $0.load(as: Int32.self) }
-            delegate?.cgsEventObserver(self, didReceive: .frontAppChanged(pid: pid))
-
-        case .windowTitleChanged:
-            guard let data, data.count >= 4 else { return }
-            let windowId = data.withUnsafeBytes { $0.load(as: UInt32.self) }
-            delegate?.cgsEventObserver(self, didReceive: .titleChanged(windowId: windowId))
-
-        default:
-            break
+    func ingestRawEventForTests(eventType: UInt32, bytes: [UInt8]) {
+        bytes.withUnsafeBytes { rawBuffer in
+            handleRawCGSEvent(
+                eventType: eventType,
+                data: UnsafeMutableRawPointer(mutating: rawBuffer.baseAddress),
+                length: rawBuffer.count,
+                requireRegistration: false
+            )
         }
     }
+
+    func resetDebugStateForTests() {
+        resetPendingCGSEventState(isRegistered: isRegistered)
+    }
+
+    func cgsDebugSnapshot() -> DebugCounters {
+        cgsPendingEvents.withLock { $0.debugCounters }
+    }
+
+    fileprivate func drainPendingEventsOnMainRunLoop(ignoreRegistration: Bool = false) {
+        precondition(Thread.isMainThread, "CGS drains must run on the main run loop")
+
+        let pendingDrain = cgsPendingEvents.withLock { state -> (events: [CGSWindowEvent], ignoresRegistration: Bool) in
+            let events = state.orderedEvents
+            let ignoresRegistration = state.drainIgnoresRegistration
+            state.orderedEvents.removeAll(keepingCapacity: true)
+            state.pendingFrameWindowIds.removeAll(keepingCapacity: true)
+            state.drainScheduled = false
+            state.drainIgnoresRegistration = false
+            if !events.isEmpty {
+                state.debugCounters.drainRuns += 1
+                state.debugCounters.drainedEvents += events.count
+            }
+            return (events, ignoresRegistration)
+        }
+
+        guard ignoreRegistration || pendingDrain.ignoresRegistration || isRegistered else { return }
+
+        for event in pendingDrain.events {
+            delegate?.cgsEventObserver(self, didReceive: event)
+        }
+    }
+
+    private func updateCallbackRegistrationState(_ isRegistered: Bool) {
+        if isRegistered {
+            cgsPendingEvents.withLock { $0.isRegistered = true }
+        } else {
+            resetPendingCGSEventState(isRegistered: false)
+        }
+    }
+}
+
+private struct PendingCGSEventState {
+    var isRegistered = false
+    var drainScheduled = false
+    var drainIgnoresRegistration = false
+    var orderedEvents: [CGSWindowEvent] = []
+    var pendingFrameWindowIds: Set<UInt32> = []
+    var debugCounters = CGSEventObserver.DebugCounters()
+}
+
+private enum DecodedCGSEvent {
+    case ignored
+    case malformed
+    case event(CGSWindowEvent)
+}
+
+private let cgsPendingEvents = OSAllocatedUnfairLock(initialState: PendingCGSEventState())
+
+private func resetPendingCGSEventState(isRegistered: Bool) {
+    cgsPendingEvents.withLock { state in
+        state.isRegistered = isRegistered
+        state.drainScheduled = false
+        state.drainIgnoresRegistration = false
+        state.orderedEvents.removeAll(keepingCapacity: false)
+        state.pendingFrameWindowIds.removeAll(keepingCapacity: false)
+        state.debugCounters = .init()
+    }
+}
+
+private func schedulePendingCGSEventDrain() {
+    let mainRunLoop = CFRunLoopGetMain()
+    CFRunLoopPerformBlock(mainRunLoop, CFRunLoopMode.commonModes.rawValue) {
+        MainActor.assumeIsolated {
+            CGSEventObserver.shared.drainPendingEventsOnMainRunLoop()
+        }
+    }
+    CFRunLoopWakeUp(mainRunLoop)
+}
+
+private func enqueueDecodedCGSEvent(_ event: CGSWindowEvent, requireRegistration: Bool = true) {
+    let shouldScheduleDrain = cgsPendingEvents.withLock { state -> Bool in
+        guard state.isRegistered || !requireRegistration else { return false }
+
+        state.debugCounters.decodedEvents += 1
+
+        switch event {
+        case let .frameChanged(windowId):
+            if state.pendingFrameWindowIds.insert(windowId).inserted {
+                state.orderedEvents.append(event)
+            } else {
+                state.debugCounters.coalescedFrameEvents += 1
+            }
+
+        case let .destroyed(windowId, _):
+            clearPendingFrameEvent(windowId: windowId, state: &state)
+            state.orderedEvents.append(event)
+
+        case let .closed(windowId):
+            clearPendingFrameEvent(windowId: windowId, state: &state)
+            state.orderedEvents.append(event)
+
+        case .created,
+             .frontAppChanged,
+             .titleChanged:
+            state.orderedEvents.append(event)
+        }
+
+        if !requireRegistration {
+            state.drainIgnoresRegistration = true
+        }
+
+        guard !state.drainScheduled else { return false }
+        state.drainScheduled = true
+        return true
+    }
+
+    if shouldScheduleDrain {
+        schedulePendingCGSEventDrain()
+    }
+}
+
+private func clearPendingFrameEvent(
+    windowId: UInt32,
+    state: inout PendingCGSEventState
+) {
+    guard state.pendingFrameWindowIds.remove(windowId) != nil else { return }
+
+    state.orderedEvents.removeAll { event in
+        if case let .frameChanged(pendingWindowId) = event {
+            return pendingWindowId == windowId
+        }
+        return false
+    }
+    state.debugCounters.clearedFrameEventsOnDestroy += 1
+}
+
+private func handleRawCGSEvent(
+    eventType: UInt32,
+    data: UnsafeMutableRawPointer?,
+    length: Int,
+    requireRegistration: Bool = true
+) {
+    switch decodeCGSEvent(eventType: eventType, data: data, length: length) {
+    case .ignored:
+        return
+    case .malformed:
+        cgsPendingEvents.withLock { state in
+            guard state.isRegistered || !requireRegistration else { return }
+            state.debugCounters.malformedPayloadDrops += 1
+        }
+    case let .event(event):
+        enqueueDecodedCGSEvent(event, requireRegistration: requireRegistration)
+    }
+}
+
+private func decodeCGSEvent(
+    eventType: UInt32,
+    data: UnsafeMutableRawPointer?,
+    length: Int
+) -> DecodedCGSEvent {
+    guard let cgsEvent = CGSEventType(rawValue: eventType) else {
+        return .ignored
+    }
+
+    switch cgsEvent {
+    case .spaceWindowCreated:
+        guard let spaceId = copyUInt64(from: data, length: length, offset: 0),
+              let windowId = copyUInt32(from: data, length: length, offset: 8)
+        else {
+            return .malformed
+        }
+        return .event(.created(windowId: windowId, spaceId: spaceId))
+
+    case .spaceWindowDestroyed:
+        guard let spaceId = copyUInt64(from: data, length: length, offset: 0),
+              let windowId = copyUInt32(from: data, length: length, offset: 8)
+        else {
+            return .malformed
+        }
+        return .event(.destroyed(windowId: windowId, spaceId: spaceId))
+
+    case .windowClosed:
+        guard let windowId = copyUInt32(from: data, length: length, offset: 0) else {
+            return .malformed
+        }
+        return .event(.closed(windowId: windowId))
+
+    case .windowMoved,
+         .windowResized:
+        guard let windowId = copyUInt32(from: data, length: length, offset: 0) else {
+            return .malformed
+        }
+        return .event(.frameChanged(windowId: windowId))
+
+    case .frontmostApplicationChanged:
+        guard let pid = copyInt32(from: data, length: length, offset: 0) else {
+            return .malformed
+        }
+        return .event(.frontAppChanged(pid: pid))
+
+    case .windowTitleChanged:
+        guard let windowId = copyUInt32(from: data, length: length, offset: 0) else {
+            return .malformed
+        }
+        return .event(.titleChanged(windowId: windowId))
+
+    default:
+        return .ignored
+    }
+}
+
+private func copyUInt32(
+    from data: UnsafeMutableRawPointer?,
+    length: Int,
+    offset: Int
+) -> UInt32? {
+    guard let data else { return nil }
+    let valueSize = MemoryLayout<UInt32>.size
+    guard length >= offset + valueSize else { return nil }
+
+    var value: UInt32 = 0
+    withUnsafeMutableBytes(of: &value) { destination in
+        let source = UnsafeRawBufferPointer(
+            start: UnsafeRawPointer(data).advanced(by: offset),
+            count: valueSize
+        )
+        destination.copyBytes(from: source)
+    }
+    return value
+}
+
+private func copyUInt64(
+    from data: UnsafeMutableRawPointer?,
+    length: Int,
+    offset: Int
+) -> UInt64? {
+    guard let data else { return nil }
+    let valueSize = MemoryLayout<UInt64>.size
+    guard length >= offset + valueSize else { return nil }
+
+    var value: UInt64 = 0
+    withUnsafeMutableBytes(of: &value) { destination in
+        let source = UnsafeRawBufferPointer(
+            start: UnsafeRawPointer(data).advanced(by: offset),
+            count: valueSize
+        )
+        destination.copyBytes(from: source)
+    }
+    return value
+}
+
+private func copyInt32(
+    from data: UnsafeMutableRawPointer?,
+    length: Int,
+    offset: Int
+) -> Int32? {
+    guard let data else { return nil }
+    let valueSize = MemoryLayout<Int32>.size
+    guard length >= offset + valueSize else { return nil }
+
+    var value: Int32 = 0
+    withUnsafeMutableBytes(of: &value) { destination in
+        let source = UnsafeRawBufferPointer(
+            start: UnsafeRawPointer(data).advanced(by: offset),
+            count: valueSize
+        )
+        destination.copyBytes(from: source)
+    }
+    return value
 }
 
 private func cgsConnectionCallback(
@@ -167,14 +417,7 @@ private func cgsConnectionCallback(
     context _: UnsafeMutableRawPointer?,
     cid _: Int32
 ) {
-    var dataCopy: [UInt8]?
-    if let data, length > 0 {
-        dataCopy = Array(UnsafeBufferPointer(start: data.assumingMemoryBound(to: UInt8.self), count: length))
-    }
-
-    DispatchQueue.main.async {
-        CGSEventObserver.shared.handleEventFromCopy(event, data: dataCopy)
-    }
+    handleRawCGSEvent(eventType: event, data: data, length: length)
 }
 
 private func notifyCallback(
@@ -183,12 +426,5 @@ private func notifyCallback(
     length: Int,
     cid _: Int32
 ) {
-    var dataCopy: [UInt8]?
-    if let data, length > 0 {
-        dataCopy = Array(UnsafeBufferPointer(start: data.assumingMemoryBound(to: UInt8.self), count: length))
-    }
-
-    DispatchQueue.main.async {
-        CGSEventObserver.shared.handleEventFromCopy(event, data: dataCopy)
-    }
+    handleRawCGSEvent(eventType: event, data: data, length: length)
 }

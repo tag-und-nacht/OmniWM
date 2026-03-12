@@ -2,12 +2,36 @@ import AppKit
 import Foundation
 
 @MainActor
-final class MouseWarpHandler {
+final class MouseWarpHandler: NSObject {
     struct State {
+        struct PendingWarpEvents {
+            var pendingLocation: CGPoint?
+            var drainScheduled = false
+
+            var hasPendingEvents: Bool {
+                pendingLocation != nil
+            }
+
+            mutating func clear() {
+                pendingLocation = nil
+                drainScheduled = false
+            }
+        }
+
+        struct DebugCounters: Equatable {
+            var queuedTransientEvents = 0
+            var coalescedTransientEvents = 0
+            var drainedTransientEvents = 0
+            var drainRuns = 0
+        }
+
         var eventTap: CFMachPort?
         var runLoopSource: CFRunLoopSource?
+        var cooldownTimer: Timer?
         var isWarping = false
         var lastMonitorId: Monitor.ID?
+        var pendingWarpEvents = PendingWarpEvents()
+        var debugCounters = DebugCounters()
     }
 
     nonisolated(unsafe) static weak var _instance: MouseWarpHandler?
@@ -15,9 +39,21 @@ final class MouseWarpHandler {
 
     weak var controller: WMController?
     var state = State()
+    var warpCursor: (CGPoint) -> Void = { CGWarpMouseCursorPosition($0) }
+    var postMouseMovedEvent: (CGPoint) -> Void = { point in
+        if let moveEvent = CGEvent(
+            mouseEventSource: nil,
+            mouseType: .mouseMoved,
+            mouseCursorPosition: point,
+            mouseButton: .left
+        ) {
+            moveEvent.post(tap: .cghidEventTap)
+        }
+    }
 
     init(controller: WMController) {
         self.controller = controller
+        super.init()
     }
 
     func setup() {
@@ -44,9 +80,10 @@ final class MouseWarpHandler {
 
             let location = event.location
             let screenLocation = ScreenCoordinateSpace.toAppKit(point: location)
+            precondition(Thread.isMainThread, "Mouse warp taps are expected on the main run loop")
 
-            Task { @MainActor in
-                MouseWarpHandler._instance?.handleMouseWarpMoved(at: screenLocation)
+            MainActor.assumeIsolated {
+                MouseWarpHandler._instance?.receiveTapMouseWarpMoved(at: screenLocation)
             }
 
             return Unmanaged.passUnretained(event)
@@ -79,9 +116,30 @@ final class MouseWarpHandler {
             CGEvent.tapEnable(tap: tap, enable: false)
             state.eventTap = nil
         }
+        state.cooldownTimer?.invalidate()
+        state.cooldownTimer = nil
         MouseWarpHandler._instance = nil
         state.isWarping = false
         state.lastMonitorId = nil
+        state.pendingWarpEvents.clear()
+        state.debugCounters = .init()
+    }
+
+    func flushPendingWarpEventsForTests() {
+        flushPendingWarpEvents()
+    }
+
+    func mouseWarpDebugSnapshot() -> State.DebugCounters {
+        state.debugCounters
+    }
+
+    func resetDebugStateForTests() {
+        state.debugCounters = .init()
+        state.pendingWarpEvents.clear()
+    }
+
+    func receiveTapMouseWarpMoved(at location: CGPoint) {
+        enqueuePendingWarpMove(at: location)
     }
 
     private func handleMouseWarpMoved(at location: CGPoint) {
@@ -159,11 +217,9 @@ final class MouseWarpHandler {
         state.isWarping = true
         state.lastMonitorId = monitor.id
         let warpPoint = ScreenCoordinateSpace.toWindowServer(point: CGPoint(x: clampedX, y: clampedY))
-        CGWarpMouseCursorPosition(warpPoint)
+        warpCursor(warpPoint)
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.cooldownSeconds) { [weak self] in
-            self?.state.isWarping = false
-        }
+        scheduleWarpCooldownReset()
     }
 
     private func mouseWarpClampCursorToNearestMonitor(location: CGPoint, monitors: [Monitor], margin: CGFloat) {
@@ -190,11 +246,9 @@ final class MouseWarpHandler {
         if clampedY != location.y {
             state.isWarping = true
             let warpPoint = ScreenCoordinateSpace.toWindowServer(point: CGPoint(x: location.x, y: clampedY))
-            CGWarpMouseCursorPosition(warpPoint)
+            warpCursor(warpPoint)
 
-            DispatchQueue.main.asyncAfter(deadline: .now() + Self.cooldownSeconds) { [weak self] in
-                self?.state.isWarping = false
-            }
+            scheduleWarpCooldownReset()
         }
     }
 
@@ -220,13 +274,9 @@ final class MouseWarpHandler {
         state.lastMonitorId = targetMonitor.id
         let warpPoint = ScreenCoordinateSpace.toWindowServer(point: CGPoint(x: x, y: y))
 
-        if let moveEvent = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: warpPoint, mouseButton: .left) {
-            moveEvent.post(tap: .cghidEventTap)
-        }
+        postMouseMovedEvent(warpPoint)
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.cooldownSeconds) { [weak self] in
-            self?.state.isWarping = false
-        }
+        scheduleWarpCooldownReset()
     }
 
     private func mouseWarpCurrentIndex(for currentMonitor: Monitor, in monitorOrder: [String], monitors: [Monitor]) -> Int? {
@@ -260,8 +310,69 @@ final class MouseWarpHandler {
         }
     }
 
+    private func scheduleWarpCooldownReset() {
+        state.cooldownTimer?.invalidate()
+        state.cooldownTimer = Timer(
+            fireAt: Date(timeIntervalSinceNow: MouseWarpHandler.cooldownSeconds),
+            interval: 0,
+            target: self,
+            selector: #selector(handleWarpCooldownTimer(_:)),
+            userInfo: nil,
+            repeats: false
+        )
+
+        if let cooldownTimer = state.cooldownTimer {
+            RunLoop.main.add(cooldownTimer, forMode: .common)
+        }
+    }
+
     private enum Edge {
         case left
         case right
+    }
+
+    @objc private func handleWarpCooldownTimer(_ timer: Timer) {
+        timer.invalidate()
+        if state.cooldownTimer === timer {
+            state.cooldownTimer = nil
+        }
+        state.isWarping = false
+    }
+
+    private func schedulePendingWarpDrainIfNeeded() {
+        guard !state.pendingWarpEvents.drainScheduled else { return }
+        state.pendingWarpEvents.drainScheduled = true
+
+        let mainRunLoop = CFRunLoopGetMain()
+        CFRunLoopPerformBlock(mainRunLoop, CFRunLoopMode.commonModes.rawValue) { [weak self] in
+            guard let self else { return }
+            MainActor.assumeIsolated {
+                self.flushPendingWarpEvents()
+            }
+        }
+        CFRunLoopWakeUp(mainRunLoop)
+    }
+
+    private func enqueuePendingWarpMove(at location: CGPoint) {
+        state.debugCounters.queuedTransientEvents += 1
+        let didCoalesce = state.pendingWarpEvents.pendingLocation != nil
+        state.pendingWarpEvents.pendingLocation = location
+        if didCoalesce {
+            state.debugCounters.coalescedTransientEvents += 1
+        }
+        schedulePendingWarpDrainIfNeeded()
+    }
+
+    private func flushPendingWarpEvents() {
+        guard state.pendingWarpEvents.hasPendingEvents,
+              let pendingLocation = state.pendingWarpEvents.pendingLocation else {
+            state.pendingWarpEvents.clear()
+            return
+        }
+
+        state.pendingWarpEvents.clear()
+        state.debugCounters.drainRuns += 1
+        state.debugCounters.drainedTransientEvents += 1
+        handleMouseWarpMoved(at: pendingLocation)
     }
 }

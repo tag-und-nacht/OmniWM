@@ -124,11 +124,11 @@ private func lastAppliedBorderWindowId(on controller: WMController) -> Int? {
 
         controller.axEventHandler.cgsEventObserver(
             CGSEventObserver.shared,
-            didReceive: .moved(windowId: 812)
+            didReceive: .frameChanged(windowId: 812)
         )
         controller.axEventHandler.cgsEventObserver(
             CGSEventObserver.shared,
-            didReceive: .resized(windowId: 811)
+            didReceive: .frameChanged(windowId: 811)
         )
         await controller.layoutRefreshController.waitForRefreshWorkForTests()
 
@@ -167,15 +167,107 @@ private func lastAppliedBorderWindowId(on controller: WMController) -> Int? {
 
         controller.axEventHandler.cgsEventObserver(
             CGSEventObserver.shared,
-            didReceive: .moved(windowId: 813)
+            didReceive: .frameChanged(windowId: 813)
         )
         controller.axEventHandler.cgsEventObserver(
             CGSEventObserver.shared,
-            didReceive: .resized(windowId: 813)
+            didReceive: .frameChanged(windowId: 813)
         )
         await controller.layoutRefreshController.waitForRefreshWorkForTests()
 
         #expect(relayoutReasons.isEmpty)
+    }
+
+    @Test @MainActor func frameChangedBurstCoalescesToSingleRelayout() async {
+        let controller = makeAXEventTestController()
+        guard let workspaceId = controller.activeWorkspace()?.id else {
+            Issue.record("Missing active workspace")
+            return
+        }
+
+        _ = controller.workspaceManager.addWindow(
+            AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: 814),
+            pid: getpid(),
+            windowId: 814,
+            to: workspaceId
+        )
+
+        let observer = CGSEventObserver.shared
+        observer.resetDebugStateForTests()
+        observer.delegate = controller.axEventHandler
+        defer {
+            observer.delegate = nil
+            observer.resetDebugStateForTests()
+        }
+
+        var relayoutReasons: [RefreshReason] = []
+        controller.layoutRefreshController.resetDebugState()
+        controller.layoutRefreshController.debugHooks.onRelayout = { reason, _ in
+            relayoutReasons.append(reason)
+            return true
+        }
+
+        observer.enqueueEventForTests(.frameChanged(windowId: 814))
+        observer.enqueueEventForTests(.frameChanged(windowId: 814))
+        observer.flushPendingCGSEventsForTests()
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+
+        #expect(relayoutReasons == [.axWindowChanged])
+        #expect(controller.axEventHandler.debugCounters.geometryRelayoutRequests == 1)
+    }
+
+    @Test @MainActor func interactiveGestureSuppresssFrameChangedRelayoutButKeepsBorderPath() async {
+        let controller = makeAXEventTestController()
+        guard let workspaceId = controller.activeWorkspace()?.id else {
+            Issue.record("Missing active workspace")
+            return
+        }
+
+        let handle = controller.workspaceManager.addWindow(
+            AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: 815),
+            pid: getpid(),
+            windowId: 815,
+            to: workspaceId
+        )
+        _ = controller.workspaceManager.setManagedFocus(
+            handle,
+            in: workspaceId,
+            onMonitor: controller.workspaceManager.monitorId(for: workspaceId)
+        )
+
+        controller.axEventHandler.frameProvider = { _ in
+            CGRect(x: 20, y: 20, width: 640, height: 480)
+        }
+        controller.setBordersEnabled(true)
+        controller.mouseEventHandler.state.isResizing = true
+        controller.axEventHandler.resetDebugStateForTests()
+
+        let observer = CGSEventObserver.shared
+        observer.resetDebugStateForTests()
+        observer.delegate = controller.axEventHandler
+        defer {
+            observer.delegate = nil
+            observer.resetDebugStateForTests()
+            controller.mouseEventHandler.state.isResizing = false
+            controller.axEventHandler.frameProvider = nil
+        }
+
+        var relayoutReasons: [RefreshReason] = []
+        controller.layoutRefreshController.resetDebugState()
+        controller.layoutRefreshController.debugHooks.onRelayout = { reason, _ in
+            relayoutReasons.append(reason)
+            return true
+        }
+
+        observer.enqueueEventForTests(.frameChanged(windowId: 815))
+        observer.enqueueEventForTests(.frameChanged(windowId: 815))
+        observer.flushPendingCGSEventsForTests()
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+
+        #expect(relayoutReasons.isEmpty)
+        #expect(controller.axEventHandler.debugCounters.geometryRelayoutRequests == 0)
+        #expect(controller.axEventHandler.debugCounters.geometryRelayoutsSuppressedDuringGesture == 1)
+        #expect(lastAppliedBorderWindowId(on: controller) == 815)
     }
 
     @Test @MainActor func deferredCreatedWindowsReplayExactlyOnceWhenDiscoveryEnds() async {

@@ -42,8 +42,10 @@ private func makeMouseEventTestController() -> WMController {
 private func prepareMouseResizeFixture() async -> (
     controller: WMController,
     handler: MouseEventHandler,
+    handle: WindowHandle,
     workspaceId: WorkspaceDescriptor.ID,
     nodeId: NodeId,
+    nodeFrame: CGRect,
     location: CGPoint
 ) {
     let controller = makeMouseEventTestController()
@@ -75,7 +77,11 @@ private func prepareMouseResizeFixture() async -> (
         focusedHandle: handle
     )
 
+    controller.layoutRefreshController.requestImmediateRelayout(reason: .workspaceTransition)
+    await controller.layoutRefreshController.waitForRefreshWorkForTests()
+
     guard let node = engine.findNode(for: handle),
+          let nodeFrame = node.frame,
           let monitor = controller.workspaceManager.monitor(for: workspaceId)
     else {
         fatalError("Failed to prepare interactive resize fixture")
@@ -86,7 +92,7 @@ private func prepareMouseResizeFixture() async -> (
     }
 
     let location = CGPoint(x: monitor.visibleFrame.midX, y: monitor.visibleFrame.midY)
-    return (controller, controller.mouseEventHandler, workspaceId, node.id, location)
+    return (controller, controller.mouseEventHandler, handle, workspaceId, node.id, nodeFrame, location)
 }
 
 @Suite struct MouseEventHandlerTests {
@@ -163,5 +169,108 @@ private func prepareMouseResizeFixture() async -> (
         #expect(relayoutEvents.map(\.0) == [.interactiveGesture])
         #expect(relayoutEvents.map(\.1) == [.immediateRelayout])
         #expect(fixture.handler.state.isResizing == false)
+    }
+
+    @Test @MainActor func queuedMouseMovesCollapseToLatestLocation() async {
+        let fixture = await prepareMouseResizeFixture()
+
+        let center = CGPoint(x: fixture.nodeFrame.midX, y: fixture.nodeFrame.midY)
+        let rightEdge = CGPoint(x: fixture.nodeFrame.maxX - 1, y: fixture.nodeFrame.midY)
+
+        fixture.handler.resetDebugStateForTests()
+        fixture.handler.receiveTapMouseMoved(at: center)
+        fixture.handler.receiveTapMouseMoved(at: rightEdge)
+        fixture.handler.flushPendingTapEventsForTests()
+
+        let debugSnapshot = fixture.handler.mouseTapDebugSnapshot()
+        #expect(debugSnapshot.queuedTransientEvents == 2)
+        #expect(debugSnapshot.coalescedTransientEvents == 1)
+        #expect(debugSnapshot.drainedTransientEvents == 1)
+        #expect(fixture.handler.state.currentHoveredEdges == [.right])
+    }
+
+    @Test @MainActor func queuedResizeDragFlushesBeforeMouseUpUsingLatestLocation() async {
+        let fixture = await prepareMouseResizeFixture()
+        guard let engine = fixture.controller.niriEngine,
+              let resizeWindow = engine.findNode(for: fixture.handle),
+              let column = engine.findColumn(containing: resizeWindow, in: fixture.workspaceId),
+              let monitor = fixture.controller.workspaceManager.monitor(for: fixture.workspaceId)
+        else {
+            Issue.record("Missing Niri resize state")
+            return
+        }
+
+        let originalWidth = column.cachedWidth
+        let insetFrame = fixture.controller.insetWorkingFrame(for: monitor)
+        let maxWidth = insetFrame.width - CGFloat(fixture.controller.workspaceManager.gaps)
+        let expectedWidth = min(originalWidth + 24, maxWidth)
+
+        #expect(engine.interactiveResizeBegin(
+            windowId: fixture.nodeId,
+            edges: [.right],
+            startLocation: fixture.location,
+            in: fixture.workspaceId
+        ))
+
+        fixture.handler.state.isResizing = true
+        fixture.handler.resetDebugStateForTests()
+
+        fixture.handler.receiveTapMouseDragged(
+            at: CGPoint(x: fixture.location.x + 8, y: fixture.location.y)
+        )
+        fixture.handler.receiveTapMouseDragged(
+            at: CGPoint(x: fixture.location.x + 24, y: fixture.location.y)
+        )
+        fixture.handler.pressedMouseButtonsProvider = { 0 }
+        fixture.handler.receiveTapMouseUp(
+            at: CGPoint(x: fixture.location.x + 24, y: fixture.location.y)
+        )
+        await fixture.controller.layoutRefreshController.waitForRefreshWorkForTests()
+
+        let debugSnapshot = fixture.handler.mouseTapDebugSnapshot()
+        #expect(debugSnapshot.queuedTransientEvents == 2)
+        #expect(debugSnapshot.coalescedTransientEvents == 1)
+        #expect(debugSnapshot.drainedTransientEvents == 1)
+        #expect(debugSnapshot.flushedBeforeImmediateDispatch == 1)
+        #expect(abs(column.cachedWidth - expectedWidth) < 0.001)
+        #expect(fixture.handler.state.isResizing == false)
+    }
+
+    @Test @MainActor func scrollBurstOnlyMergesWithinMatchingModifierAndPhaseGroups() {
+        let controller = makeMouseEventTestController()
+        let handler = controller.mouseEventHandler
+
+        handler.resetDebugStateForTests()
+        handler.receiveTapScrollWheel(
+            at: CGPoint(x: 10, y: 10),
+            deltaX: 0,
+            deltaY: 4,
+            momentumPhase: 0,
+            phase: 0,
+            modifiers: [.maskAlternate]
+        )
+        handler.receiveTapScrollWheel(
+            at: CGPoint(x: 10, y: 10),
+            deltaX: 0,
+            deltaY: 6,
+            momentumPhase: 0,
+            phase: 0,
+            modifiers: [.maskAlternate]
+        )
+        handler.receiveTapScrollWheel(
+            at: CGPoint(x: 10, y: 10),
+            deltaX: 0,
+            deltaY: 8,
+            momentumPhase: 1,
+            phase: 0,
+            modifiers: [.maskAlternate]
+        )
+        handler.flushPendingTapEventsForTests()
+
+        let debugSnapshot = handler.mouseTapDebugSnapshot()
+        #expect(debugSnapshot.queuedTransientEvents == 3)
+        #expect(debugSnapshot.coalescedTransientEvents == 1)
+        #expect(debugSnapshot.drainRuns == 2)
+        #expect(debugSnapshot.drainedTransientEvents == 2)
     }
 }
