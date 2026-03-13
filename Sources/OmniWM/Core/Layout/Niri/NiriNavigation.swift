@@ -170,7 +170,8 @@ extension NiriLayoutEngine {
         alwaysCenterSingleColumn: Bool,
         orientation: Monitor.Orientation = .horizontal,
         animationConfig: SpringConfig? = nil,
-        fromContainerIndex: Int? = nil
+        fromContainerIndex: Int? = nil,
+        previousActiveContainerPosition: CGFloat? = nil
     ) {
         let containers = columns(in: workspaceId)
         guard !containers.isEmpty else { return }
@@ -194,7 +195,13 @@ extension NiriLayoutEngine {
             viewportSpan = workingFrame.height
         }
 
-        let oldActivePos = state.containerPosition(at: state.activeColumnIndex, containers: containers, gap: gaps, sizeKeyPath: sizeKeyPath)
+        let oldActivePos = previousActiveContainerPosition
+            ?? state.containerPosition(
+                at: state.activeColumnIndex,
+                containers: containers,
+                gap: gaps,
+                sizeKeyPath: sizeKeyPath
+            )
         let newActivePos = state.containerPosition(at: targetIdx, containers: containers, gap: gaps, sizeKeyPath: sizeKeyPath)
         state.viewOffsetPixels.offset(delta: Double(oldActivePos - newActivePos))
 

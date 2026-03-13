@@ -2,6 +2,13 @@ import AppKit
 import Foundation
 
 extension NiriLayoutEngine {
+    private struct ColumnTransferResult {
+        let insertedTileIndex: Int
+        let sourceBecameEmpty: Bool
+        let sourceColumnIndexBeforeCleanup: Int
+        let targetColumnIndexAfterInsert: Int
+    }
+
     private enum TargetColumnInsertionPolicy {
         case append
         case visualBottom
@@ -27,10 +34,10 @@ extension NiriLayoutEngine {
         from sourceColumn: NiriContainer,
         to targetColumn: NiriContainer,
         in workspaceId: WorkspaceDescriptor.ID,
-        state: inout ViewportState,
         targetInsertionPolicy: TargetColumnInsertionPolicy = .append,
         activateInsertedWindowInTabbedTarget: Bool = false
-    ) -> Int {
+    ) -> ColumnTransferResult {
+        let sourceColumnIndexBeforeCleanup = columnIndex(of: sourceColumn, in: workspaceId) ?? 0
         let sourceWasTabbed = sourceColumn.displayMode == .tabbed
         sourceColumn.adjustActiveTileIdxForRemoval(of: node)
 
@@ -54,8 +61,12 @@ extension NiriLayoutEngine {
             node.isHiddenInTabbedMode = false
         }
 
-        cleanupEmptyColumn(sourceColumn, in: workspaceId, state: &state)
-        return insertedIndex
+        return ColumnTransferResult(
+            insertedTileIndex: insertedIndex,
+            sourceBecameEmpty: sourceColumn.children.isEmpty,
+            sourceColumnIndexBeforeCleanup: sourceColumnIndexBeforeCleanup,
+            targetColumnIndexAfterInsert: columnIndex(of: targetColumn, in: workspaceId) ?? sourceColumnIndexBeforeCleanup
+        )
     }
 
     func createColumnAndMove(
@@ -354,28 +365,47 @@ extension NiriLayoutEngine {
         guard neighborColumn.children.count < maxWindowsPerColumn else { return false }
 
         let now = animationClock?.now() ?? CACurrentMediaTime()
+        let previousActiveColumnIndex = state.activeColumnIndex
+        let previousActiveColumnPosition = state.columnX(
+            at: previousActiveColumnIndex,
+            columns: cols,
+            gap: gaps
+        )
         let sourceTileIdx = currentColumn.windowNodes.firstIndex(where: { $0 === window }) ?? 0
         let sourceColX = state.columnX(at: currentIdx, columns: cols, gap: gaps)
         let sourceColRenderOffset = currentColumn.renderOffset(at: now)
         let sourceTileOffset = computeTileOffset(column: currentColumn, tileIdx: sourceTileIdx, gaps: gaps)
 
-        let targetTileIdx = moveWindowToColumn(
+        let transfer = moveWindowToColumn(
             window,
             from: currentColumn,
             to: neighborColumn,
             in: workspaceId,
-            state: &state,
             targetInsertionPolicy: .visualBottom,
             activateInsertedWindowInTabbedTarget: neighborColumn.displayMode == .tabbed
         )
 
         state.selectedNodeId = window.id
 
+        if transfer.sourceBecameEmpty {
+            _ = animateColumnsForRemoval(
+                columnIndex: transfer.sourceColumnIndexBeforeCleanup,
+                in: workspaceId,
+                state: &state,
+                gaps: gaps
+            )
+            cleanupEmptyColumn(currentColumn, in: workspaceId, state: &state)
+        }
+
         let newCols = columns(in: workspaceId)
-        let targetColIdx = columnIndex(of: neighborColumn, in: workspaceId) ?? neighborIdx
+        let targetColIdx = columnIndex(of: neighborColumn, in: workspaceId) ?? transfer.targetColumnIndexAfterInsert
         let targetColX = state.columnX(at: targetColIdx, columns: newCols, gap: gaps)
-        let targetColRenderOffset = neighborColumn.renderOffset(at: now)
-        let targetTileOffset = computeTileOffset(column: neighborColumn, tileIdx: targetTileIdx, gaps: gaps)
+        let targetColRenderOffset = neighborColumn.renderOffset()
+        let targetTileOffset = computeTileOffset(
+            column: neighborColumn,
+            tileIdx: transfer.insertedTileIndex,
+            gaps: gaps
+        )
 
         let displacement = CGPoint(
             x: sourceColX + sourceColRenderOffset.x - (targetColX + targetColRenderOffset.x),
@@ -396,7 +426,9 @@ extension NiriLayoutEngine {
             state: &state,
             workingFrame: workingFrame,
             gaps: gaps,
-            alwaysCenterSingleColumn: alwaysCenterSingleColumn
+            alwaysCenterSingleColumn: alwaysCenterSingleColumn,
+            fromContainerIndex: previousActiveColumnIndex,
+            previousActiveContainerPosition: previousActiveColumnPosition
         )
 
         return true

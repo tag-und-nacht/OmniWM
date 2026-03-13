@@ -199,6 +199,16 @@ private func hasAnyVisibilityChange(
         }
     }
 
+    private func assignWidths(
+        _ columns: [NiriContainer],
+        widths: [CGFloat]
+    ) {
+        for (column, width) in zip(columns, widths) {
+            column.width = .fixed(width)
+            column.cachedWidth = width
+        }
+    }
+
     @Test func selectionFallbackAfterRemoval_sameSibling() {
         let engine = NiriLayoutEngine(maxWindowsPerColumn: 3)
         let wsId = UUID()
@@ -523,7 +533,121 @@ private func hasAnyVisibilityChange(
         let columns = engine.columns(in: wsId)
         #expect(moved)
         #expect(columns.count == 1)
+        #expect(columns[0] === rightColumn)
         #expect(columns[0].windowNodes.map(\.token) == [leftHandle.id, rightHandle.id])
+        #expect(columns[0].hasMoveAnimationRunning)
+
+        let windowOffset = leftWindow.moveXAnimation?.fromOffset
+        #expect(windowOffset != nil)
+        #expect(windowOffset! < -300)
+
+        let columnOffset = rightColumn.moveAnimation?.fromOffset
+        #expect(columnOffset != nil)
+        #expect(columnOffset! > 300)
+    }
+
+    @Test func moveWindowHorizontalLeftConsumesSingleWindowColumnIntoNeighbor() {
+        let engine = NiriLayoutEngine(maxWindowsPerColumn: 3)
+        let wsId = UUID()
+
+        let root = NiriRoot(workspaceId: wsId)
+        engine.roots[wsId] = root
+
+        let leftColumn = NiriContainer()
+        let rightColumn = NiriContainer()
+        root.appendChild(leftColumn)
+        root.appendChild(rightColumn)
+        assignFixedWidths(root.columns)
+
+        let leftHandle = makeTestHandle(pid: 83)
+        let rightHandle = makeTestHandle(pid: 84)
+        let leftWindow = NiriWindow(token: leftHandle.id)
+        let rightWindow = NiriWindow(token: rightHandle.id)
+
+        leftColumn.appendChild(leftWindow)
+        rightColumn.appendChild(rightWindow)
+
+        engine.tokenToNode[leftHandle.id] = leftWindow
+        engine.tokenToNode[rightHandle.id] = rightWindow
+
+        var state = ViewportState()
+        state.activeColumnIndex = 1
+
+        let moved = engine.moveWindow(
+            rightWindow,
+            direction: .left,
+            in: wsId,
+            state: &state,
+            workingFrame: CGRect(x: 0, y: 0, width: 1200, height: 900),
+            gaps: 8
+        )
+
+        let columns = engine.columns(in: wsId)
+        #expect(moved)
+        #expect(columns.count == 1)
+        #expect(columns[0] === leftColumn)
+        #expect(columns[0].windowNodes.map(\.token) == [rightHandle.id, leftHandle.id])
+        #expect(!columns[0].hasMoveAnimationRunning)
+
+        let windowOffset = rightWindow.moveXAnimation?.fromOffset
+        #expect(windowOffset != nil)
+        #expect(windowOffset! > 300)
+    }
+
+    @Test func ensureSelectionVisibleUsesExplicitPreviousActivePositionAfterColumnRemoval() {
+        let engine = NiriLayoutEngine(maxWindowsPerColumn: 1)
+        engine.centerFocusedColumn = .never
+        engine.alwaysCenterSingleColumn = false
+        let wsId = UUID()
+
+        let root = NiriRoot(workspaceId: wsId)
+        engine.roots[wsId] = root
+
+        let leftColumn = NiriContainer()
+        let rightColumn = NiriContainer()
+        root.appendChild(leftColumn)
+        root.appendChild(rightColumn)
+        assignWidths(root.columns, widths: [300, 500])
+
+        let leftHandle = makeTestHandle(pid: 85)
+        let rightHandle = makeTestHandle(pid: 86)
+        let leftWindow = NiriWindow(token: leftHandle.id)
+        let rightWindow = NiriWindow(token: rightHandle.id)
+
+        leftColumn.appendChild(leftWindow)
+        rightColumn.appendChild(rightWindow)
+
+        engine.tokenToNode[leftHandle.id] = leftWindow
+        engine.tokenToNode[rightHandle.id] = rightWindow
+
+        var state = ViewportState()
+        state.activeColumnIndex = 1
+        state.viewOffsetPixels = .static(0)
+
+        let previousActivePosition = state.columnX(
+            at: state.activeColumnIndex,
+            columns: engine.columns(in: wsId),
+            gap: 8
+        )
+
+        leftColumn.remove()
+
+        engine.ensureSelectionVisible(
+            node: rightWindow,
+            in: wsId,
+            state: &state,
+            workingFrame: CGRect(x: 0, y: 0, width: 700, height: 900),
+            gaps: 8,
+            alwaysCenterSingleColumn: false,
+            fromContainerIndex: 1,
+            previousActiveContainerPosition: previousActivePosition
+        )
+
+        if case let .spring(animation) = state.viewOffsetPixels {
+            #expect(abs(animation.from - Double(previousActivePosition)) < 0.1)
+        } else {
+            #expect(Bool(false))
+        }
     }
 
     @Test func moveWindowHorizontalLeftNoOpsAtEdgeWithoutInfiniteLoop() {
