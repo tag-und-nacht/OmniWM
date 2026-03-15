@@ -2,6 +2,10 @@
 
 A powerful tiling window manager for macOS.
 
+## Demo Video
+
+[![Watch the demo](https://img.youtube.com/vi/WcHjGkuD2Fc/maxresdefault.jpg)](https://youtu.be/WcHjGkuD2Fc)
+
 ## Contributors
 
 <p align="center">
