@@ -317,18 +317,18 @@ final class OverviewController {
     }
 
     private func captureThumbnails() async {
-        let windowIds = overviewSnapshot.windowIds
+        let requests = thumbnailCaptureRequests()
 
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
             let windowMap = Dictionary(uniqueKeysWithValues: content.windows.map { ($0.windowID, $0) })
 
-            for windowId in windowIds {
+            for request in requests {
                 guard !Task.isCancelled else { return }
-                guard let scWindow = windowMap[CGWindowID(windowId)] else { continue }
+                guard let scWindow = windowMap[CGWindowID(request.windowId)] else { continue }
 
-                if let thumbnail = await captureWindowThumbnail(scWindow: scWindow) {
-                    thumbnailCache[windowId] = thumbnail
+                if let thumbnail = await captureWindowThumbnail(scWindow: scWindow, request: request) {
+                    thumbnailCache[request.windowId] = thumbnail
                     updateWindowDisplays()
                 }
             }
@@ -337,21 +337,46 @@ final class OverviewController {
         }
     }
 
-    private func captureWindowThumbnail(scWindow: SCWindow) async -> CGImage? {
+    private func thumbnailCaptureRequests() -> [OverviewThumbnailCaptureRequest] {
+        guard let wmController else { return [] }
+
+        let scaleByMonitorId = wmController.workspaceManager.monitors.reduce(into: [Monitor.ID: CGFloat]()) { scales, monitor in
+            scales[monitor.id] = monitorBackingScaleFactor(for: monitor.displayId)
+        }
+
+        var projections: [OverviewThumbnailProjection] = []
+        projections.reserveCapacity(layoutsByMonitor.values.reduce(0) { partialResult, layout in
+            partialResult + layout.allWindows.count
+        })
+
+        for (monitorId, layout) in layoutsByMonitor {
+            let scaleFactor = scaleByMonitorId[monitorId] ?? 1.0
+            for window in layout.allWindows {
+                projections.append(
+                    OverviewThumbnailProjection(
+                        windowId: window.windowId,
+                        overviewFrame: window.overviewFrame,
+                        backingScaleFactor: scaleFactor
+                    )
+                )
+            }
+        }
+
+        return OverviewThumbnailSizing.captureRequests(
+            windowIds: overviewSnapshot.windowIds,
+            projections: projections
+        )
+    }
+
+    private func captureWindowThumbnail(
+        scWindow: SCWindow,
+        request: OverviewThumbnailCaptureRequest
+    ) async -> CGImage? {
         let filter = SCContentFilter(desktopIndependentWindow: scWindow)
         let config = SCStreamConfiguration()
 
-        let scaleFactor = screenScaleFactor(for: scWindow.frame)
-        let maxDimension = max(scWindow.frame.width, scWindow.frame.height) * scaleFactor
-        let aspectRatio = scWindow.frame.width / max(1, scWindow.frame.height)
-        if aspectRatio > 1 {
-            config.width = Int(maxDimension)
-            config.height = Int(maxDimension / aspectRatio)
-        } else {
-            config.width = Int(maxDimension * aspectRatio)
-            config.height = Int(maxDimension)
-        }
-
+        config.width = request.pixelWidth
+        config.height = request.pixelHeight
         config.showsCursor = false
         config.capturesAudio = false
         config.scalesToFit = true
@@ -367,11 +392,8 @@ final class OverviewController {
         }
     }
 
-    private func screenScaleFactor(for windowFrame: CGRect) -> CGFloat {
-        let screen = NSScreen.screens.first(where: { $0.frame.intersects(windowFrame) })
-            ?? NSScreen.main
-            ?? NSScreen.screens.first
-        return screen?.backingScaleFactor ?? 2.0
+    private func monitorBackingScaleFactor(for displayId: CGDirectDisplayID) -> CGFloat {
+        NSScreen.screens.first(where: { $0.displayId == displayId })?.backingScaleFactor ?? 1.0
     }
 
     func updateAnimationProgress(_ progress: Double, state: OverviewState) {
