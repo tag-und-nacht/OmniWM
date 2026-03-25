@@ -4761,7 +4761,7 @@ private func makeCenteredCrossMonitorFixture(
             useScrollAnimationPath: true,
             removalSeeds: [
                 workspaceId: NiriWindowRemovalSeed(
-                    removedNodeId: removedNodeId,
+                    removedNodeIds: [removedNodeId],
                     oldFrames: oldFrames
                 )
             ]
@@ -4816,6 +4816,46 @@ private func makeCenteredCrossMonitorFixture(
         controller.layoutRefreshController.executeLayoutPlans(plans)
 
         #expect(lastAppliedBorderWindowIdForLayoutPlanTests(on: controller) == 601)
+    }
+
+    @Test @MainActor func directBorderUpdateUsesConfirmedFocusInsteadOfRememberedFocus() async throws {
+        let controller = makeLayoutPlanTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing monitor or active workspace for direct border focus-source regression test")
+            return
+        }
+
+        controller.setBordersEnabled(true)
+        controller.enableNiriLayout(maxWindowsPerColumn: 1)
+        await waitForLayoutPlanRefreshWork(on: controller)
+
+        let focusedToken = addLayoutPlanTestWindow(
+            on: controller,
+            workspaceId: workspaceId,
+            windowId: 609,
+            pid: 8_101
+        )
+        let rememberedToken = addLayoutPlanTestWindow(
+            on: controller,
+            workspaceId: workspaceId,
+            windowId: 610,
+            pid: 8_102
+        )
+        _ = controller.workspaceManager.setManagedFocus(focusedToken, in: workspaceId, onMonitor: monitor.id)
+        _ = controller.workspaceManager.applySessionPatch(
+            .init(workspaceId: workspaceId, rememberedFocusToken: rememberedToken)
+        )
+
+        let plans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
+            activeWorkspaces: [workspaceId],
+            useScrollAnimationPath: true
+        )
+        controller.layoutRefreshController.executeLayoutPlans(plans)
+
+        #expect(controller.workspaceManager.focusedToken == focusedToken)
+        #expect(lastAppliedBorderWindowIdForLayoutPlanTests(on: controller) == 609)
     }
 
     @Test @MainActor func focusNeighborUsesObservedGhosttyFrameForDirectBorderUpdatesFromEitherSide() async throws {

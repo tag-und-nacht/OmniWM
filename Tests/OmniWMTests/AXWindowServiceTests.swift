@@ -5,7 +5,7 @@ import Testing
 @testable import OmniWM
 
 @Suite struct AXWindowServiceTests {
-    @Test func attributeFetchFailureProducesManagedDispositionAndFailureReason() {
+    @Test func attributeFetchFailureProducesUndecidedDispositionAndFailureReason() {
         let decision = AXWindowService.heuristicDisposition(
             for: AXWindowFacts(
                 role: nil,
@@ -22,11 +22,11 @@ import Testing
             )
         )
 
-        #expect(decision.disposition == .managed)
+        #expect(decision.disposition == .undecided)
         #expect(decision.reasons == [AXWindowHeuristicReason.attributeFetchFailed])
     }
 
-    @Test func missingFullscreenButtonProducesWeakManagedHint() {
+    @Test func missingFullscreenButtonProducesFloatingDisposition() {
         let decision = AXWindowService.heuristicDisposition(
             for: AXWindowFacts(
                 role: kAXWindowRole as String,
@@ -43,7 +43,7 @@ import Testing
             )
         )
 
-        #expect(decision.disposition == .managed)
+        #expect(decision.disposition == .floating)
         #expect(decision.reasons == [AXWindowHeuristicReason.missingFullscreenButton])
     }
 
@@ -90,7 +90,7 @@ import Testing
         #expect(decision.reasons.isEmpty)
     }
 
-    @Test func fixedSizeStandardWindowDefaultsToFloating() {
+    @Test func fixedSizeStandardWindowNoLongerForcesFloating() {
         let decision = AXWindowService.heuristicDisposition(
             for: AXWindowFacts(
                 role: kAXWindowRole as String,
@@ -108,11 +108,11 @@ import Testing
             sizeConstraints: .fixed(size: CGSize(width: 440, height: 320))
         )
 
-        #expect(decision.disposition == .floating)
-        #expect(decision.reasons == [.fixedSizeWindow])
+        #expect(decision.disposition == .managed)
+        #expect(decision.reasons.isEmpty)
     }
 
-    @Test func trustedFloatingSubroleDefaultsToFloating() {
+    @Test func nonStandardSubroleDefaultsToFloating() {
         let decision = AXWindowService.heuristicDisposition(
             for: AXWindowFacts(
                 role: kAXWindowRole as String,
@@ -130,16 +130,16 @@ import Testing
         )
 
         #expect(decision.disposition == .floating)
-        #expect(decision.reasons == [.trustedFloatingSubrole])
+        #expect(decision.reasons == [.nonStandardSubrole])
     }
 
-    @Test func untrustedNonStandardSubroleDefaultsToUnmanaged() {
+    @Test func noButtonsOnNonStandardSubroleDefaultsToFloating() {
         let decision = AXWindowService.heuristicDisposition(
             for: AXWindowFacts(
                 role: kAXWindowRole as String,
                 subrole: "AXWeirdPopover",
                 title: "Transient",
-                hasCloseButton: true,
+                hasCloseButton: false,
                 hasFullscreenButton: false,
                 fullscreenButtonEnabled: nil,
                 hasZoomButton: false,
@@ -150,8 +150,8 @@ import Testing
             )
         )
 
-        #expect(decision.disposition == .unmanaged)
-        #expect(decision.reasons == [.nonStandardSubrole])
+        #expect(decision.disposition == .floating)
+        #expect(decision.reasons == [.noButtonsOnNonStandardSubrole])
     }
 
     @Test func fullscreenEntryFromRightColumnUsesPositionThenSize() {

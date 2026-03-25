@@ -11,37 +11,47 @@ final class AXEventHandler: CGSEventDelegate {
     private struct PreparedCreate {
         let windowId: UInt32
         let token: WindowToken
-        let bundleId: String?
         let axRef: AXWindowRef
-        let workspaceId: WorkspaceDescriptor.ID
-        let mode: TrackedWindowMode
         let ruleEffects: ManagedWindowRuleEffects
+        let replacementMetadata: ManagedReplacementMetadata
+
+        var bundleId: String? { replacementMetadata.bundleId }
+        var workspaceId: WorkspaceDescriptor.ID { replacementMetadata.workspaceId }
+        var mode: TrackedWindowMode { replacementMetadata.mode }
     }
 
     private struct PreparedDestroy {
         let token: WindowToken
-        let bundleId: String?
-        let workspaceId: WorkspaceDescriptor.ID
+        let replacementMetadata: ManagedReplacementMetadata
+
+        var bundleId: String? { replacementMetadata.bundleId }
+        var workspaceId: WorkspaceDescriptor.ID { replacementMetadata.workspaceId }
+        var mode: TrackedWindowMode { replacementMetadata.mode }
     }
 
-    private struct GhosttyReplacementKey: Hashable {
+    private struct ManagedReplacementKey: Hashable {
         let pid: pid_t
         let workspaceId: WorkspaceDescriptor.ID
     }
 
-    private struct PendingGhosttyCreate {
+    private enum ManagedReplacementCorrelationPolicy {
+        case ghostty
+        case strictMetadata
+    }
+
+    private struct PendingManagedCreate {
         let sequence: UInt64
         let candidate: PreparedCreate
     }
 
-    private struct PendingGhosttyDestroy {
+    private struct PendingManagedDestroy {
         let sequence: UInt64
         let candidate: PreparedDestroy
     }
 
-    private enum PendingGhosttyEvent {
-        case create(PendingGhosttyCreate)
-        case destroy(PendingGhosttyDestroy)
+    private enum PendingManagedReplacementEvent {
+        case create(PendingManagedCreate)
+        case destroy(PendingManagedDestroy)
 
         var sequence: UInt64 {
             switch self {
@@ -51,43 +61,67 @@ final class AXEventHandler: CGSEventDelegate {
         }
     }
 
-    private struct PendingGhosttyReplacementBurst {
-        var creates: [PendingGhosttyCreate] = []
-        var destroys: [PendingGhosttyDestroy] = []
+    private struct PendingManagedReplacementBurst {
+        var creates: [PendingManagedCreate] = []
+        var destroys: [PendingManagedDestroy] = []
+        var ghosttyDestroyHoldCount = 0
 
-        mutating func append(create: PendingGhosttyCreate) {
+        mutating func append(create: PendingManagedCreate) {
             guard !creates.contains(where: { $0.candidate.token == create.candidate.token }) else { return }
             creates.append(create)
         }
 
-        mutating func append(destroy: PendingGhosttyDestroy) {
+        mutating func append(destroy: PendingManagedDestroy) {
             guard !destroys.contains(where: { $0.candidate.token == destroy.candidate.token }) else { return }
             destroys.append(destroy)
         }
 
-        var orderedEvents: [PendingGhosttyEvent] {
-            let events = creates.map(PendingGhosttyEvent.create) + destroys.map(PendingGhosttyEvent.destroy)
+        var orderedEvents: [PendingManagedReplacementEvent] {
+            let events = creates.map(PendingManagedReplacementEvent.create) + destroys.map(PendingManagedReplacementEvent.destroy)
             return events.sorted { $0.sequence < $1.sequence }
         }
 
-        var hasSingleReplacementPair: Bool {
-            creates.count == 1 && destroys.count == 1
+        func orderedEvents(excludingSequences sequences: Set<UInt64>) -> [PendingManagedReplacementEvent] {
+            orderedEvents.filter { !sequences.contains($0.sequence) }
+        }
+    }
+
+    private struct MatchedManagedReplacementPair {
+        let destroy: PendingManagedDestroy
+        let create: PendingManagedCreate
+
+        var excludedSequences: Set<UInt64> {
+            [destroy.sequence, create.sequence]
         }
     }
 
     private static let ghosttyBundleId = "com.mitchellh.ghostty"
-    private static let ghosttyReplacementGraceDelay: Duration = .milliseconds(150)
+    private static let replacementCorrelationBundleIds: Set<String> = [
+        ghosttyBundleId,
+        "com.apple.safari",
+        "com.brave.browser",
+        "com.google.chrome",
+        "com.microsoft.edgemac",
+        "com.vivaldi.vivaldi",
+        "company.thebrowser.browser",
+        "company.thebrowser.dia",
+        "org.mozilla.firefox",
+        "app.zen-browser.zen"
+    ]
+    private static let managedReplacementGraceDelay: Duration = .milliseconds(150)
     private static let nativeFullscreenReplacementGraceDelay: Duration = .seconds(1)
+    private static let stabilizationRetryDelay: Duration = .milliseconds(100)
 
     weak var controller: WMController?
     private var deferredCreatedWindowIds: Set<UInt32> = []
     private var deferredCreatedWindowOrder: [UInt32] = []
-    private var pendingGhosttyReplacementBursts: [GhosttyReplacementKey: PendingGhosttyReplacementBurst] = [:]
-    private var pendingGhosttyReplacementTasks: [GhosttyReplacementKey: Task<Void, Never>] = [:]
+    private var pendingManagedReplacementBursts: [ManagedReplacementKey: PendingManagedReplacementBurst] = [:]
+    private var pendingManagedReplacementTasks: [ManagedReplacementKey: Task<Void, Never>] = [:]
     private var pendingNativeFullscreenReplacementTasks: [WindowToken: Task<Void, Never>] = [:]
     private var pendingWindowRuleReevaluationTask: Task<Void, Never>?
     private var pendingWindowRuleReevaluationTargets: Set<WindowRuleReevaluationTarget> = []
-    private var nextGhosttyEventSequence: UInt64 = 0
+    private var pendingWindowStabilizationTasks: [WindowToken: Task<Void, Never>] = [:]
+    private var nextManagedReplacementEventSequence: UInt64 = 0
     var windowInfoProvider: ((UInt32) -> WindowServerInfo?)?
     var axWindowRefProvider: ((UInt32, pid_t) -> AXWindowRef?)?
     var bundleIdProvider: ((pid_t) -> String?)?
@@ -111,8 +145,9 @@ final class AXEventHandler: CGSEventDelegate {
     }
 
     func cleanup() {
-        resetGhosttyReplacementState()
+        resetManagedReplacementState()
         resetNativeFullscreenReplacementState()
+        resetWindowStabilizationState()
         pendingWindowRuleReevaluationTask?.cancel()
         pendingWindowRuleReevaluationTask = nil
         pendingWindowRuleReevaluationTargets.removeAll()
@@ -142,6 +177,7 @@ final class AXEventHandler: CGSEventDelegate {
         case let .titleChanged(windowId):
             controller.requestWorkspaceBarRefresh()
             if let token = resolveWindowToken(windowId) ?? resolveTrackedToken(windowId) {
+                updateManagedReplacementTitle(windowId: windowId, token: token)
                 scheduleWindowRuleReevaluationIfNeeded(targets: [.window(token)])
             }
         }
@@ -194,8 +230,8 @@ final class AXEventHandler: CGSEventDelegate {
             return
         }
 
-        if shouldDelayGhosttyLifecycle(for: candidate.token.pid, bundleId: candidate.bundleId) {
-            enqueueGhosttyCreate(candidate)
+        if shouldDelayManagedReplacementCreate(candidate) {
+            enqueueManagedReplacementCreate(candidate)
             return
         }
 
@@ -204,8 +240,9 @@ final class AXEventHandler: CGSEventDelegate {
 
     func resetDebugStateForTests() {
         debugCounters = .init()
-        resetGhosttyReplacementState()
+        resetManagedReplacementState()
         resetNativeFullscreenReplacementState()
+        resetWindowStabilizationState()
         pendingWindowRuleReevaluationTask?.cancel()
         pendingWindowRuleReevaluationTask = nil
         pendingWindowRuleReevaluationTargets.removeAll()
@@ -216,11 +253,11 @@ final class AXEventHandler: CGSEventDelegate {
         guard let token = resolveTrackedToken(windowId) else { return }
         guard let entry = controller.workspaceManager.entry(for: token) else { return }
 
-        updateFocusedBorderForFrameChange(token: token)
-
         guard isWindowDisplayable(token: token) else {
             return
         }
+
+        updateFocusedBorderForFrameChange(token: token)
 
         if entry.mode == .floating {
             if let frame = frameProvider?(entry.axRef)
@@ -253,6 +290,7 @@ final class AXEventHandler: CGSEventDelegate {
             ?? AXWindowService.framePreferFast(entry.axRef)
             ?? (try? AXWindowService.frame(entry.axRef))
         {
+            updateManagedReplacementFrame(frame, for: entry)
             controller.borderCoordinator.updateBorderIfAllowed(token: token, frame: frame, windowId: entry.windowId)
         }
     }
@@ -291,7 +329,11 @@ final class AXEventHandler: CGSEventDelegate {
             ) else {
                 continue
             }
-            trackPreparedCreate(candidate)
+            if shouldDelayManagedReplacementCreate(candidate) {
+                enqueueManagedReplacementCreate(candidate)
+            } else {
+                trackPreparedCreate(candidate)
+            }
         }
     }
 
@@ -324,7 +366,8 @@ final class AXEventHandler: CGSEventDelegate {
             windowId: candidate.token.windowId,
             to: candidate.workspaceId,
             mode: candidate.mode,
-            ruleEffects: candidate.ruleEffects
+            ruleEffects: candidate.ruleEffects,
+            managedReplacementMetadata: candidate.replacementMetadata
         )
 
         if candidate.mode == .floating,
@@ -333,6 +376,9 @@ final class AXEventHandler: CGSEventDelegate {
             ?? AXWindowService.framePreferFast(candidate.axRef)
             ?? (try? AXWindowService.frame(candidate.axRef))
         {
+            if let entry = controller.workspaceManager.entry(for: candidate.token) {
+                updateManagedReplacementFrame(frame, for: entry)
+            }
             controller.workspaceManager.updateFloatingGeometry(
                 frame: frame,
                 for: candidate.token,
@@ -607,13 +653,15 @@ final class AXEventHandler: CGSEventDelegate {
         from oldToken: WindowToken,
         to newToken: WindowToken,
         windowId: UInt32,
-        axRef: AXWindowRef
+        axRef: AXWindowRef,
+        managedReplacementMetadata: ManagedReplacementMetadata? = nil
     ) -> WindowModel.Entry? {
         guard let controller,
               let entry = controller.workspaceManager.rekeyWindow(
                   from: oldToken,
                   to: newToken,
-                  newAXRef: axRef
+                  newAXRef: axRef,
+                  managedReplacementMetadata: managedReplacementMetadata
               )
         else {
             return nil
@@ -689,22 +737,29 @@ final class AXEventHandler: CGSEventDelegate {
         controller.layoutRefreshController.requestVisibilityRefresh(reason: .appUnhidden)
     }
 
-    func resetGhosttyReplacementState() {
-        for (_, task) in pendingGhosttyReplacementTasks {
+    func resetManagedReplacementState() {
+        for (_, task) in pendingManagedReplacementTasks {
             task.cancel()
         }
-        pendingGhosttyReplacementTasks.removeAll()
-        pendingGhosttyReplacementBursts.removeAll()
-        nextGhosttyEventSequence = 0
+        pendingManagedReplacementTasks.removeAll()
+        pendingManagedReplacementBursts.removeAll()
+        nextManagedReplacementEventSequence = 0
     }
 
-    func flushPendingGhosttyReplacementEventsForTests() {
-        let keys = pendingGhosttyReplacementBursts.keys.sorted {
+    func resetWindowStabilizationState() {
+        for (_, task) in pendingWindowStabilizationTasks {
+            task.cancel()
+        }
+        pendingWindowStabilizationTasks.removeAll()
+    }
+
+    func flushPendingManagedReplacementEventsForTests() {
+        let keys = pendingManagedReplacementBursts.keys.sorted {
             ($0.pid, $0.workspaceId.uuidString) < ($1.pid, $1.workspaceId.uuidString)
         }
         for key in keys {
-            pendingGhosttyReplacementTasks.removeValue(forKey: key)?.cancel()
-            flushGhosttyReplacementBurst(for: key)
+            pendingManagedReplacementTasks.removeValue(forKey: key)?.cancel()
+            flushManagedReplacementBurst(for: key)
         }
     }
 
@@ -740,6 +795,13 @@ final class AXEventHandler: CGSEventDelegate {
 
         if ownedWindow { return nil }
 
+        if trackedMode == nil {
+            scheduleWindowStabilizationRetryIfNeeded(
+                token: token,
+                decision: evaluation.decision
+            )
+        }
+
         guard let trackedMode else { return nil }
 
         let workspaceId = controller.resolveWorkspaceForNewWindow(
@@ -752,11 +814,14 @@ final class AXEventHandler: CGSEventDelegate {
         return PreparedCreate(
             windowId: windowId,
             token: token,
-            bundleId: bundleId,
             axRef: axRef,
-            workspaceId: workspaceId,
-            mode: trackedMode,
-            ruleEffects: evaluation.decision.ruleEffects
+            ruleEffects: evaluation.decision.ruleEffects,
+            replacementMetadata: makeManagedReplacementMetadata(
+                bundleId: bundleId ?? evaluation.facts.ax.bundleId,
+                workspaceId: workspaceId,
+                mode: trackedMode,
+                facts: evaluation.facts
+            )
         )
     }
 
@@ -775,12 +840,35 @@ final class AXEventHandler: CGSEventDelegate {
             ?? pidHint.map { WindowToken(pid: $0, windowId: Int(windowId)) }
 
         guard let token = resolvedToken,
-              let trackedWorkspaceId = controller.workspaceManager.workspace(for: token) else { return nil }
+              let entry = controller.workspaceManager.entry(for: token)
+        else {
+            return nil
+        }
+
+        let bundleId = resolveBundleId(token.pid)
+        let windowInfo = resolveWindowInfo(windowId)
+        let facts = managedReplacementFacts(
+            for: entry.axRef,
+            pid: token.pid,
+            bundleId: bundleId,
+            windowInfo: windowInfo
+        )
+
+        let liveMetadata = makeManagedReplacementMetadata(
+            bundleId: bundleId,
+            workspaceId: entry.workspaceId,
+            mode: entry.mode,
+            facts: facts
+        )
+        let replacementMetadata = if let cachedMetadata = entry.managedReplacementMetadata {
+            cachedMetadata.mergingNonNilValues(from: liveMetadata)
+        } else {
+            liveMetadata
+        }
 
         return PreparedDestroy(
             token: token,
-            bundleId: resolveBundleId(token.pid),
-            workspaceId: trackedWorkspaceId
+            replacementMetadata: replacementMetadata
         )
     }
 
@@ -792,6 +880,7 @@ final class AXEventHandler: CGSEventDelegate {
             ?? resolveTrackedToken(windowId)
             ?? pidHint.map { WindowToken(pid: $0, windowId: Int(windowId)) }
         if let resolvedToken {
+            cancelWindowStabilizationRetry(for: resolvedToken)
             controller?.clearManualWindowOverride(for: resolvedToken)
         }
 
@@ -804,8 +893,8 @@ final class AXEventHandler: CGSEventDelegate {
             return
         }
 
-        if shouldDelayGhosttyLifecycle(for: candidate.token.pid, bundleId: candidate.bundleId) {
-            enqueueGhosttyDestroy(candidate)
+        if shouldDelayManagedReplacementDestroy(candidate) {
+            enqueueManagedReplacementDestroy(candidate)
             return
         }
 
@@ -816,89 +905,80 @@ final class AXEventHandler: CGSEventDelegate {
         handleRemoved(token: candidate.token)
     }
 
-    private func shouldDelayGhosttyLifecycle(for pid: pid_t, bundleId: String?) -> Bool {
-        let resolvedBundleId = bundleId ?? resolveBundleId(pid)
-        return resolvedBundleId == Self.ghosttyBundleId
+    private func shouldDelayManagedReplacementCreate(_ candidate: PreparedCreate) -> Bool {
+        guard managedReplacementCorrelationPolicy(for: candidate.bundleId) != nil else {
+            return false
+        }
+
+        let key = ManagedReplacementKey(pid: candidate.token.pid, workspaceId: candidate.workspaceId)
+        if pendingManagedReplacementBursts[key] != nil {
+            return true
+        }
+
+        return hasTrackedSiblingEntry(
+            for: candidate.token.pid,
+            in: candidate.workspaceId,
+            excluding: candidate.token
+        )
     }
 
-    private func enqueueGhosttyCreate(_ candidate: PreparedCreate) {
-        let key = GhosttyReplacementKey(pid: candidate.token.pid, workspaceId: candidate.workspaceId)
-        var burst = pendingGhosttyReplacementBursts[key] ?? PendingGhosttyReplacementBurst()
-        let pendingCreate = PendingGhosttyCreate(sequence: nextGhosttySequence(), candidate: candidate)
+    private func shouldDelayManagedReplacementDestroy(_ candidate: PreparedDestroy) -> Bool {
+        managedReplacementCorrelationPolicy(for: candidate.bundleId) != nil
+    }
+
+    private func enqueueManagedReplacementCreate(_ candidate: PreparedCreate) {
+        let key = ManagedReplacementKey(pid: candidate.token.pid, workspaceId: candidate.workspaceId)
+        var burst = pendingManagedReplacementBursts[key] ?? PendingManagedReplacementBurst()
+        let pendingCreate = PendingManagedCreate(sequence: nextManagedReplacementSequence(), candidate: candidate)
         burst.append(create: pendingCreate)
-        pendingGhosttyReplacementBursts[key] = burst
-
-        if let matchedDestroy = matchedDestroyCandidate(in: burst, for: candidate.token) {
-            completeGhosttyReplacement(for: key, destroy: matchedDestroy, create: pendingCreate)
-            return
-        }
-
-        scheduleGhosttyReplacementFlush(for: key)
+        pendingManagedReplacementBursts[key] = burst
+        scheduleManagedReplacementFlush(for: key)
     }
 
-    private func enqueueGhosttyDestroy(_ candidate: PreparedDestroy) {
-        let key = GhosttyReplacementKey(pid: candidate.token.pid, workspaceId: candidate.workspaceId)
-        var burst = pendingGhosttyReplacementBursts[key] ?? PendingGhosttyReplacementBurst()
-        let pendingDestroy = PendingGhosttyDestroy(sequence: nextGhosttySequence(), candidate: candidate)
+    private func enqueueManagedReplacementDestroy(_ candidate: PreparedDestroy) {
+        let key = ManagedReplacementKey(pid: candidate.token.pid, workspaceId: candidate.workspaceId)
+        var burst = pendingManagedReplacementBursts[key] ?? PendingManagedReplacementBurst()
+        let pendingDestroy = PendingManagedDestroy(sequence: nextManagedReplacementSequence(), candidate: candidate)
         burst.append(destroy: pendingDestroy)
-        pendingGhosttyReplacementBursts[key] = burst
-
-        if let matchedCreate = matchedCreateCandidate(in: burst, for: candidate.token) {
-            completeGhosttyReplacement(for: key, destroy: pendingDestroy, create: matchedCreate)
-            return
-        }
-
-        scheduleGhosttyReplacementFlush(for: key)
+        pendingManagedReplacementBursts[key] = burst
+        scheduleManagedReplacementFlush(for: key)
     }
 
-    private func matchedCreateCandidate(
-        in burst: PendingGhosttyReplacementBurst,
-        for oldToken: WindowToken
-    ) -> PendingGhosttyCreate? {
-        guard burst.hasSingleReplacementPair,
-              let create = burst.creates.first,
-              create.candidate.token != oldToken
-        else {
-            return nil
+    private func matchedManagedReplacementPair(
+        in burst: PendingManagedReplacementBurst
+    ) -> MatchedManagedReplacementPair? {
+        var matchedPair: MatchedManagedReplacementPair?
+
+        for destroy in burst.destroys {
+            for create in burst.creates {
+                guard destroy.candidate.token != create.candidate.token,
+                      managedReplacementMetadataMatches(
+                          old: destroy.candidate.replacementMetadata,
+                          new: create.candidate.replacementMetadata
+                      )
+                else {
+                    continue
+                }
+
+                if matchedPair != nil {
+                    return nil
+                }
+                matchedPair = MatchedManagedReplacementPair(destroy: destroy, create: create)
+            }
         }
-        return create
+
+        return matchedPair
     }
 
-    private func matchedDestroyCandidate(
-        in burst: PendingGhosttyReplacementBurst,
-        for newToken: WindowToken
-    ) -> PendingGhosttyDestroy? {
-        guard burst.hasSingleReplacementPair,
-              let destroy = burst.destroys.first,
-              destroy.candidate.token != newToken
-        else {
-            return nil
-        }
-        return destroy
+    @discardableResult
+    private func completeManagedReplacement(
+        destroy: PendingManagedDestroy,
+        create: PendingManagedCreate
+    ) -> Bool {
+        rekeyManagedReplacement(from: destroy.candidate.token, to: create.candidate)
     }
 
-    private func completeGhosttyReplacement(
-        for key: GhosttyReplacementKey,
-        destroy: PendingGhosttyDestroy,
-        create: PendingGhosttyCreate
-    ) {
-        pendingGhosttyReplacementTasks.removeValue(forKey: key)?.cancel()
-        pendingGhosttyReplacementBursts.removeValue(forKey: key)
-
-        let destroyCandidate = destroy.candidate
-        let createCandidate = create.candidate
-
-        guard destroyCandidate.workspaceId == createCandidate.workspaceId else {
-            replayGhosttyReplacementEvents([.destroy(destroy), .create(create)])
-            return
-        }
-
-        if !rekeyGhosttyReplacement(from: destroyCandidate.token, to: createCandidate) {
-            replayGhosttyReplacementEvents([.destroy(destroy), .create(create)])
-        }
-    }
-
-    private func replayGhosttyReplacementEvents(_ events: [PendingGhosttyEvent]) {
+    private func replayManagedReplacementEvents(_ events: [PendingManagedReplacementEvent]) {
         for event in events.sorted(by: { $0.sequence < $1.sequence }) {
             switch event {
             case let .create(create):
@@ -910,13 +990,203 @@ final class AXEventHandler: CGSEventDelegate {
     }
 
     @discardableResult
-    private func rekeyGhosttyReplacement(from oldToken: WindowToken, to create: PreparedCreate) -> Bool {
+    private func rekeyManagedReplacement(from oldToken: WindowToken, to create: PreparedCreate) -> Bool {
         rekeyManagedWindowIdentity(
             from: oldToken,
             to: create.token,
             windowId: create.windowId,
-            axRef: create.axRef
+            axRef: create.axRef,
+            managedReplacementMetadata: create.replacementMetadata
         ) != nil
+    }
+
+    private func makeManagedReplacementMetadata(
+        bundleId: String?,
+        workspaceId: WorkspaceDescriptor.ID,
+        mode: TrackedWindowMode,
+        facts: WindowRuleFacts
+    ) -> ManagedReplacementMetadata {
+        ManagedReplacementMetadata(
+            bundleId: bundleId,
+            workspaceId: workspaceId,
+            mode: mode,
+            role: facts.ax.role,
+            subrole: facts.ax.subrole,
+            title: facts.ax.title,
+            windowLevel: facts.windowServer?.level,
+            parentWindowId: facts.windowServer?.parentId,
+            frame: facts.windowServer?.frame
+        )
+    }
+
+    private func managedReplacementFacts(
+        for axRef: AXWindowRef,
+        pid: pid_t,
+        bundleId: String?,
+        windowInfo: WindowServerInfo?
+    ) -> WindowRuleFacts {
+        if let providedFacts = windowFactsProvider?(axRef, pid) {
+            return WindowRuleFacts(
+                appName: providedFacts.appName,
+                ax: providedFacts.ax,
+                sizeConstraints: providedFacts.sizeConstraints,
+                windowServer: providedFacts.windowServer ?? windowInfo
+            )
+        }
+
+        let app = NSRunningApplication(processIdentifier: pid)
+        return WindowRuleFacts(
+            appName: app?.localizedName,
+            ax: AXWindowService.collectWindowFacts(
+                axRef,
+                appPolicy: app?.activationPolicy,
+                bundleId: bundleId,
+                includeTitle: true
+            ),
+            sizeConstraints: nil,
+            windowServer: windowInfo
+        )
+    }
+
+    private func hasTrackedSiblingEntry(
+        for pid: pid_t,
+        in workspaceId: WorkspaceDescriptor.ID,
+        excluding token: WindowToken
+    ) -> Bool {
+        guard let controller else { return false }
+        return controller.workspaceManager.entries(forPid: pid).contains {
+            $0.workspaceId == workspaceId && $0.token != token
+        }
+    }
+
+    private func managedReplacementCorrelationPolicy(
+        for bundleId: String?
+    ) -> ManagedReplacementCorrelationPolicy? {
+        guard let bundleId = bundleId?.lowercased() else { return nil }
+        if bundleId == Self.ghosttyBundleId {
+            return .ghostty
+        }
+        if Self.replacementCorrelationBundleIds.contains(bundleId) {
+            return .strictMetadata
+        }
+        return nil
+    }
+
+    private func managedReplacementMetadataMatches(
+        old: ManagedReplacementMetadata,
+        new: ManagedReplacementMetadata
+    ) -> Bool {
+        guard let oldBundleId = old.bundleId?.lowercased(),
+              let newBundleId = new.bundleId?.lowercased(),
+              oldBundleId == newBundleId,
+              let policy = managedReplacementCorrelationPolicy(for: oldBundleId),
+              policy == managedReplacementCorrelationPolicy(for: newBundleId),
+              old.workspaceId == new.workspaceId,
+              old.role == new.role,
+              old.subrole == new.subrole
+        else {
+            return false
+        }
+
+        switch policy {
+        case .ghostty:
+            return ghosttyManagedReplacementMetadataMatches(old: old, new: new)
+
+        case .strictMetadata:
+            return strictManagedReplacementMetadataMatches(old: old, new: new)
+        }
+    }
+
+    private func ghosttyManagedReplacementMetadataMatches(
+        old: ManagedReplacementMetadata,
+        new: ManagedReplacementMetadata
+    ) -> Bool {
+        if let oldLevel = old.windowLevel,
+           let newLevel = new.windowLevel,
+           oldLevel != newLevel
+        {
+            return false
+        }
+
+        var hasStructuralEvidence = false
+        if let oldParentWindowId = old.parentWindowId,
+           let newParentWindowId = new.parentWindowId
+        {
+            guard oldParentWindowId == newParentWindowId else {
+                return false
+            }
+            hasStructuralEvidence = true
+        }
+
+        if let oldFrame = old.frame,
+           let newFrame = new.frame
+        {
+            guard framesAreCloseForManagedReplacement(oldFrame, newFrame) else {
+                return false
+            }
+            hasStructuralEvidence = true
+        }
+
+        return hasStructuralEvidence
+    }
+
+    private func shouldApplySecondaryGhosttyDestroyHold(
+        to burst: PendingManagedReplacementBurst
+    ) -> Bool {
+        guard burst.ghosttyDestroyHoldCount == 0,
+              burst.creates.isEmpty,
+              !burst.destroys.isEmpty
+        else {
+            return false
+        }
+
+        return burst.destroys.allSatisfy {
+            managedReplacementCorrelationPolicy(for: $0.candidate.bundleId) == .ghostty
+        }
+    }
+
+    private func strictManagedReplacementMetadataMatches(
+        old: ManagedReplacementMetadata,
+        new: ManagedReplacementMetadata
+    ) -> Bool {
+        guard old.mode == new.mode else {
+            return false
+        }
+
+        let oldTitle = normalizedTitleIdentity(old.title)
+        let newTitle = normalizedTitleIdentity(new.title)
+        if let oldTitle, let newTitle {
+            return oldTitle == newTitle
+        }
+
+        guard oldTitle == nil,
+              newTitle == nil,
+              old.windowLevel == new.windowLevel,
+              old.parentWindowId == new.parentWindowId,
+              framesAreCloseForManagedReplacement(old.frame, new.frame)
+        else {
+            return false
+        }
+
+        return true
+    }
+
+    private func normalizedTitleIdentity(_ title: String?) -> String? {
+        guard let title = title?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !title.isEmpty
+        else {
+            return nil
+        }
+        return title
+    }
+
+    private func framesAreCloseForManagedReplacement(_ lhs: CGRect?, _ rhs: CGRect?) -> Bool {
+        guard let lhs, let rhs else { return false }
+
+        return abs(lhs.midX - rhs.midX) <= 96
+            && abs(lhs.midY - rhs.midY) <= 96
+            && abs(lhs.width - rhs.width) <= 64
+            && abs(lhs.height - rhs.height) <= 64
     }
 
     private func refreshBorderAfterManagedRekey(entry: WindowModel.Entry) {
@@ -981,32 +1251,80 @@ final class AXEventHandler: CGSEventDelegate {
         cancelNativeFullscreenReplacementExpiry(for: token)
     }
 
-    private func scheduleGhosttyReplacementFlush(for key: GhosttyReplacementKey) {
-        pendingGhosttyReplacementTasks.removeValue(forKey: key)?.cancel()
-        pendingGhosttyReplacementTasks[key] = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: Self.ghosttyReplacementGraceDelay)
+    private func scheduleManagedReplacementFlush(for key: ManagedReplacementKey) {
+        pendingManagedReplacementTasks.removeValue(forKey: key)?.cancel()
+        pendingManagedReplacementTasks[key] = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.managedReplacementGraceDelay)
             guard !Task.isCancelled else { return }
-            self?.flushGhosttyReplacementBurst(for: key)
+            self?.flushManagedReplacementBurst(for: key)
         }
     }
 
-    private func flushGhosttyReplacementBurst(for key: GhosttyReplacementKey) {
-        pendingGhosttyReplacementTasks.removeValue(forKey: key)?.cancel()
-        guard let burst = pendingGhosttyReplacementBursts.removeValue(forKey: key) else { return }
+    private func flushManagedReplacementBurst(for key: ManagedReplacementKey) {
+        pendingManagedReplacementTasks.removeValue(forKey: key)?.cancel()
+        guard var burst = pendingManagedReplacementBursts.removeValue(forKey: key) else { return }
 
-        for event in burst.orderedEvents {
-            switch event {
-            case let .create(create):
-                trackPreparedCreate(create.candidate)
-            case let .destroy(destroy):
-                processPreparedDestroy(destroy.candidate)
+        if let pair = matchedManagedReplacementPair(in: burst) {
+            if completeManagedReplacement(destroy: pair.destroy, create: pair.create) {
+                replayManagedReplacementEvents(
+                    burst.orderedEvents(excludingSequences: pair.excludedSequences)
+                )
+            } else {
+                replayManagedReplacementEvents(burst.orderedEvents)
             }
+            return
+        }
+
+        if shouldApplySecondaryGhosttyDestroyHold(to: burst) {
+            burst.ghosttyDestroyHoldCount = 1
+            pendingManagedReplacementBursts[key] = burst
+            scheduleManagedReplacementFlush(for: key)
+            return
+        }
+
+        replayManagedReplacementEvents(burst.orderedEvents)
+    }
+
+    private func nextManagedReplacementSequence() -> UInt64 {
+        defer { nextManagedReplacementEventSequence += 1 }
+        return nextManagedReplacementEventSequence
+    }
+
+    private func updateManagedReplacementFrame(_ frame: CGRect, for entry: WindowModel.Entry) {
+        entry.managedReplacementMetadata?.frame = frame
+    }
+
+    private func updateManagedReplacementTitle(windowId: UInt32, token: WindowToken) {
+        guard let controller,
+              let entry = controller.workspaceManager.entry(for: token),
+              let title = resolveWindowInfo(windowId)?.title ?? AXWindowService.titlePreferFast(windowId: windowId)
+        else {
+            return
+        }
+        entry.managedReplacementMetadata?.title = title
+    }
+
+    private func scheduleWindowStabilizationRetryIfNeeded(
+        token: WindowToken,
+        decision: WindowDecision
+    ) {
+        guard decision.disposition == .undecided,
+              decision.deferredReason != nil
+        else {
+            return
+        }
+
+        pendingWindowStabilizationTasks[token]?.cancel()
+        pendingWindowStabilizationTasks[token] = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.stabilizationRetryDelay)
+            guard !Task.isCancelled, let self, let controller = self.controller else { return }
+            self.pendingWindowStabilizationTasks.removeValue(forKey: token)
+            _ = await controller.reevaluateWindowRules(for: [.window(token)])
         }
     }
 
-    private func nextGhosttySequence() -> UInt64 {
-        defer { nextGhosttyEventSequence += 1 }
-        return nextGhosttyEventSequence
+    private func cancelWindowStabilizationRetry(for token: WindowToken) {
+        pendingWindowStabilizationTasks.removeValue(forKey: token)?.cancel()
     }
 
     private func deferCreatedWindow(_ windowId: UInt32) {

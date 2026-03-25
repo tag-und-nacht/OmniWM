@@ -157,10 +157,13 @@ private func makeWindowRuleFacts(
         )
 
         #expect(decision.disposition == .undecided)
+        #expect(decision.layoutDecisionKind == .fallbackLayout)
+        #expect(decision.deferredReason == .attributeFetchFailed)
+        #expect(decision.trackedMode == nil)
         #expect(decision.heuristicReasons == [.attributeFetchFailed])
     }
 
-    @Test func missingFullscreenButtonAloneDoesNotFloat() {
+    @Test func missingFullscreenButtonFallsBackToTrackedFloating() {
         let engine = WindowRuleEngine()
 
         let decision = engine.decision(
@@ -173,11 +176,14 @@ private func makeWindowRuleFacts(
             appFullscreen: false
         )
 
-        #expect(decision.disposition == .managed)
+        #expect(decision.disposition == .floating)
+        #expect(decision.layoutDecisionKind == .fallbackLayout)
+        #expect(decision.trackedMode == .floating)
+        #expect(decision.admissionOutcome == .trackedFloating)
         #expect(decision.heuristicReasons == [.missingFullscreenButton])
     }
 
-    @Test func cleanShotCaptureLevelStandardWindowDefaultsToUnmanaged() {
+    @Test func cleanShotCaptureLevelStandardWindowDefaultsToTrackedFloating() {
         let engine = WindowRuleEngine()
 
         let decision = engine.decision(
@@ -191,10 +197,11 @@ private func makeWindowRuleFacts(
             appFullscreen: false
         )
 
-        #expect(decision.disposition == .unmanaged)
+        #expect(decision.disposition == .floating)
+        #expect(decision.trackedMode == .floating)
         if case .builtInRule("cleanShotRecordingOverlay") = decision.source {
         } else {
-            Issue.record("Expected CleanShot capture overlays to use the built-in unmanaged rule")
+            Issue.record("Expected CleanShot capture overlays to use the built-in floating rule")
         }
     }
 
@@ -213,7 +220,8 @@ private func makeWindowRuleFacts(
         )
 
         #expect(decision.disposition == .floating)
-        #expect(decision.heuristicReasons == [.trustedFloatingSubrole])
+        #expect(decision.trackedMode == .floating)
+        #expect(decision.heuristicReasons == [.nonStandardSubrole])
     }
 
     @Test func cleanShotStandardWindowAtNormalLevelKeepsExistingHeuristic() {
@@ -231,11 +239,11 @@ private func makeWindowRuleFacts(
             appFullscreen: false
         )
 
-        #expect(decision.disposition == WindowDecisionDisposition.managed)
+        #expect(decision.disposition == WindowDecisionDisposition.floating)
         #expect(decision.heuristicReasons == [AXWindowHeuristicReason.disabledFullscreenButton])
     }
 
-    @Test func fixedSizeStandardWindowDefaultsToFloating() {
+    @Test func fixedSizeStandardWindowNoLongerAutoFloats() {
         let engine = WindowRuleEngine()
 
         let decision = engine.decision(
@@ -247,11 +255,11 @@ private func makeWindowRuleFacts(
             appFullscreen: false
         )
 
-        #expect(decision.disposition == .floating)
-        #expect(decision.heuristicReasons == [.fixedSizeWindow])
+        #expect(decision.disposition == .managed)
+        #expect(decision.heuristicReasons.isEmpty)
     }
 
-    @Test func untrustedNonStandardSubroleDefaultsToUnmanaged() {
+    @Test func nonStandardSubroleFallsBackToTrackedFloating() {
         let engine = WindowRuleEngine()
 
         let decision = engine.decision(
@@ -263,7 +271,8 @@ private func makeWindowRuleFacts(
             appFullscreen: false
         )
 
-        #expect(decision.disposition == .unmanaged)
+        #expect(decision.disposition == .floating)
+        #expect(decision.trackedMode == .floating)
         #expect(decision.heuristicReasons == [.nonStandardSubrole])
     }
 
@@ -285,6 +294,8 @@ private func makeWindowRuleFacts(
         )
 
         #expect(decision.disposition == .floating)
+        #expect(decision.layoutDecisionKind == .explicitLayout)
+        #expect(decision.trackedMode == .floating)
         if case .builtInRule("browserPictureInPicture") = decision.source {
         } else {
             Issue.record("Expected built-in browser PiP rule to classify the window")
@@ -343,7 +354,51 @@ private func makeWindowRuleFacts(
 
         #expect(decision.disposition == .managed)
         #expect(decision.source == .userRule(rule.id))
+        #expect(decision.layoutDecisionKind == .fallbackLayout)
         #expect(decision.ruleEffects.matchedRuleId == rule.id)
+    }
+
+    @Test func autoRuleWithWorkspaceAssignmentKeepsTrackedHeuristicFloatingFallback() {
+        let engine = WindowRuleEngine()
+        let rule = AppRule(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000161")!,
+            bundleId: "com.example.illustrator",
+            assignToWorkspace: "2"
+        )
+        engine.rebuild(rules: [rule])
+
+        let decision = engine.decision(
+            for: makeWindowRuleFacts(
+                bundleId: "com.example.illustrator",
+                hasFullscreenButton: false,
+                fullscreenButtonEnabled: nil
+            ),
+            token: nil,
+            appFullscreen: false
+        )
+
+        #expect(decision.source == .userRule(rule.id))
+        #expect(decision.layoutDecisionKind == .fallbackLayout)
+        #expect(decision.disposition == .floating)
+        #expect(decision.trackedMode == .floating)
+        #expect(decision.workspaceName == "2")
+    }
+
+    @Test func titleSensitiveFallbackDefersUntilTitleArrives() {
+        let engine = WindowRuleEngine()
+
+        let decision = engine.decision(
+            for: makeWindowRuleFacts(
+                bundleId: "org.mozilla.firefox",
+                title: nil
+            ),
+            token: nil,
+            appFullscreen: false
+        )
+
+        #expect(decision.disposition == .undecided)
+        #expect(decision.deferredReason == .requiredTitleMissing)
+        #expect(decision.trackedMode == nil)
     }
 
     @Test func invalidRegexOnlyRuleIsTrackedAndExcludedFromCompiledRules() {

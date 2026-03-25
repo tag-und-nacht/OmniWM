@@ -15,6 +15,23 @@ enum WindowDecisionSource: Equatable, Sendable {
     case heuristic
 }
 
+enum WindowDecisionLayoutKind: String, Equatable, Sendable {
+    case explicitLayout
+    case fallbackLayout
+}
+
+enum WindowDecisionDeferredReason: String, Equatable, Sendable {
+    case attributeFetchFailed
+    case requiredTitleMissing
+}
+
+enum WindowDecisionAdmissionOutcome: String, Equatable, Sendable {
+    case trackedTiling
+    case trackedFloating
+    case ignored
+    case deferred
+}
+
 enum ManualWindowOverride: String, Codable, Equatable {
     case forceTile
     case forceFloat
@@ -31,9 +48,11 @@ struct ManagedWindowRuleEffects: Equatable, Sendable {
 struct WindowDecision: Equatable, Sendable {
     let disposition: WindowDecisionDisposition
     let source: WindowDecisionSource
+    let layoutDecisionKind: WindowDecisionLayoutKind
     let workspaceName: String?
     let ruleEffects: ManagedWindowRuleEffects
     let heuristicReasons: [AXWindowHeuristicReason]
+    let deferredReason: WindowDecisionDeferredReason?
 
     var managesWindow: Bool {
         disposition == .managed
@@ -47,6 +66,19 @@ struct WindowDecision: Equatable, Sendable {
             .floating
         case .unmanaged, .undecided:
             nil
+        }
+    }
+
+    var admissionOutcome: WindowDecisionAdmissionOutcome {
+        switch disposition {
+        case .managed:
+            .trackedTiling
+        case .floating:
+            .trackedFloating
+        case .unmanaged:
+            .ignored
+        case .undecided:
+            .deferred
         }
     }
 
@@ -82,6 +114,9 @@ struct WindowDecisionDebugSnapshot: Equatable, Sendable {
     let manualOverride: ManualWindowOverride?
     let disposition: WindowDecisionDisposition
     let source: WindowDecisionSource
+    let layoutDecisionKind: WindowDecisionLayoutKind
+    let deferredReason: WindowDecisionDeferredReason?
+    let admissionOutcome: WindowDecisionAdmissionOutcome
     let workspaceName: String?
     let minWidth: Double?
     let minHeight: Double?
@@ -118,6 +153,9 @@ struct WindowDecisionDebugSnapshot: Equatable, Sendable {
             "manualOverride=\(manualOverride?.rawValue ?? "nil")",
             "disposition=\(String(describing: disposition))",
             "source=\(sourceDescription)",
+            "layoutDecisionKind=\(layoutDecisionKind.rawValue)",
+            "deferredReason=\(deferredReason?.rawValue ?? "nil")",
+            "admissionOutcome=\(admissionOutcome.rawValue)",
             "workspaceName=\(workspaceName ?? "nil")",
             "minWidth=\(stringValue(minWidth))",
             "minHeight=\(stringValue(minHeight))",
@@ -287,15 +325,33 @@ final class WindowRuleEngine {
             return cleanShotDecision
         }
 
+        if facts.ax.title == nil,
+           requiresTitle(for: facts.ax.bundleId)
+        {
+            return WindowDecision(
+                disposition: .undecided,
+                source: userRule.map { .userRule($0.rule.id) }
+                    ?? builtInRule.map { builtInRuleSource(for: $0) }
+                    ?? .heuristic,
+                layoutDecisionKind: .fallbackLayout,
+                workspaceName: workspaceName,
+                ruleEffects: effects,
+                heuristicReasons: [],
+                deferredReason: .requiredTitleMissing
+            )
+        }
+
         if appFullscreen {
             return WindowDecision(
                 disposition: .managed,
                 source: userRule.map { .userRule($0.rule.id) }
                     ?? builtInRule.map { builtInRuleSource(for: $0) }
                     ?? .heuristic,
+                layoutDecisionKind: .fallbackLayout,
                 workspaceName: workspaceName,
                 ruleEffects: effects,
-                heuristicReasons: []
+                heuristicReasons: [],
+                deferredReason: nil
             )
         }
 
@@ -303,9 +359,11 @@ final class WindowRuleEngine {
             return WindowDecision(
                 disposition: .undecided,
                 source: userRule.map { .userRule($0.rule.id) } ?? .heuristic,
+                layoutDecisionKind: .fallbackLayout,
                 workspaceName: workspaceName,
                 ruleEffects: effects,
-                heuristicReasons: [.attributeFetchFailed]
+                heuristicReasons: [.attributeFetchFailed],
+                deferredReason: .attributeFetchFailed
             )
         }
 
@@ -317,9 +375,11 @@ final class WindowRuleEngine {
         return WindowDecision(
             disposition: heuristic.disposition,
             source: userRule.map { .userRule($0.rule.id) } ?? .heuristic,
+            layoutDecisionKind: .fallbackLayout,
             workspaceName: workspaceName,
             ruleEffects: effects,
-            heuristicReasons: heuristic.reasons
+            heuristicReasons: heuristic.reasons,
+            deferredReason: heuristic.disposition == .undecided ? .attributeFetchFailed : nil
         )
     }
 
@@ -336,11 +396,13 @@ final class WindowRuleEngine {
         }
 
         return WindowDecision(
-            disposition: .unmanaged,
+            disposition: .floating,
             source: .builtInRule(Self.cleanShotRecordingOverlayRuleName),
+            layoutDecisionKind: .explicitLayout,
             workspaceName: workspaceName,
             ruleEffects: effects,
-            heuristicReasons: []
+            heuristicReasons: [],
+            deferredReason: nil
         )
     }
 
@@ -356,16 +418,6 @@ final class WindowRuleEngine {
             .builtInRule(name)
         }
 
-        if compiled.rule.effectiveManageAction == .off {
-            return WindowDecision(
-                disposition: .unmanaged,
-                source: source,
-                workspaceName: workspaceName,
-                ruleEffects: .none,
-                heuristicReasons: []
-            )
-        }
-
         let disposition: WindowDecisionDisposition
         switch compiled.rule.effectiveLayoutAction {
         case .float:
@@ -379,9 +431,11 @@ final class WindowRuleEngine {
         return WindowDecision(
             disposition: disposition,
             source: source,
+            layoutDecisionKind: .explicitLayout,
             workspaceName: workspaceName,
             ruleEffects: effects,
-            heuristicReasons: []
+            heuristicReasons: [],
+            deferredReason: nil
         )
     }
 

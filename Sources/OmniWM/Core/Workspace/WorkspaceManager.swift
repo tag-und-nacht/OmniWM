@@ -1252,7 +1252,8 @@ final class WorkspaceManager {
         windowId: Int,
         to workspace: WorkspaceDescriptor.ID,
         mode: TrackedWindowMode = .tiling,
-        ruleEffects: ManagedWindowRuleEffects = .none
+        ruleEffects: ManagedWindowRuleEffects = .none,
+        managedReplacementMetadata: ManagedReplacementMetadata? = nil
     ) -> WindowToken {
         windows.upsert(
             window: ax,
@@ -1260,13 +1261,24 @@ final class WorkspaceManager {
             windowId: windowId,
             workspace: workspace,
             mode: mode,
-            ruleEffects: ruleEffects
+            ruleEffects: ruleEffects,
+            managedReplacementMetadata: managedReplacementMetadata
         )
     }
 
     @discardableResult
-    func rekeyWindow(from oldToken: WindowToken, to newToken: WindowToken, newAXRef: AXWindowRef) -> WindowModel.Entry? {
-        guard let entry = windows.rekeyWindow(from: oldToken, to: newToken, newAXRef: newAXRef) else {
+    func rekeyWindow(
+        from oldToken: WindowToken,
+        to newToken: WindowToken,
+        newAXRef: AXWindowRef,
+        managedReplacementMetadata: ManagedReplacementMetadata? = nil
+    ) -> WindowModel.Entry? {
+        guard let entry = windows.rekeyWindow(
+            from: oldToken,
+            to: newToken,
+            newAXRef: newAXRef,
+            managedReplacementMetadata: managedReplacementMetadata
+        ) else {
             return nil
         }
 

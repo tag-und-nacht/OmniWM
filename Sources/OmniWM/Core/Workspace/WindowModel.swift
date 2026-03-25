@@ -6,6 +6,32 @@ enum TrackedWindowMode: Equatable, Sendable {
     case floating
 }
 
+struct ManagedReplacementMetadata: Equatable, Sendable {
+    var bundleId: String?
+    var workspaceId: WorkspaceDescriptor.ID
+    var mode: TrackedWindowMode
+    var role: String?
+    var subrole: String?
+    var title: String?
+    var windowLevel: Int32?
+    var parentWindowId: UInt32?
+    var frame: CGRect?
+
+    func mergingNonNilValues(from overlay: ManagedReplacementMetadata) -> ManagedReplacementMetadata {
+        ManagedReplacementMetadata(
+            bundleId: overlay.bundleId ?? bundleId,
+            workspaceId: overlay.workspaceId,
+            mode: overlay.mode,
+            role: overlay.role ?? role,
+            subrole: overlay.subrole ?? subrole,
+            title: overlay.title ?? title,
+            windowLevel: overlay.windowLevel ?? windowLevel,
+            parentWindowId: overlay.parentWindowId ?? parentWindowId,
+            frame: overlay.frame ?? frame
+        )
+    }
+}
+
 final class WindowModel {
     typealias WindowKey = WindowToken
 
@@ -102,6 +128,7 @@ final class WindowModel {
         var axRef: AXWindowRef
         var workspaceId: WorkspaceDescriptor.ID
         var mode: TrackedWindowMode
+        var managedReplacementMetadata: ManagedReplacementMetadata?
         var floatingState: FloatingState?
         var manualLayoutOverride: ManualWindowOverride?
         var ruleEffects: ManagedWindowRuleEffects = .none
@@ -124,6 +151,7 @@ final class WindowModel {
             axRef: AXWindowRef,
             workspaceId: WorkspaceDescriptor.ID,
             mode: TrackedWindowMode,
+            managedReplacementMetadata: ManagedReplacementMetadata?,
             floatingState: FloatingState?,
             manualLayoutOverride: ManualWindowOverride?,
             ruleEffects: ManagedWindowRuleEffects,
@@ -133,6 +161,7 @@ final class WindowModel {
             self.axRef = axRef
             self.workspaceId = workspaceId
             self.mode = mode
+            self.managedReplacementMetadata = managedReplacementMetadata
             self.floatingState = floatingState
             self.manualLayoutOverride = manualLayoutOverride
             self.ruleEffects = ruleEffects
@@ -185,13 +214,17 @@ final class WindowModel {
         windowId: Int,
         workspace: WorkspaceDescriptor.ID,
         mode: TrackedWindowMode = .tiling,
-        ruleEffects: ManagedWindowRuleEffects = .none
+        ruleEffects: ManagedWindowRuleEffects = .none,
+        managedReplacementMetadata: ManagedReplacementMetadata? = nil
     ) -> WindowToken {
         let token = WindowToken(pid: pid, windowId: windowId)
         if let entry = entries[token] {
             entry.axRef = window
             updateWorkspace(for: token, workspace: workspace)
             entry.mode = mode
+            if let managedReplacementMetadata {
+                entry.managedReplacementMetadata = managedReplacementMetadata
+            }
             if entry.ruleEffects != ruleEffects {
                 entry.ruleEffects = ruleEffects
                 entry.cachedConstraints = nil
@@ -207,6 +240,7 @@ final class WindowModel {
             axRef: window,
             workspaceId: workspace,
             mode: mode,
+            managedReplacementMetadata: managedReplacementMetadata,
             floatingState: nil,
             manualLayoutOverride: nil,
             ruleEffects: ruleEffects,
@@ -219,10 +253,18 @@ final class WindowModel {
     }
 
     @discardableResult
-    func rekeyWindow(from oldToken: WindowToken, to newToken: WindowToken, newAXRef: AXWindowRef) -> Entry? {
+    func rekeyWindow(
+        from oldToken: WindowToken,
+        to newToken: WindowToken,
+        newAXRef: AXWindowRef,
+        managedReplacementMetadata: ManagedReplacementMetadata? = nil
+    ) -> Entry? {
         if oldToken == newToken {
             guard let entry = entries[oldToken] else { return nil }
             entry.axRef = newAXRef
+            if let managedReplacementMetadata {
+                entry.managedReplacementMetadata = managedReplacementMetadata
+            }
             return entry
         }
 
@@ -234,6 +276,9 @@ final class WindowModel {
 
         entry.handle.id = newToken
         entry.axRef = newAXRef
+        if let managedReplacementMetadata {
+            entry.managedReplacementMetadata = managedReplacementMetadata
+        }
         entries[newToken] = entry
 
         if var tokens = tokensByWorkspace[entry.workspaceId],

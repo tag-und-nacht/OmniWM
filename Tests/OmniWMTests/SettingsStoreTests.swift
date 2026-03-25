@@ -275,26 +275,62 @@ private func makeSettingsTestMonitor(
         #expect(decoded.effectiveLayoutAction == .float)
     }
 
-    @Test func appRuleEncodeDecodeRoundTripPreservesAdvancedFields() throws {
-        let original = AppRule(
-            id: UUID(uuidString: "00000000-0000-0000-0000-000000000032")!,
-            bundleId: "com.example.advanced",
-            appNameSubstring: "Example",
-            titleSubstring: "Chooser",
-            titleRegex: "^Chooser$",
-            axRole: kAXWindowRole as String,
-            axSubrole: kAXStandardWindowSubrole as String,
-            manage: .off,
-            layout: .float,
-            assignToWorkspace: "2",
-            minWidth: 800,
-            minHeight: 600
-        )
+    @Test func appRuleDecodesLegacyIgnoreRuleAsFloating() throws {
+        let json = """
+        {
+            "id": "00000000-0000-0000-0000-000000000032",
+            "bundleId": "com.example.advanced",
+            "appNameSubstring": "Example",
+            "titleSubstring": "Chooser",
+            "titleRegex": "^Chooser$",
+            "axRole": "AXWindow",
+            "axSubrole": "AXStandardWindow",
+            "manage": "off",
+            "assignToWorkspace": "2",
+            "minWidth": 800,
+            "minHeight": 600
+        }
+        """
 
-        let data = try JSONEncoder().encode(original)
-        let decoded = try JSONDecoder().decode(AppRule.self, from: data)
+        let decoded = try JSONDecoder().decode(AppRule.self, from: Data(json.utf8))
 
-        #expect(decoded == original)
+        #expect(decoded.bundleId == "com.example.advanced")
+        #expect(decoded.appNameSubstring == "Example")
+        #expect(decoded.titleSubstring == "Chooser")
+        #expect(decoded.titleRegex == "^Chooser$")
+        #expect(decoded.axRole == kAXWindowRole as String)
+        #expect(decoded.axSubrole == kAXStandardWindowSubrole as String)
+        #expect(decoded.manage == nil)
+        #expect(decoded.layout == .float)
+        #expect(decoded.assignToWorkspace == "2")
+        #expect(decoded.minWidth == 800)
+        #expect(decoded.minHeight == 600)
+    }
+
+    @Test @MainActor func settingsStoreRewritesLegacyIgnoredAppRulesOnLoad() throws {
+        let defaults = makeTestDefaults()
+        let json = """
+        [
+            {
+                "id": "00000000-0000-0000-0000-000000000033",
+                "bundleId": "com.example.legacy-ignore",
+                "manage": "off"
+            }
+        ]
+        """
+        defaults.set(Data(json.utf8), forKey: "settings.appRules")
+
+        let settings = SettingsStore(defaults: defaults)
+        let persisted = try #require(defaults.data(forKey: "settings.appRules"))
+        let rewrittenRules = try JSONDecoder().decode([AppRule].self, from: persisted)
+
+        #expect(settings.appRules.count == 1)
+        #expect(settings.appRules[0].bundleId == "com.example.legacy-ignore")
+        #expect(settings.appRules[0].manage == nil)
+        #expect(settings.appRules[0].layout == .float)
+        #expect(rewrittenRules.count == 1)
+        #expect(rewrittenRules[0].manage == nil)
+        #expect(rewrittenRules[0].layout == .float)
     }
 }
 

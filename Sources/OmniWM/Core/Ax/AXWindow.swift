@@ -81,13 +81,6 @@ enum AXWindowService {
         case title
     }
 
-    private static let trustedFloatingSubroles: Set<String> = [
-        "AXDialog",
-        "AXSystemDialog",
-        "AXFloatingWindow",
-        "AXUtilityWindow"
-    ]
-
     @MainActor
     static func titlePreferFast(windowId: UInt32) -> String? {
         SkyLight.shared.getWindowTitle(windowId)
@@ -277,11 +270,28 @@ enum AXWindowService {
         }
 
         let fullscreenButtonElement = attributeValue(.fullScreenButton)
+        var attributeFetchSucceeded = true
         let hasFullscreenButton = hasResolvedAttribute(fullscreenButtonElement)
 
         var fullscreenButtonEnabled: Bool?
         if hasFullscreenButton, let fullscreenButtonElement {
-            let buttonElement = fullscreenButtonElement as! AXUIElement
+            guard CFGetTypeID(fullscreenButtonElement as CFTypeRef) == AXUIElementGetTypeID() else {
+                attributeFetchSucceeded = false
+                return AXWindowFacts(
+                    role: attributeValue(.role) as? String,
+                    subrole: attributeValue(.subrole) as? String,
+                    title: includeTitle ? (attributeValue(.title) as? String) : nil,
+                    hasCloseButton: hasResolvedAttribute(attributeValue(.closeButton)),
+                    hasFullscreenButton: false,
+                    fullscreenButtonEnabled: nil,
+                    hasZoomButton: hasResolvedAttribute(attributeValue(.zoomButton)),
+                    hasMinimizeButton: hasResolvedAttribute(attributeValue(.minimizeButton)),
+                    appPolicy: appPolicy,
+                    bundleId: bundleId,
+                    attributeFetchSucceeded: attributeFetchSucceeded
+                )
+            }
+            let buttonElement = unsafeBitCast(fullscreenButtonElement, to: AXUIElement.self)
             var enabledValue: CFTypeRef?
             let enabledResult = AXUIElementCopyAttributeValue(
                 buttonElement,
@@ -289,7 +299,13 @@ enum AXWindowService {
                 &enabledValue
             )
             if enabledResult == .success {
-                fullscreenButtonEnabled = enabledValue as? Bool
+                if let enabledValue {
+                    if let resolvedEnabled = enabledValue as? Bool {
+                        fullscreenButtonEnabled = resolvedEnabled
+                    } else {
+                        attributeFetchSucceeded = false
+                    }
+                }
             }
         }
 
@@ -304,7 +320,7 @@ enum AXWindowService {
             hasMinimizeButton: hasResolvedAttribute(attributeValue(.minimizeButton)),
             appPolicy: appPolicy,
             bundleId: bundleId,
-            attributeFetchSucceeded: true
+            attributeFetchSucceeded: attributeFetchSucceeded
         )
     }
 
@@ -320,7 +336,7 @@ enum AXWindowService {
 
         if !facts.attributeFetchSucceeded {
             return AXWindowHeuristicDisposition(
-                disposition: .managed,
+                disposition: .undecided,
                 reasons: [.attributeFetchFailed]
             )
         }
@@ -329,8 +345,6 @@ enum AXWindowService {
             || facts.hasFullscreenButton
             || facts.hasZoomButton
             || facts.hasMinimizeButton
-        let isFixedSize = sizeConstraints?.isFixed == true
-        var weakHints: [AXWindowHeuristicReason] = []
 
         if facts.appPolicy == .accessory && !facts.hasCloseButton {
             return AXWindowHeuristicDisposition(
@@ -341,7 +355,7 @@ enum AXWindowService {
 
         if !hasAnyButton && facts.subrole != kAXStandardWindowSubrole as String {
             return AXWindowHeuristicDisposition(
-                disposition: .unmanaged,
+                disposition: .floating,
                 reasons: [.noButtonsOnNonStandardSubrole]
             )
         }
@@ -349,36 +363,29 @@ enum AXWindowService {
         if let subrole = facts.subrole,
            subrole != (kAXStandardWindowSubrole as String)
         {
-            if trustedFloatingSubroles.contains(subrole) {
-                return AXWindowHeuristicDisposition(
-                    disposition: .floating,
-                    reasons: [.trustedFloatingSubrole]
-                )
-            }
             return AXWindowHeuristicDisposition(
-                disposition: .unmanaged,
+                disposition: .floating,
                 reasons: [.nonStandardSubrole]
             )
         }
 
-        if facts.hasFullscreenButton {
-            if facts.fullscreenButtonEnabled != true {
-                weakHints.append(.disabledFullscreenButton)
-            }
-        } else {
-            weakHints.append(.missingFullscreenButton)
-        }
-
-        if isFixedSize {
+        if !facts.hasFullscreenButton {
             return AXWindowHeuristicDisposition(
                 disposition: .floating,
-                reasons: weakHints + [.fixedSizeWindow]
+                reasons: [.missingFullscreenButton]
+            )
+        }
+
+        if facts.fullscreenButtonEnabled != true {
+            return AXWindowHeuristicDisposition(
+                disposition: .floating,
+                reasons: [.disabledFullscreenButton]
             )
         }
 
         return AXWindowHeuristicDisposition(
             disposition: .managed,
-            reasons: weakHints
+            reasons: []
         )
     }
 

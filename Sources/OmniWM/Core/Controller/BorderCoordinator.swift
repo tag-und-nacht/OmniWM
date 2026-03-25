@@ -7,6 +7,7 @@ final class BorderCoordinator {
 
     private enum UpdateEligibility {
         case hide
+        case skip
         case update(activeWorkspaceId: WorkspaceDescriptor.ID)
     }
 
@@ -19,9 +20,11 @@ final class BorderCoordinator {
 
     func updateBorderIfAllowed(token: WindowToken, frame: CGRect, windowId: Int) {
         guard let controller else { return }
-        switch eligibilityForBorderUpdate(token: token) {
+        switch eligibilityForBorderUpdate(token: token, allowPendingFocus: false) {
         case .hide:
             controller.borderManager.hideBorder()
+        case .skip:
+            return
         case let .update(activeWorkspaceId):
             if shouldDeferBorderUpdates(for: activeWorkspaceId) {
                 return
@@ -36,9 +39,11 @@ final class BorderCoordinator {
     func updateDirectBorderIfAllowed(token: WindowToken, frame: CGRect, windowId: Int) {
         guard let controller else { return }
 
-        switch eligibilityForBorderUpdate(token: token) {
+        switch eligibilityForBorderUpdate(token: token, allowPendingFocus: true) {
         case .hide:
             controller.borderManager.hideBorder()
+        case .skip:
+            return
         case .update:
             controller.borderManager.updateFocusedWindow(
                 frame: resolveGhosttyObservedFrame(for: token, fallback: frame),
@@ -76,7 +81,10 @@ final class BorderCoordinator {
         return providedFrame
     }
 
-    private func eligibilityForBorderUpdate(token: WindowToken) -> UpdateEligibility {
+    private func eligibilityForBorderUpdate(
+        token: WindowToken,
+        allowPendingFocus: Bool
+    ) -> UpdateEligibility {
         guard let controller,
               let activeWorkspace = controller.activeWorkspace(),
               controller.workspaceManager.workspace(for: token) == activeWorkspace.id
@@ -96,7 +104,24 @@ final class BorderCoordinator {
             return .hide
         }
 
-        return .update(activeWorkspaceId: activeWorkspace.id)
+        if let entry = controller.workspaceManager.entry(for: token),
+           !controller.isManagedWindowDisplayable(entry.handle)
+        {
+            return .skip
+        }
+
+        if controller.workspaceManager.focusedToken == token {
+            return .update(activeWorkspaceId: activeWorkspace.id)
+        }
+
+        if allowPendingFocus,
+           controller.workspaceManager.pendingFocusedToken == token,
+           controller.workspaceManager.pendingFocusedWorkspaceId == activeWorkspace.id
+        {
+            return .update(activeWorkspaceId: activeWorkspace.id)
+        }
+
+        return .skip
     }
 
     private func shouldDeferBorderUpdates(for workspaceId: WorkspaceDescriptor.ID) -> Bool {

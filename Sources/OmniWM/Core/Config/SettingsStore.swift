@@ -397,7 +397,14 @@ final class SettingsStore {
         workspaceBarXOffset = defaults.object(forKey: Keys.workspaceBarXOffset) as? Double ?? 0.0
         workspaceBarYOffset = defaults.object(forKey: Keys.workspaceBarYOffset) as? Double ?? 0.0
         monitorBarSettings = MonitorSettingsStore.load(from: defaults, key: Keys.monitorBarSettings)
-        appRules = Self.loadAppRules(from: defaults)
+        let loadedAppRules = Self.loadAppRules(from: defaults)
+        appRules = loadedAppRules
+        if defaults.data(forKey: Keys.appRules) != nil,
+           let normalizedRulesData = try? JSONEncoder().encode(loadedAppRules),
+           normalizedRulesData != defaults.data(forKey: Keys.appRules)
+        {
+            defaults.set(normalizedRulesData, forKey: Keys.appRules)
+        }
         monitorOrientationSettings = MonitorSettingsStore.load(from: defaults, key: Keys.monitorOrientationSettings)
         monitorNiriSettings = MonitorSettingsStore.load(from: defaults, key: Keys.monitorNiriSettings)
 

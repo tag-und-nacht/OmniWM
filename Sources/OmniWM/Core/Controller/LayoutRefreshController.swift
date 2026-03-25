@@ -31,11 +31,13 @@ import QuartzCore
     struct FollowUpRefresh {
         var kind: ScheduledRefreshKind
         var reason: RefreshReason
+        var affectedWorkspaceIds: Set<WorkspaceDescriptor.ID> = []
     }
 
     struct ScheduledRefresh {
         var kind: ScheduledRefreshKind
         var reason: RefreshReason
+        var affectedWorkspaceIds: Set<WorkspaceDescriptor.ID> = []
         var postLayoutActions: [PostLayoutAction] = []
         var windowRemovalPayloads: [WindowRemovalPayload] = []
         var followUpRefresh: FollowUpRefresh?
@@ -45,11 +47,13 @@ import QuartzCore
         init(
             kind: ScheduledRefreshKind,
             reason: RefreshReason,
+            affectedWorkspaceIds: Set<WorkspaceDescriptor.ID> = [],
             postLayout: PostLayoutAction? = nil,
             windowRemovalPayload: WindowRemovalPayload? = nil
         ) {
             self.kind = kind
             self.reason = reason
+            self.affectedWorkspaceIds = affectedWorkspaceIds
             if let postLayout {
                 postLayoutActions = [postLayout]
             }
@@ -541,9 +545,16 @@ import QuartzCore
         scheduleFullRescan(reason: reason)
     }
 
-    func requestRelayout(reason: RefreshReason) {
+    func requestRelayout(
+        reason: RefreshReason,
+        affectedWorkspaceIds: Set<WorkspaceDescriptor.ID> = []
+    ) {
         assert(reason.requestRoute == .relayout, "Invalid relayout reason: \(reason)")
-        scheduleRefreshSession(reason.relayoutSchedulingPolicy, reason: reason)
+        scheduleRefreshSession(
+            reason.relayoutSchedulingPolicy,
+            reason: reason,
+            affectedWorkspaceIds: affectedWorkspaceIds
+        )
     }
 
     func requestImmediateRelayout(
@@ -599,7 +610,11 @@ import QuartzCore
         enqueueRefresh(.init(kind: .fullRescan, reason: reason))
     }
 
-    private func scheduleRefreshSession(_ policy: RelayoutSchedulingPolicy, reason: RefreshReason) {
+    private func scheduleRefreshSession(
+        _ policy: RelayoutSchedulingPolicy,
+        reason: RefreshReason,
+        affectedWorkspaceIds: Set<WorkspaceDescriptor.ID> = []
+    ) {
         if policy.shouldDropWhileBusy {
             if layoutState.isIncrementalRefreshInProgress || layoutState.isImmediateLayoutInProgress {
                 return
@@ -609,7 +624,9 @@ import QuartzCore
                 return
             }
         }
-        enqueueRefresh(.init(kind: .relayout, reason: reason))
+        enqueueRefresh(
+            .init(kind: .relayout, reason: reason, affectedWorkspaceIds: affectedWorkspaceIds)
+        )
     }
 
     private func executeScheduledRelayout(refresh: ScheduledRefresh) async -> Bool {
@@ -646,7 +663,8 @@ import QuartzCore
         do {
             var plan = try await buildRelayoutExecutionPlan(
                 useScrollAnimationPath: useScrollAnimationPath,
-                recoverFocus: recoverFocus
+                recoverFocus: recoverFocus,
+                affectedWorkspaceIds: refresh.affectedWorkspaceIds
             )
             applyRefreshMetadata(refresh, to: &plan)
             try Task.checkCancellation()
@@ -813,7 +831,7 @@ import QuartzCore
         defer { layoutState.isFullEnumerationInProgress = false }
 
         guard let controller else { return false }
-        controller.axEventHandler.resetGhosttyReplacementState()
+        controller.axEventHandler.resetManagedReplacementState()
 
         if controller.isFrontmostAppLockScreen() || controller.isLockScreenActive {
             return false
@@ -856,12 +874,14 @@ import QuartzCore
 
     private func buildRelayoutExecutionPlan(
         useScrollAnimationPath: Bool,
-        recoverFocus: Bool
+        recoverFocus: Bool,
+        affectedWorkspaceIds: Set<WorkspaceDescriptor.ID>
     ) async throws -> RefreshExecutionPlan {
         guard let controller else { return .init() }
 
         let activeWorkspaceIds = currentActiveWorkspaceIds()
-        let (niriWorkspaces, dwindleWorkspaces) = partitionWorkspacesByLayoutType(activeWorkspaceIds)
+        let layoutWorkspaceIds = affectedWorkspaceIds.isEmpty ? activeWorkspaceIds : affectedWorkspaceIds
+        let (niriWorkspaces, dwindleWorkspaces) = partitionWorkspacesByLayoutType(layoutWorkspaceIds)
         var workspacePlans: [WorkspaceLayoutPlan] = []
         workspacePlans.reserveCapacity(niriWorkspaces.count + dwindleWorkspaces.count)
 
@@ -915,9 +935,14 @@ import QuartzCore
             case .dwindle:
                 dwindleWorkspaces.insert(payload.workspaceId)
             case .niri, .defaultLayout:
+                var removedNodeIds = niriRemovalSeeds[payload.workspaceId]?.removedNodeIds ?? []
+                if let removedNodeId = payload.removedNodeId {
+                    removedNodeIds.append(removedNodeId)
+                }
+                let existingOldFrames = niriRemovalSeeds[payload.workspaceId]?.oldFrames ?? [:]
                 niriRemovalSeeds[payload.workspaceId] = NiriWindowRemovalSeed(
-                    removedNodeId: payload.removedNodeId,
-                    oldFrames: payload.niriOldFrames
+                    removedNodeIds: removedNodeIds,
+                    oldFrames: existingOldFrames.merging(payload.niriOldFrames) { current, _ in current }
                 )
             }
 
@@ -1077,7 +1102,7 @@ import QuartzCore
             seenKeys.insert(.init(pid: entry.handle.pid, windowId: entry.windowId))
         }
 
-        controller.workspaceManager.removeMissing(keys: seenKeys, requiredConsecutiveMisses: 2)
+        controller.workspaceManager.removeMissing(keys: seenKeys, requiredConsecutiveMisses: 1)
         controller.workspaceManager.garbageCollectUnusedWorkspaces(focusedWorkspaceId: focusedWorkspaceId)
 
         try Task.checkCancellation()
@@ -1228,6 +1253,8 @@ import QuartzCore
             return
         }
 
+        let existingAffectedWorkspaceIds = pendingRefresh.affectedWorkspaceIds
+
         switch (pendingRefresh.kind, refresh.kind) {
         case (.fullRescan, .fullRescan):
             pendingRefresh.reason = refresh.reason
@@ -1266,11 +1293,21 @@ import QuartzCore
             mergeAbsorbedVisibility(into: &pendingRefresh, from: refresh)
         case (.windowRemoval, .immediateRelayout):
             pendingRefresh.postLayoutActions.append(contentsOf: refresh.postLayoutActions)
-            mergeFollowUp(into: &pendingRefresh, kind: .immediateRelayout, reason: refresh.reason)
+            mergeFollowUp(
+                into: &pendingRefresh,
+                kind: .immediateRelayout,
+                reason: refresh.reason,
+                affectedWorkspaceIds: refresh.affectedWorkspaceIds
+            )
             mergeAbsorbedVisibility(into: &pendingRefresh, from: refresh)
         case (.windowRemoval, .relayout):
             pendingRefresh.postLayoutActions.append(contentsOf: refresh.postLayoutActions)
-            mergeFollowUp(into: &pendingRefresh, kind: .relayout, reason: refresh.reason)
+            mergeFollowUp(
+                into: &pendingRefresh,
+                kind: .relayout,
+                reason: refresh.reason,
+                affectedWorkspaceIds: refresh.affectedWorkspaceIds
+            )
             mergeAbsorbedVisibility(into: &pendingRefresh, from: refresh)
         case (.windowRemoval, .visibilityRefresh):
             pendingRefresh.postLayoutActions.append(contentsOf: refresh.postLayoutActions)
@@ -1279,14 +1316,24 @@ import QuartzCore
             var upgradedRefresh = refresh
             upgradedRefresh.postLayoutActions.append(contentsOf: pendingRefresh.postLayoutActions)
             upgradedRefresh.followUpRefresh = pendingRefresh.followUpRefresh
-            mergeFollowUp(into: &upgradedRefresh, kind: .immediateRelayout, reason: pendingRefresh.reason)
+            mergeFollowUp(
+                into: &upgradedRefresh,
+                kind: .immediateRelayout,
+                reason: pendingRefresh.reason,
+                affectedWorkspaceIds: pendingRefresh.affectedWorkspaceIds
+            )
             mergeAbsorbedVisibility(into: &upgradedRefresh, from: pendingRefresh)
             mergeAbsorbedVisibility(into: &upgradedRefresh, from: refresh)
             pendingRefresh = upgradedRefresh
         case (.relayout, .windowRemoval):
             var upgradedRefresh = refresh
             upgradedRefresh.postLayoutActions.append(contentsOf: pendingRefresh.postLayoutActions)
-            mergeFollowUp(into: &upgradedRefresh, kind: .relayout, reason: pendingRefresh.reason)
+            mergeFollowUp(
+                into: &upgradedRefresh,
+                kind: .relayout,
+                reason: pendingRefresh.reason,
+                affectedWorkspaceIds: pendingRefresh.affectedWorkspaceIds
+            )
             mergeAbsorbedVisibility(into: &upgradedRefresh, from: pendingRefresh)
             mergeAbsorbedVisibility(into: &upgradedRefresh, from: refresh)
             pendingRefresh = upgradedRefresh
@@ -1305,7 +1352,12 @@ import QuartzCore
             mergeAbsorbedVisibility(into: &pendingRefresh, from: refresh)
         case (.immediateRelayout, .relayout):
             pendingRefresh.postLayoutActions.append(contentsOf: refresh.postLayoutActions)
-            mergeFollowUp(into: &pendingRefresh, kind: .relayout, reason: refresh.reason)
+            mergeFollowUp(
+                into: &pendingRefresh,
+                kind: .relayout,
+                reason: refresh.reason,
+                affectedWorkspaceIds: refresh.affectedWorkspaceIds
+            )
             mergeAbsorbedVisibility(into: &pendingRefresh, from: refresh)
         case (.relayout, .immediateRelayout):
             var upgradedRefresh = refresh
@@ -1314,11 +1366,19 @@ import QuartzCore
                 pendingRefresh.followUpRefresh,
                 with: refresh.followUpRefresh
             )
-            mergeFollowUp(into: &upgradedRefresh, kind: .relayout, reason: pendingRefresh.reason)
+            mergeFollowUp(
+                into: &upgradedRefresh,
+                kind: .relayout,
+                reason: pendingRefresh.reason,
+                affectedWorkspaceIds: pendingRefresh.affectedWorkspaceIds
+            )
             mergeAbsorbedVisibility(into: &upgradedRefresh, from: pendingRefresh)
             mergeAbsorbedVisibility(into: &upgradedRefresh, from: refresh)
             pendingRefresh = upgradedRefresh
         }
+
+        pendingRefresh.affectedWorkspaceIds.formUnion(existingAffectedWorkspaceIds)
+        pendingRefresh.affectedWorkspaceIds.formUnion(refresh.affectedWorkspaceIds)
 
         layoutState.pendingRefresh = pendingRefresh
     }
@@ -1389,7 +1449,11 @@ import QuartzCore
             }
             if let followUpRefresh = completedRefresh.followUpRefresh {
                 enqueueRefresh(
-                    .init(kind: followUpRefresh.kind, reason: followUpRefresh.reason)
+                    .init(
+                        kind: followUpRefresh.kind,
+                        reason: followUpRefresh.reason,
+                        affectedWorkspaceIds: followUpRefresh.affectedWorkspaceIds
+                    )
                 )
             }
         }
@@ -1419,33 +1483,18 @@ import QuartzCore
         _ existingPayloads: [WindowRemovalPayload],
         with incomingPayloads: [WindowRemovalPayload]
     ) -> [WindowRemovalPayload] {
-        var mergedByWorkspace: [WorkspaceDescriptor.ID: WindowRemovalPayload] = [:]
-        var order: [WorkspaceDescriptor.ID] = []
-
-        for payload in existingPayloads + incomingPayloads {
-            if var existing = mergedByWorkspace[payload.workspaceId] {
-                let oldFrames = existing.niriOldFrames.isEmpty ? payload.niriOldFrames : existing.niriOldFrames
-                existing = WindowRemovalPayload(
-                    workspaceId: payload.workspaceId,
-                    layoutType: payload.layoutType,
-                    removedNodeId: payload.removedNodeId ?? existing.removedNodeId,
-                    niriOldFrames: oldFrames,
-                    shouldRecoverFocus: existing.shouldRecoverFocus || payload.shouldRecoverFocus
-                )
-                mergedByWorkspace[payload.workspaceId] = existing
-            } else {
-                mergedByWorkspace[payload.workspaceId] = payload
-                order.append(payload.workspaceId)
-            }
-        }
-
-        return order.compactMap { mergedByWorkspace[$0] }
+        existingPayloads + incomingPayloads
     }
 
-    private func mergeFollowUp(into refresh: inout ScheduledRefresh, kind: ScheduledRefreshKind, reason: RefreshReason) {
+    private func mergeFollowUp(
+        into refresh: inout ScheduledRefresh,
+        kind: ScheduledRefreshKind,
+        reason: RefreshReason,
+        affectedWorkspaceIds: Set<WorkspaceDescriptor.ID> = []
+    ) {
         refresh.followUpRefresh = mergeFollowUpRefresh(
             refresh.followUpRefresh,
-            with: .init(kind: kind, reason: reason)
+            with: .init(kind: kind, reason: reason, affectedWorkspaceIds: affectedWorkspaceIds)
         )
     }
 
@@ -1471,10 +1520,17 @@ import QuartzCore
         case let (value?, nil), let (nil, value?):
             return value
         case let (existing?, incoming?):
+            var merged = incoming
+            merged.affectedWorkspaceIds.formUnion(existing.affectedWorkspaceIds)
             if existing.kind == .immediateRelayout || incoming.kind == .immediateRelayout {
-                return incoming.kind == .immediateRelayout ? incoming : existing
+                if incoming.kind == .immediateRelayout {
+                    return merged
+                }
+                var kept = existing
+                kept.affectedWorkspaceIds.formUnion(incoming.affectedWorkspaceIds)
+                return kept
             }
-            return incoming
+            return merged
         }
     }
 
@@ -1487,6 +1543,8 @@ import QuartzCore
         if !refresh.postLayoutActions.isEmpty {
             pendingRefresh.postLayoutActions.insert(contentsOf: refresh.postLayoutActions, at: 0)
         }
+
+        pendingRefresh.affectedWorkspaceIds.formUnion(refresh.affectedWorkspaceIds)
 
         if refresh.kind == .windowRemoval, !refresh.windowRemovalPayloads.isEmpty {
             pendingRefresh.windowRemovalPayloads = mergeWindowRemovalPayloads(
@@ -1692,6 +1750,10 @@ import QuartzCore
     ) -> WindowModel.HiddenReason {
         if existingState?.isScratchpad == true, reason != .scratchpad {
             return .scratchpad
+        }
+
+        if existingState?.workspaceInactive == true, reason == .layoutTransient {
+            return .workspaceInactive
         }
 
         switch reason {

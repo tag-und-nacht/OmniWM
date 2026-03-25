@@ -1459,6 +1459,67 @@ private func prepareNiriState(
         #expect(controller.workspaceManager.layoutReason(for: handle) == .standard)
     }
 
+    @Test @MainActor func fullRescanRemovesMissingTrackedWindowOnFirstVerifiedMiss() async {
+        let controller = makeRefreshTestController()
+        controller.axManager.currentWindowsAsyncOverride = { [] }
+        guard let workspaceId = controller.activeWorkspace()?.id else {
+            Issue.record("Missing active workspace")
+            return
+        }
+
+        let pid = getpid()
+        let windowId = 3061
+        _ = addWindow(on: controller, workspaceId: workspaceId, pid: pid, windowId: windowId)
+
+        controller.layoutRefreshController.requestFullRescan(reason: .startup)
+        await waitForRefreshWork(on: controller)
+
+        #expect(controller.workspaceManager.entry(forPid: pid, windowId: windowId) == nil)
+    }
+
+    @Test @MainActor func sameWorkspaceWindowRemovalPreservesMultiplePayloads() async {
+        let controller = makeRefreshTestController()
+        guard let workspaceId = controller.activeWorkspace()?.id else {
+            Issue.record("Missing active workspace")
+            return
+        }
+
+        let gate = AsyncGate()
+        var observedPayloadCounts: [Int] = []
+        controller.layoutRefreshController.debugHooks.onRelayout = { _, route in
+            if route == .immediateRelayout {
+                await gate.wait()
+            }
+            return true
+        }
+        controller.layoutRefreshController.debugHooks.onWindowRemoval = { reason, payloads in
+            if reason == .windowDestroyed {
+                observedPayloadCounts.append(payloads.count)
+            }
+            return true
+        }
+
+        controller.layoutRefreshController.requestImmediateRelayout(reason: .workspaceTransition)
+        controller.layoutRefreshController.requestWindowRemoval(
+            workspaceId: workspaceId,
+            layoutType: .niri,
+            removedNodeId: NodeId(),
+            niriOldFrames: [WindowToken(pid: getpid(), windowId: 4011): CGRect(x: 0, y: 0, width: 100, height: 100)],
+            shouldRecoverFocus: false
+        )
+        controller.layoutRefreshController.requestWindowRemoval(
+            workspaceId: workspaceId,
+            layoutType: .niri,
+            removedNodeId: NodeId(),
+            niriOldFrames: [WindowToken(pid: getpid(), windowId: 4012): CGRect(x: 100, y: 0, width: 100, height: 100)],
+            shouldRecoverFocus: false
+        )
+        gate.open()
+        await waitForRefreshWork(on: controller)
+
+        #expect(observedPayloadCounts == [2])
+    }
+
     @Test @MainActor func immediateRelayoutSupersedesPendingDebouncedRelayout() async {
         let controller = makeRefreshTestController()
         controller.layoutRefreshController.resetDebugState()

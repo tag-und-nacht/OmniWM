@@ -940,4 +940,81 @@ private func waitForFocusRefresh(on controller: WMController) async {
 
         #expect(recorder.events.isEmpty)
     }
+
+    @Test @MainActor func toggleFocusedWindowFloatingRetilesTrackedGhosttyFloatingWindow() async {
+        let operations = WindowFocusOperations(
+            activateApp: { _ in },
+            focusSpecificWindow: { _, _, _ in },
+            raiseWindow: { _ in }
+        )
+        let (controller, workspaceId, _) = makeFocusTestController(windowFocusOperations: operations)
+        let ghosttyHandle = addManagedTestWindow(
+            on: controller,
+            pid: 60,
+            windowId: 741,
+            workspaceId: workspaceId,
+            mode: .floating
+        )
+        controller.appInfoCache.storeInfoForTests(pid: 60, bundleId: "com.mitchellh.ghostty")
+        controller.axEventHandler.windowFactsProvider = { _, pid in
+            guard pid == 60 else {
+                return WindowRuleFacts(
+                    appName: "Example",
+                    ax: AXWindowFacts(
+                        role: kAXWindowRole as String,
+                        subrole: kAXStandardWindowSubrole as String,
+                        title: "Example",
+                        hasCloseButton: true,
+                        hasFullscreenButton: true,
+                        fullscreenButtonEnabled: true,
+                        hasZoomButton: true,
+                        hasMinimizeButton: true,
+                        appPolicy: .regular,
+                        bundleId: "com.example.app",
+                        attributeFetchSucceeded: true
+                    ),
+                    sizeConstraints: nil,
+                    windowServer: nil
+                )
+            }
+
+            return WindowRuleFacts(
+                appName: "Ghostty",
+                ax: AXWindowFacts(
+                    role: kAXWindowRole as String,
+                    subrole: kAXStandardWindowSubrole as String,
+                    title: "ghostty",
+                    hasCloseButton: false,
+                    hasFullscreenButton: false,
+                    fullscreenButtonEnabled: nil,
+                    hasZoomButton: false,
+                    hasMinimizeButton: false,
+                    appPolicy: .regular,
+                    bundleId: "com.mitchellh.ghostty",
+                    attributeFetchSucceeded: true
+                ),
+                sizeConstraints: nil,
+                windowServer: nil
+            )
+        }
+        defer { controller.axEventHandler.windowFactsProvider = nil }
+
+        _ = controller.workspaceManager.setManagedFocus(
+            ghosttyHandle.id,
+            in: workspaceId,
+            onMonitor: controller.workspaceManager.monitorId(for: workspaceId)
+        )
+
+        controller.toggleFocusedWindowFloating()
+        await waitForFocusRefresh(on: controller)
+
+        guard let ghosttyEntry = controller.workspaceManager.entry(for: ghosttyHandle) else {
+            Issue.record("Expected tracked Ghostty entry after toggle")
+            return
+        }
+
+        #expect(ghosttyEntry.mode == .tiling)
+        #expect(controller.workspaceManager.manualLayoutOverride(for: ghosttyHandle.id) == .forceTile)
+        #expect(controller.workspaceManager.tiledEntries(in: workspaceId).contains { $0.token == ghosttyHandle.id })
+    }
 }

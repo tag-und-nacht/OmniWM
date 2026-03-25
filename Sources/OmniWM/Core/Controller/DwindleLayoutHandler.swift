@@ -86,22 +86,22 @@ import QuartzCore
     func layoutWithDwindleEngine(activeWorkspaces: Set<WorkspaceDescriptor.ID>) async throws -> [WorkspaceLayoutPlan] {
         guard let controller, let engine = controller.dwindleEngine else { return [] }
         var plans: [WorkspaceLayoutPlan] = []
-        for monitor in controller.workspaceManager.monitors {
+        for wsId in activeWorkspaces.sorted(by: { $0.uuidString < $1.uuidString }) {
             try Task.checkCancellation()
-            guard let workspace = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id) else { continue }
-            let wsId = workspace.id
-
-            guard activeWorkspaces.contains(wsId) else { continue }
+            guard let workspace = controller.workspaceManager.descriptor(for: wsId),
+                  let monitor = controller.workspaceManager.monitor(for: wsId)
+            else { continue }
 
             let wsName = workspace.name
             let layoutType = controller.settings.layoutType(for: wsName)
             guard layoutType == .dwindle else { continue }
+            let isActiveWorkspace = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id == wsId
 
             guard let snapshot = makeWorkspaceSnapshot(
                 workspaceId: wsId,
                 monitor: monitor,
                 resolveConstraints: true,
-                isActiveWorkspace: activeWorkspaces.contains(wsId)
+                isActiveWorkspace: isActiveWorkspace
             ) else { continue }
 
             plans.append(

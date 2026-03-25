@@ -705,9 +705,11 @@ final class WMController {
         return WindowDecision(
             disposition: manualOverride == .forceTile ? .managed : .floating,
             source: .manualOverride,
+            layoutDecisionKind: .explicitLayout,
             workspaceName: decision.workspaceName,
             ruleEffects: decision.ruleEffects,
-            heuristicReasons: []
+            heuristicReasons: [],
+            deferredReason: nil
         )
     }
 
@@ -1181,6 +1183,9 @@ final class WMController {
             manualOverride: evaluation.manualOverride,
             disposition: evaluation.decision.disposition,
             source: evaluation.decision.source,
+            layoutDecisionKind: evaluation.decision.layoutDecisionKind,
+            deferredReason: evaluation.decision.deferredReason,
+            admissionOutcome: evaluation.decision.admissionOutcome,
             workspaceName: evaluation.decision.workspaceName,
             minWidth: evaluation.decision.ruleEffects.minWidth,
             minHeight: evaluation.decision.ruleEffects.minHeight,
@@ -1218,6 +1223,7 @@ final class WMController {
 
     private func resolveAXWindowRef(for token: WindowToken) -> AXWindowRef? {
         workspaceManager.entry(for: token)?.axRef
+            ?? axEventHandler.axWindowRefProvider?(UInt32(token.windowId), token.pid)
             ?? AXWindowService.axWindowRef(for: UInt32(token.windowId), pid: token.pid)
     }
 
@@ -1259,6 +1265,7 @@ final class WMController {
         }
 
         var relayoutNeeded = false
+        var affectedWorkspaceIds: Set<WorkspaceDescriptor.ID> = []
 
         for token in tokensToReevaluate.sorted(by: {
             if $0.pid == $1.pid {
@@ -1276,7 +1283,8 @@ final class WMController {
                 decision: evaluation.decision,
                 existingEntry: existingEntry
             ) else {
-                if existingEntry != nil {
+                if let existingEntry {
+                    affectedWorkspaceIds.insert(existingEntry.workspaceId)
                     _ = workspaceManager.removeWindow(pid: token.pid, windowId: token.windowId)
                     relayoutNeeded = true
                 }
@@ -1316,17 +1324,38 @@ final class WMController {
                 )
             }
 
+            if let updatedEntry = workspaceManager.entry(for: token) {
+                updatedEntry.managedReplacementMetadata = ManagedReplacementMetadata(
+                    bundleId: evaluation.facts.ax.bundleId ?? updatedEntry.managedReplacementMetadata?.bundleId,
+                    workspaceId: updatedEntry.workspaceId,
+                    mode: updatedEntry.mode,
+                    role: evaluation.facts.ax.role ?? updatedEntry.managedReplacementMetadata?.role,
+                    subrole: evaluation.facts.ax.subrole ?? updatedEntry.managedReplacementMetadata?.subrole,
+                    title: evaluation.facts.ax.title ?? updatedEntry.managedReplacementMetadata?.title,
+                    windowLevel: evaluation.facts.windowServer?.level ?? updatedEntry.managedReplacementMetadata?.windowLevel,
+                    parentWindowId: evaluation.facts.windowServer?.parentId ?? updatedEntry.managedReplacementMetadata?.parentWindowId,
+                    frame: evaluation.facts.windowServer?.frame ?? updatedEntry.managedReplacementMetadata?.frame
+                )
+            }
+
             if existingEntry == nil
                 || oldEffects != evaluation.decision.ruleEffects
                 || oldWorkspaceId != workspaceId
                 || oldMode != trackedMode
             {
+                if let oldWorkspaceId {
+                    affectedWorkspaceIds.insert(oldWorkspaceId)
+                }
+                affectedWorkspaceIds.insert(workspaceId)
                 relayoutNeeded = true
             }
         }
 
         if relayoutNeeded {
-            layoutRefreshController.requestRelayout(reason: .windowRuleReevaluation)
+            layoutRefreshController.requestRelayout(
+                reason: .windowRuleReevaluation,
+                affectedWorkspaceIds: affectedWorkspaceIds
+            )
         }
 
         return relayoutNeeded
@@ -1409,7 +1438,10 @@ final class WMController {
             existingEntry: entry
         ) else {
             _ = workspaceManager.removeWindow(pid: token.pid, windowId: token.windowId)
-            layoutRefreshController.requestRelayout(reason: .windowRuleReevaluation)
+            layoutRefreshController.requestRelayout(
+                reason: .windowRuleReevaluation,
+                affectedWorkspaceIds: [entry.workspaceId]
+            )
             return
         }
 
@@ -1419,7 +1451,10 @@ final class WMController {
             preferredMonitor: monitorForInteraction(),
             applyFloatingFrame: true
         )
-        layoutRefreshController.requestRelayout(reason: .windowRuleReevaluation)
+        layoutRefreshController.requestRelayout(
+            reason: .windowRuleReevaluation,
+            affectedWorkspaceIds: [entry.workspaceId]
+        )
     }
 
     func toggleScratchpadWindow() {

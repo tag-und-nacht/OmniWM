@@ -139,9 +139,6 @@ struct AppRuleSidebarRow: View {
                 case .auto:
                     EmptyView()
                 }
-                if rule.effectiveManageAction == .off {
-                    RuleBadge(text: "Ignore", color: .red)
-                }
                 if rule.assignToWorkspace != nil {
                     RuleBadge(text: "WS", color: .green)
                 }
@@ -232,18 +229,11 @@ struct AppRuleDetailView: View {
                 }
 
                 Section("Window Behavior") {
-                    Picker("Manage", selection: $draft.manageAction) {
-                        ForEach(WindowRuleManageAction.allCases) { action in
-                            Text(action.displayName).tag(action)
-                        }
-                    }
-
                     Picker("Layout", selection: $draft.layoutAction) {
                         ForEach(WindowRuleLayoutAction.allCases) { action in
                             Text(action.displayName).tag(action)
                         }
                     }
-                    .disabled(draft.manageAction == .off)
                     .onChange(of: draft.layoutAction) { _, _ in
                         draft.usesLegacyAlwaysFloat = false
                     }
@@ -428,18 +418,11 @@ struct AppRuleAddSheet: View {
                 }
 
                 Section("Window Behavior") {
-                    Picker("Manage", selection: $draft.manageAction) {
-                        ForEach(WindowRuleManageAction.allCases) { action in
-                            Text(action.displayName).tag(action)
-                        }
-                    }
-
                     Picker("Layout", selection: $draft.layoutAction) {
                         ForEach(WindowRuleLayoutAction.allCases) { action in
                             Text(action.displayName).tag(action)
                         }
                     }
-                    .disabled(draft.manageAction == .off)
                     .onChange(of: draft.layoutAction) { _, _ in
                         draft.usesLegacyAlwaysFloat = false
                     }
