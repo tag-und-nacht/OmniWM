@@ -1,17 +1,3 @@
-# OmniWM
-
-A powerful tiling window manager for macOS.
-
-## Config File Workflow
-
-Editable config workflow for `~/.config/omniwm/settings.json`:
-- **Editable Config** writes the full canonical settings file (hotkeys, monitor overrides) for direct editing
-- **Compact Backup** writes only values that differ from defaults; import merges back into the full model
-- **Create / Reveal / Open** settings file actions in the status bar menu
-- Import action with user feedback for config workflows
-
----
-
 ## Demo Video
 
 [![Watch the demo](https://img.youtube.com/vi/WcHjGkuD2Fc/maxresdefault.jpg)](https://youtu.be/WcHjGkuD2Fc)
@@ -72,6 +58,13 @@ Editable config workflow for `~/.config/omniwm/settings.json`:
       </a>
       <br>
       <a href="https://github.com/Yang-Yiming"><strong>Yang-Yiming</strong></a>
+    </td>
+    <td align="center">
+      <a href="https://github.com/zicochaos" title="Zicochaos">
+        <img src="https://github.com/Zicochaos.png?size=96" width="96" alt="Zicochaos">
+      </a>
+      <br>
+      <a href="https://github.com/zicochaos"><strong>Zicochaos</strong></a>
     </td>
   </tr>
 </table>
