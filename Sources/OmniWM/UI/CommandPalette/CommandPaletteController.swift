@@ -136,6 +136,7 @@ final class CommandPaletteController: NSObject, ObservableObject, NSWindowDelega
     private var menuFocusTarget: CommandPaletteFocusTarget?
     private var summonAnchor: CommandPaletteSummonAnchor?
     private var cachedMenuTargetApp: CommandPaletteAppSnapshot?
+    private var sessionMenuCache: [pid_t: [MenuItemModel]] = [:]
     private var hasLoadedMenuItems = false
     private var menuLoadGeneration = 0
     private var isProgrammaticDismiss = false
@@ -202,6 +203,7 @@ final class CommandPaletteController: NSObject, ObservableObject, NSWindowDelega
         windows = buildWindowItems(from: wmController)
         menuItems = []
         hasLoadedMenuItems = false
+        sessionMenuCache.removeAll()
         isMenuLoading = false
         searchText = ""
         selectedItemID = nil
@@ -525,6 +527,14 @@ final class CommandPaletteController: NSObject, ObservableObject, NSWindowDelega
         guard !hasLoadedMenuItems else { return }
         guard let menuFocusTarget else { return }
 
+        let pid = menuFocusTarget.app.processIdentifier
+        if let cached = sessionMenuCache[pid] {
+            hasLoadedMenuItems = true
+            menuItems = cached
+            isMenuLoading = false
+            return
+        }
+
         hasLoadedMenuItems = true
         isMenuLoading = true
         menuItems = []
@@ -540,8 +550,9 @@ final class CommandPaletteController: NSObject, ObservableObject, NSWindowDelega
                 return
             }
 
-            let items = self.environment.fetchMenuItems(menuFocusTarget.app.processIdentifier)
+            let items = self.environment.fetchMenuItems(pid)
             guard self.isVisible, self.menuLoadGeneration == generation else { return }
+            self.sessionMenuCache[pid] = items
             self.menuItems = items
             self.isMenuLoading = false
         }
@@ -646,6 +657,7 @@ final class CommandPaletteController: NSObject, ObservableObject, NSWindowDelega
         summonAnchor = nil
         wmController = nil
         hasLoadedMenuItems = false
+        sessionMenuCache.removeAll()
         searchText = ""
         selectedItemID = nil
         windows = []
