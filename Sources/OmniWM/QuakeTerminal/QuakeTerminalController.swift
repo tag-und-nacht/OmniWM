@@ -175,6 +175,8 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
             }
 
             let newContent = lines.joined(separator: "\n")
+            let existingContent = try? String(contentsOf: configFile, encoding: .utf8)
+            guard newContent != existingContent else { return }
             try newContent.write(to: configFile, atomically: true, encoding: .utf8)
         } catch {
             print("QuakeTerminal: Failed to update ghostty config: \(error)")
