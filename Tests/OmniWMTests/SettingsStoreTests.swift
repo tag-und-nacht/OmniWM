@@ -359,6 +359,9 @@ private func makeSettingsTestMonitor(
         #expect(defaults.appRules == BuiltInSettingsDefaults.appRules)
         #expect(defaults.preventSleepEnabled == false)
         #expect(defaults.scrollSensitivity == 5.0)
+        #expect(defaults.statusBarShowWorkspaceName == false)
+        #expect(defaults.statusBarShowAppNames == false)
+        #expect(defaults.statusBarUseWorkspaceId == false)
         #expect(defaults.hiddenBarIsCollapsed == true)
         #expect(defaults.quakeTerminalEnabled == true)
         #expect(defaults.quakeTerminalPosition == QuakeTerminalPosition.center.rawValue)
@@ -431,6 +434,9 @@ private func makeSettingsTestMonitor(
             "scrollModifierKey": "futureModifier",
             "gestureFingerCount": 99,
             "gestureInvertDirection": true,
+            "statusBarShowWorkspaceName": true,
+            "statusBarShowAppNames": true,
+            "statusBarUseWorkspaceId": true,
             "commandPaletteLastMode": "futurePaletteMode",
             "animationsEnabled": true,
             "hiddenBarIsCollapsed": false,
@@ -516,6 +522,9 @@ private func makeSettingsTestMonitor(
             scrollModifierKey: "option",
             gestureFingerCount: 4,
             gestureInvertDirection: true,
+            statusBarShowWorkspaceName: true,
+            statusBarShowAppNames: true,
+            statusBarUseWorkspaceId: true,
             commandPaletteLastMode: "menu",
             hiddenBarIsCollapsed: true,
             quakeTerminalEnabled: true,
@@ -1236,6 +1245,9 @@ private func makeSettingsTestMonitor(
         let settings = SettingsStore(defaults: makeTestDefaults())
         settings.focusFollowsWindowToMonitor = true
         settings.mouseWarpAxis = .vertical
+        settings.statusBarShowWorkspaceName = true
+        settings.statusBarShowAppNames = true
+        settings.statusBarUseWorkspaceId = true
         settings.commandPaletteLastMode = .menu
         settings.quakeTerminalEnabled = true
         settings.quakeTerminalPosition = .bottom
@@ -1255,6 +1267,9 @@ private func makeSettingsTestMonitor(
 
         #expect(imported.focusFollowsWindowToMonitor == true)
         #expect(imported.mouseWarpAxis == .vertical)
+        #expect(imported.statusBarShowWorkspaceName == true)
+        #expect(imported.statusBarShowAppNames == true)
+        #expect(imported.statusBarUseWorkspaceId == true)
         #expect(imported.commandPaletteLastMode == .menu)
         #expect(imported.quakeTerminalEnabled == true)
         #expect(imported.quakeTerminalPosition == .bottom)
@@ -1473,6 +1488,9 @@ private func makeSettingsTestMonitor(
             scrollModifierKey: imported.scrollModifierKey.rawValue,
             gestureFingerCount: imported.gestureFingerCount.rawValue,
             gestureInvertDirection: imported.gestureInvertDirection,
+            statusBarShowWorkspaceName: imported.statusBarShowWorkspaceName,
+            statusBarShowAppNames: imported.statusBarShowAppNames,
+            statusBarUseWorkspaceId: imported.statusBarUseWorkspaceId,
             commandPaletteLastMode: imported.commandPaletteLastMode.rawValue,
             hiddenBarIsCollapsed: imported.hiddenBarIsCollapsed,
             quakeTerminalEnabled: imported.quakeTerminalEnabled,
@@ -1606,6 +1624,9 @@ private func makeSettingsTestMonitor(
         #expect(settings.mouseWarpMonitorOrder.isEmpty)
         #expect(settings.preventSleepEnabled == false)
         #expect(settings.scrollSensitivity == 5.0)
+        #expect(settings.statusBarShowWorkspaceName == false)
+        #expect(settings.statusBarShowAppNames == false)
+        #expect(settings.statusBarUseWorkspaceId == false)
         #expect(settings.hiddenBarIsCollapsed == true)
         #expect(settings.quakeTerminalEnabled == true)
         #expect(settings.quakeTerminalPosition == .center)
@@ -1637,6 +1658,9 @@ private func makeSettingsTestMonitor(
         #expect(settings.dwindleDefaultSplitRatio == exportDefaults.dwindleDefaultSplitRatio)
         #expect(settings.scrollModifierKey.rawValue == exportDefaults.scrollModifierKey)
         #expect(settings.gestureFingerCount.rawValue == exportDefaults.gestureFingerCount)
+        #expect(settings.statusBarShowWorkspaceName == exportDefaults.statusBarShowWorkspaceName)
+        #expect(settings.statusBarShowAppNames == exportDefaults.statusBarShowAppNames)
+        #expect(settings.statusBarUseWorkspaceId == exportDefaults.statusBarUseWorkspaceId)
         #expect(settings.commandPaletteLastMode.rawValue == exportDefaults.commandPaletteLastMode)
         #expect(settings.hiddenBarIsCollapsed == exportDefaults.hiddenBarIsCollapsed)
         #expect(settings.quakeTerminalPosition.rawValue == exportDefaults.quakeTerminalPosition)

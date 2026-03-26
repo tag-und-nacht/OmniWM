@@ -102,6 +102,9 @@ struct SettingsExport: Codable {
     var scrollModifierKey: String
     var gestureFingerCount: Int
     var gestureInvertDirection: Bool
+    var statusBarShowWorkspaceName: Bool
+    var statusBarShowAppNames: Bool
+    var statusBarUseWorkspaceId: Bool
     var commandPaletteLastMode: String
 
     var hiddenBarIsCollapsed: Bool
@@ -183,6 +186,9 @@ extension SettingsExport {
             scrollModifierKey: ScrollModifierKey.optionShift.rawValue,
             gestureFingerCount: GestureFingerCount.three.rawValue,
             gestureInvertDirection: true,
+            statusBarShowWorkspaceName: false,
+            statusBarShowAppNames: false,
+            statusBarUseWorkspaceId: false,
             commandPaletteLastMode: CommandPaletteMode.windows.rawValue,
             hiddenBarIsCollapsed: true,
             quakeTerminalEnabled: true,
@@ -366,6 +372,9 @@ extension SettingsStore {
             scrollModifierKey: scrollModifierKey.rawValue,
             gestureFingerCount: gestureFingerCount.rawValue,
             gestureInvertDirection: gestureInvertDirection,
+            statusBarShowWorkspaceName: statusBarShowWorkspaceName,
+            statusBarShowAppNames: statusBarShowAppNames,
+            statusBarUseWorkspaceId: statusBarUseWorkspaceId,
             commandPaletteLastMode: commandPaletteLastMode.rawValue,
             hiddenBarIsCollapsed: hiddenBarIsCollapsed,
             quakeTerminalEnabled: quakeTerminalEnabled,
@@ -497,6 +506,9 @@ extension SettingsStore {
         scrollModifierKey = ScrollModifierKey(rawValue: export.scrollModifierKey) ?? .optionShift
         gestureFingerCount = GestureFingerCount(rawValue: export.gestureFingerCount) ?? .three
         gestureInvertDirection = export.gestureInvertDirection
+        statusBarShowWorkspaceName = export.statusBarShowWorkspaceName
+        statusBarShowAppNames = export.statusBarShowAppNames
+        statusBarUseWorkspaceId = export.statusBarUseWorkspaceId
         commandPaletteLastMode = CommandPaletteMode(rawValue: export.commandPaletteLastMode) ?? .windows
 
         hiddenBarIsCollapsed = export.hiddenBarIsCollapsed

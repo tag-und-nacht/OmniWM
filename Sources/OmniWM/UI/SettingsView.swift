@@ -43,6 +43,26 @@ struct GeneralSettingsTab: View {
                     .foregroundColor(.secondary)
             }
 
+            Section("Status Bar") {
+                Toggle("Show Workspace", isOn: $settings.statusBarShowWorkspaceName)
+                    .onChange(of: settings.statusBarShowWorkspaceName) { _, _ in
+                        controller.refreshStatusBar()
+                    }
+                Toggle("Use Workspace Number", isOn: $settings.statusBarUseWorkspaceId)
+                    .onChange(of: settings.statusBarUseWorkspaceId) { _, _ in
+                        controller.refreshStatusBar()
+                    }
+                    .disabled(!settings.statusBarShowWorkspaceName)
+                Toggle("Show Focused App", isOn: $settings.statusBarShowAppNames)
+                    .onChange(of: settings.statusBarShowAppNames) { _, _ in
+                        controller.refreshStatusBar()
+                    }
+                    .disabled(!settings.statusBarShowWorkspaceName)
+                Text("Shows the active workspace and focused app beside the menu bar icon")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
             Section("Layout") {
                 HStack {
                     Text("Inner Gaps")

@@ -244,6 +244,18 @@ final class SettingsStore {
         didSet { defaults.set(gestureInvertDirection, forKey: Keys.gestureInvertDirection) }
     }
 
+    var statusBarShowWorkspaceName: Bool {
+        didSet { defaults.set(statusBarShowWorkspaceName, forKey: Keys.statusBarShowWorkspaceName) }
+    }
+
+    var statusBarShowAppNames: Bool {
+        didSet { defaults.set(statusBarShowAppNames, forKey: Keys.statusBarShowAppNames) }
+    }
+
+    var statusBarUseWorkspaceId: Bool {
+        didSet { defaults.set(statusBarUseWorkspaceId, forKey: Keys.statusBarUseWorkspaceId) }
+    }
+
     var commandPaletteLastMode: CommandPaletteMode {
         didSet { defaults.set(commandPaletteLastMode.rawValue, forKey: Keys.commandPaletteLastMode) }
     }
@@ -447,6 +459,9 @@ final class SettingsStore {
         ) ?? .three
         gestureInvertDirection = defaults.object(forKey: Keys.gestureInvertDirection) as? Bool ??
             baseline.gestureInvertDirection
+        statusBarShowWorkspaceName = defaults.object(forKey: Keys.statusBarShowWorkspaceName) as? Bool ?? false
+        statusBarShowAppNames = defaults.object(forKey: Keys.statusBarShowAppNames) as? Bool ?? false
+        statusBarUseWorkspaceId = defaults.object(forKey: Keys.statusBarUseWorkspaceId) as? Bool ?? false
 
         commandPaletteLastMode = CommandPaletteMode(
             rawValue: defaults.string(forKey: Keys.commandPaletteLastMode) ?? ""
@@ -928,6 +943,9 @@ private enum Keys {
     static let scrollModifierKey = "settings.scrollModifierKey"
     static let gestureFingerCount = "settings.gestureFingerCount"
     static let gestureInvertDirection = "settings.gestureInvertDirection"
+    static let statusBarShowWorkspaceName = "settings.statusBarShowWorkspaceName"
+    static let statusBarShowAppNames = "settings.statusBarShowAppNames"
+    static let statusBarUseWorkspaceId = "settings.statusBarUseWorkspaceId"
 
     static let commandPaletteLastMode = "settings.commandPalette.lastMode"
 

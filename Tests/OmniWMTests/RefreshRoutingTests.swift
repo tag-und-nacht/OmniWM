@@ -102,6 +102,18 @@ private func cleanupRefreshTestController(_ controller: WMController) {
 }
 
 @MainActor
+private func makeRefreshTestStatusBarController(_ controller: WMController) -> StatusBarController {
+    let statusBarController = StatusBarController(
+        settings: controller.settings,
+        controller: controller,
+        hiddenBarController: HiddenBarController(settings: controller.settings),
+        defaults: makeRefreshTestDefaults()
+    )
+    controller.statusBarController = statusBarController
+    return statusBarController
+}
+
+@MainActor
 private func configureNativeFullscreenTestState(
     on controller: WMController,
     visibleWindows: VisibleWindowsStore,
@@ -648,6 +660,50 @@ private func prepareNiriState(
         #expect(controller.workspaceBarRefreshDebugState.requestCount == 1)
         #expect(controller.workspaceBarRefreshDebugState.scheduledCount == 1)
         #expect(controller.workspaceBarRefreshDebugState.executionCount == 1)
+    }
+
+    @Test @MainActor func focusOnlyChangesRefreshStatusBarWithoutWorkspaceBarQueue() {
+        let controller = makeRefreshTestController()
+        controller.settings.workspaceBarEnabled = false
+        controller.settings.statusBarShowWorkspaceName = true
+        controller.settings.statusBarShowAppNames = true
+
+        guard let monitor = controller.monitorForInteraction(),
+              let workspaceId = controller.activeWorkspace()?.id
+        else {
+            Issue.record("Missing active workspace for status bar refresh routing test")
+            return
+        }
+
+        let firstToken = controller.workspaceManager.addWindow(
+            makeRefreshTestWindow(windowId: 501),
+            pid: 501,
+            windowId: 501,
+            to: workspaceId
+        )
+        let secondToken = controller.workspaceManager.addWindow(
+            makeRefreshTestWindow(windowId: 502),
+            pid: 502,
+            windowId: 502,
+            to: workspaceId
+        )
+        controller.appInfoCache.storeInfoForTests(pid: 501, name: "First App", bundleId: "com.example.first")
+        controller.appInfoCache.storeInfoForTests(pid: 502, name: "Second App", bundleId: "com.example.second")
+        _ = controller.workspaceManager.setManagedFocus(firstToken, in: workspaceId, onMonitor: monitor.id)
+
+        let statusBarController = makeRefreshTestStatusBarController(controller)
+        defer {
+            statusBarController.cleanup()
+            cleanupRefreshTestController(controller)
+        }
+        statusBarController.setup()
+        #expect(statusBarController.statusButtonTitleForTests() == " 1 \u{2013} First App")
+
+        controller.resetWorkspaceBarRefreshDebugStateForTests()
+        _ = controller.workspaceManager.setManagedFocus(secondToken, in: workspaceId, onMonitor: monitor.id)
+
+        #expect(controller.workspaceBarRefreshDebugState.requestCount == 0)
+        #expect(statusBarController.statusButtonTitleForTests() == " 1 \u{2013} Second App")
     }
 
     @Test @MainActor func niriConfigAndEnableUseRelayoutOnly() async {

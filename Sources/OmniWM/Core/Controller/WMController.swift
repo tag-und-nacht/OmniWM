@@ -31,6 +31,13 @@ final class WMController {
         var isQueued: Bool = false
     }
 
+    struct StatusBarWorkspaceSummary: Equatable {
+        let monitorId: Monitor.ID
+        let workspaceLabel: String
+        let workspaceRawName: String
+        let focusedAppName: String?
+    }
+
     struct WindowDecisionEvaluation {
         let token: WindowToken
         let facts: WindowRuleFacts
@@ -112,6 +119,7 @@ final class WMController {
 
     let animationClock = AnimationClock()
     private let windowFocusOperations: WindowFocusOperations
+    weak var statusBarController: StatusBarController?
 
     init(
         settings: SettingsStore,
@@ -135,7 +143,7 @@ final class WMController {
             )
         }
         workspaceManager.onSessionStateChanged = { [weak self] in
-            self?.focusNotificationDispatcher.notifyFocusChangesIfNeeded()
+            self?.handleSessionStateChanged()
         }
     }
 
@@ -198,11 +206,13 @@ final class WMController {
         setQuakeTerminalEnabled(settings.quakeTerminalEnabled)
 
         setEnabled(true)
+        refreshStatusBar()
     }
 
     func applyCurrentAppearanceMode() {
         settings.appearanceMode.apply()
         workspaceBarManager.updateSettings()
+        statusBarController?.rebuildMenu()
     }
 
     func setEnabled(_ enabled: Bool) {
@@ -302,7 +312,7 @@ final class WMController {
     func requestWorkspaceBarRefresh() {
         workspaceBarRefreshDebugState.requestCount += 1
 
-        guard workspaceBarRefreshIsEnabled else { return }
+        guard anyBarRefreshIsEnabled else { return }
         guard pendingWorkspaceBarRefreshGeneration == nil else { return }
 
         let generation = workspaceBarRefreshGeneration
@@ -330,6 +340,34 @@ final class WMController {
 
     func isManagedWindowSuspendedForNativeFullscreen(_ token: WindowToken) -> Bool {
         workspaceManager.isNativeFullscreenSuspended(token)
+    }
+
+    func refreshStatusBar() {
+        statusBarController?.refreshWorkspaces()
+    }
+
+    func activeStatusBarWorkspaceSummary() -> StatusBarWorkspaceSummary? {
+        guard let monitor = monitorForInteraction(),
+              let workspace = workspaceManager.activeWorkspaceOrFirst(on: monitor.id)
+        else {
+            return nil
+        }
+
+        let focusedAppName: String? = if let focusedToken = workspaceManager.focusedToken,
+                                          let entry = workspaceManager.entry(for: focusedToken),
+                                          entry.workspaceId == workspace.id
+        {
+            resolvedAppInfo(for: entry.pid)?.name
+        } else {
+            nil
+        }
+
+        return StatusBarWorkspaceSummary(
+            monitorId: monitor.id,
+            workspaceLabel: settings.displayName(for: workspace.name),
+            workspaceRawName: workspace.name,
+            focusedAppName: focusedAppName
+        )
     }
 
     func updateWorkspaceBarSettings() {
@@ -481,6 +519,14 @@ final class WMController {
         settings.workspaceBarEnabled || settings.monitorBarSettings.contains(where: { $0.enabled == true })
     }
 
+    private var statusBarRefreshIsEnabled: Bool {
+        statusBarController != nil && settings.statusBarShowWorkspaceName
+    }
+
+    private var anyBarRefreshIsEnabled: Bool {
+        workspaceBarRefreshIsEnabled || statusBarRefreshIsEnabled
+    }
+
     private func flushRequestedWorkspaceBarRefresh(expectedGeneration: UInt64) {
         guard pendingWorkspaceBarRefreshGeneration == expectedGeneration,
               workspaceBarRefreshGeneration == expectedGeneration
@@ -491,11 +537,16 @@ final class WMController {
         pendingWorkspaceBarRefreshGeneration = nil
         workspaceBarRefreshDebugState.isQueued = false
 
-        guard workspaceBarRefreshIsEnabled else { return }
+        guard anyBarRefreshIsEnabled else { return }
 
         workspaceBarRefreshDebugState.executionCount += 1
         workspaceBarRefreshExecutionHookForTests?()
-        workspaceBarManager.update()
+        if workspaceBarRefreshIsEnabled {
+            workspaceBarManager.update()
+        }
+        if statusBarRefreshIsEnabled {
+            refreshStatusBar()
+        }
     }
 
     private func cancelPendingWorkspaceBarRefresh() {
@@ -624,6 +675,13 @@ final class WMController {
             return monitor
         }
         return workspaceManager.monitors.first
+    }
+
+    private func handleSessionStateChanged() {
+        focusNotificationDispatcher.notifyFocusChangesIfNeeded()
+        if statusBarRefreshIsEnabled {
+            refreshStatusBar()
+        }
     }
 
     func activeWorkspace() -> WorkspaceDescriptor? {

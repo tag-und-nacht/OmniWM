@@ -166,8 +166,136 @@ private func makeStatusBarConfigWorkflowTestURL() -> URL {
         #expect(received.first?.0 == ConfigFileAction.import.failureAlertTitle)
     }
 
+    @Test func statusBarTitleUsesInteractionMonitorWorkspaceAndFocusedApp() {
+        let primary = makeLayoutPlanTestMonitor(displayId: 100, name: "Primary")
+        let secondary = makeLayoutPlanTestMonitor(displayId: 200, name: "Secondary", x: 1920)
+        let controller = makeLayoutPlanTestController(
+            monitors: [primary, secondary],
+            workspaceConfigurations: [
+                WorkspaceConfiguration(name: "1", displayName: "Mail", monitorAssignment: .main),
+                WorkspaceConfiguration(name: "2", displayName: "Code", monitorAssignment: .secondary)
+            ]
+        )
+        controller.settings.statusBarShowWorkspaceName = true
+        controller.settings.statusBarShowAppNames = true
+
+        guard let secondaryWorkspaceId = controller.workspaceManager.workspaceId(for: "2", createIfMissing: false) else {
+            Issue.record("Missing secondary workspace for status bar monitor test")
+            return
+        }
+
+        let token = controller.workspaceManager.addWindow(
+            makeLayoutPlanTestWindow(windowId: 202),
+            pid: 202,
+            windowId: 202,
+            to: secondaryWorkspaceId
+        )
+        controller.appInfoCache.storeInfoForTests(
+            pid: 202,
+            name: "Secondary App",
+            bundleId: "com.example.secondary"
+        )
+        _ = controller.workspaceManager.setActiveWorkspace(secondaryWorkspaceId, on: secondary.id)
+        _ = controller.workspaceManager.setManagedFocus(token, in: secondaryWorkspaceId, onMonitor: secondary.id)
+
+        let statusBarController = makeStatusBarController(for: controller)
+        defer { statusBarController.cleanup() }
+        statusBarController.setup()
+
+        #expect(statusBarController.statusButtonTitleForTests() == " Code \u{2013} Secondary App")
+        #expect(statusBarController.statusButtonImagePositionForTests() == .imageLeft)
+    }
+
+    @Test func statusBarTitleUsesDisplayNameOrRawNameAndTruncatesFocusedApp() {
+        let monitor = makeLayoutPlanTestMonitor()
+        let controller = makeLayoutPlanTestController(
+            monitors: [monitor],
+            workspaceConfigurations: [
+                WorkspaceConfiguration(name: "2", displayName: "Code", monitorAssignment: .main)
+            ]
+        )
+        controller.settings.statusBarShowWorkspaceName = true
+        controller.settings.statusBarShowAppNames = true
+
+        guard let workspaceId = controller.workspaceManager.workspaceId(for: "2", createIfMissing: false) else {
+            Issue.record("Missing workspace for status bar formatting test")
+            return
+        }
+
+        let token = controller.workspaceManager.addWindow(
+            makeLayoutPlanTestWindow(windowId: 303),
+            pid: 303,
+            windowId: 303,
+            to: workspaceId
+        )
+        let longAppName = "VeryLongFocusedApplication"
+        let expectedTruncated = StatusBarController.truncatedStatusBarAppName(longAppName)
+        controller.appInfoCache.storeInfoForTests(
+            pid: 303,
+            name: longAppName,
+            bundleId: "com.example.long"
+        )
+        _ = controller.workspaceManager.setActiveWorkspace(workspaceId, on: monitor.id)
+        _ = controller.workspaceManager.setManagedFocus(token, in: workspaceId, onMonitor: monitor.id)
+
+        let statusBarController = makeStatusBarController(for: controller)
+        defer { statusBarController.cleanup() }
+        statusBarController.setup()
+
+        #expect(statusBarController.statusButtonTitleForTests() == " Code \u{2013} \(expectedTruncated)")
+
+        controller.settings.statusBarUseWorkspaceId = true
+        controller.refreshStatusBar()
+
+        #expect(statusBarController.statusButtonTitleForTests() == " 2 \u{2013} \(expectedTruncated)")
+    }
+
+    @Test func statusBarTitleIncludesFocusedFloatingWindowApp() {
+        let controller = makeLayoutPlanTestController()
+        controller.settings.statusBarShowWorkspaceName = true
+        controller.settings.statusBarShowAppNames = true
+
+        guard let monitor = controller.monitorForInteraction(),
+              let workspaceId = controller.activeWorkspace()?.id
+        else {
+            Issue.record("Missing active workspace for floating status bar test")
+            return
+        }
+
+        let token = controller.workspaceManager.addWindow(
+            makeLayoutPlanTestWindow(windowId: 404),
+            pid: 404,
+            windowId: 404,
+            to: workspaceId,
+            mode: .floating
+        )
+        controller.appInfoCache.storeInfoForTests(
+            pid: 404,
+            name: "Floating App",
+            bundleId: "com.example.floating"
+        )
+        _ = controller.workspaceManager.setManagedFocus(token, in: workspaceId, onMonitor: monitor.id)
+
+        let statusBarController = makeStatusBarController(for: controller)
+        defer { statusBarController.cleanup() }
+        statusBarController.setup()
+
+        #expect(statusBarController.statusButtonTitleForTests() == " 1 \u{2013} Floating App")
+    }
+
     private func textLabels(in view: NSView) -> [String] {
         let direct = (view as? NSTextField).map(\.stringValue).map { [$0] } ?? []
         return direct + view.subviews.flatMap(textLabels(in:))
+    }
+
+    private func makeStatusBarController(for controller: WMController) -> StatusBarController {
+        let statusBarController = StatusBarController(
+            settings: controller.settings,
+            controller: controller,
+            hiddenBarController: HiddenBarController(settings: controller.settings),
+            defaults: makeLayoutPlanTestDefaults()
+        )
+        controller.statusBarController = statusBarController
+        return statusBarController
     }
 }

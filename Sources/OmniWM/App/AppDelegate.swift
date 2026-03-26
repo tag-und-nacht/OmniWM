@@ -64,6 +64,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             hiddenBarController: hiddenBarController,
             defaults: defaults
         )
+        controller.statusBarController = statusBarController
         statusBarController?.setup()
     }
 
