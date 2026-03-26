@@ -16,20 +16,27 @@ struct WorkspaceDescriptor: Identifiable, Hashable {
 
 @MainActor
 final class WorkspaceManager {
-    enum NativeFullscreenTransition {
+    static let staleUnavailableNativeFullscreenTimeout: TimeInterval = 15
+
+    enum NativeFullscreenTransition: Equatable {
         case enterRequested
         case suspended
         case exitRequested
-        case awaitingReplacement
+    }
+
+    enum NativeFullscreenAvailability: Equatable {
+        case present
+        case temporarilyUnavailable
     }
 
     struct NativeFullscreenRecord {
         let originalToken: WindowToken
         var currentToken: WindowToken
         let workspaceId: WorkspaceDescriptor.ID
-        var replacementDeadline: Date?
         var exitRequestedByCommand: Bool
         var transition: NativeFullscreenTransition
+        var availability: NativeFullscreenAvailability
+        var unavailableSince: Date?
     }
 
     private struct DisconnectedVisibleWorkspaceMigration {
@@ -161,6 +168,10 @@ final class WorkspaceManager {
         sessionState.focus.isAppFullscreenActive
     }
 
+    var hasNativeFullscreenLifecycleContext: Bool {
+        sessionState.focus.isAppFullscreenActive || !nativeFullscreenRecordsByOriginalToken.isEmpty
+    }
+
     func scratchpadToken() -> WindowToken? {
         sessionState.scratchpadToken
     }
@@ -181,7 +192,7 @@ final class WorkspaceManager {
 
     var hasPendingNativeFullscreenTransition: Bool {
         nativeFullscreenRecordsByOriginalToken.values.contains {
-            $0.transition == .enterRequested || $0.transition == .awaitingReplacement
+            $0.transition == .enterRequested || $0.availability == .temporarilyUnavailable
         }
     }
 
@@ -345,17 +356,14 @@ final class WorkspaceManager {
             originalToken: originalToken,
             currentToken: token,
             workspaceId: workspaceId,
-            replacementDeadline: nil,
             exitRequestedByCommand: false,
-            transition: .enterRequested
+            transition: .enterRequested,
+            availability: .present,
+            unavailableSince: nil
         )
 
         if record.currentToken != token {
             record.currentToken = token
-            changed = true
-        }
-        if record.replacementDeadline != nil {
-            record.replacementDeadline = nil
             changed = true
         }
         if record.exitRequestedByCommand {
@@ -364,6 +372,14 @@ final class WorkspaceManager {
         }
         if record.transition != .enterRequested {
             record.transition = .enterRequested
+            changed = true
+        }
+        if record.availability != .present {
+            record.availability = .present
+            changed = true
+        }
+        if record.unavailableSince != nil {
+            record.unavailableSince = nil
             changed = true
         }
         if existing == nil || changed {
@@ -384,17 +400,14 @@ final class WorkspaceManager {
             originalToken: originalToken,
             currentToken: token,
             workspaceId: entry.workspaceId,
-            replacementDeadline: nil,
             exitRequestedByCommand: false,
-            transition: .suspended
+            transition: .suspended,
+            availability: .present,
+            unavailableSince: nil
         )
 
         if record.currentToken != token {
             record.currentToken = token
-            changed = true
-        }
-        if record.replacementDeadline != nil {
-            record.replacementDeadline = nil
             changed = true
         }
         if record.exitRequestedByCommand {
@@ -403,6 +416,14 @@ final class WorkspaceManager {
         }
         if record.transition != .suspended {
             record.transition = .suspended
+            changed = true
+        }
+        if record.availability != .present {
+            record.availability = .present
+            changed = true
+        }
+        if record.unavailableSince != nil {
+            record.unavailableSince = nil
             changed = true
         }
         if existing == nil || changed {
@@ -435,18 +456,15 @@ final class WorkspaceManager {
             originalToken: originalToken,
             currentToken: token,
             workspaceId: workspaceId,
-            replacementDeadline: nil,
             exitRequestedByCommand: initiatedByCommand,
-            transition: .exitRequested
+            transition: .exitRequested,
+            availability: .present,
+            unavailableSince: nil
         )
 
         var changed = existing == nil
         if record.currentToken != token {
             record.currentToken = token
-            changed = true
-        }
-        if record.replacementDeadline != nil {
-            record.replacementDeadline = nil
             changed = true
         }
         if record.exitRequestedByCommand != initiatedByCommand {
@@ -457,6 +475,14 @@ final class WorkspaceManager {
             record.transition = .exitRequested
             changed = true
         }
+        if record.availability != .present {
+            record.availability = .present
+            changed = true
+        }
+        if record.unavailableSince != nil {
+            record.unavailableSince = nil
+            changed = true
+        }
         if changed {
             upsertNativeFullscreenRecord(record)
         }
@@ -465,9 +491,9 @@ final class WorkspaceManager {
     }
 
     @discardableResult
-    func markNativeFullscreenAwaitingReplacement(
+    func markNativeFullscreenTemporarilyUnavailable(
         _ token: WindowToken,
-        replacementDeadline: Date
+        now: Date = Date()
     ) -> NativeFullscreenRecord? {
         guard let originalToken = nativeFullscreenOriginalToken(for: token),
               var record = nativeFullscreenRecordsByOriginalToken[originalToken]
@@ -479,25 +505,26 @@ final class WorkspaceManager {
             setLayoutReason(.nativeFullscreen, for: record.currentToken)
         }
 
-        record.transition = .awaitingReplacement
-        record.replacementDeadline = replacementDeadline
+        if record.currentToken != token {
+            record.currentToken = token
+        }
+        record.availability = .temporarilyUnavailable
+        if record.unavailableSince == nil {
+            record.unavailableSince = now
+        }
         upsertNativeFullscreenRecord(record)
         _ = setManagedAppFullscreen(false)
         return record
     }
 
-    func nativeFullscreenAwaitingReplacementCandidate(
+    func nativeFullscreenUnavailableCandidate(
         for pid: pid_t,
-        activeWorkspaceId: WorkspaceDescriptor.ID?,
-        now: Date = Date()
+        activeWorkspaceId: WorkspaceDescriptor.ID?
     ) -> NativeFullscreenRecord? {
         let candidates = nativeFullscreenRecordsByOriginalToken.values.filter { record in
             guard record.currentToken.pid == pid,
-                  record.transition == .awaitingReplacement
+                  record.availability == .temporarilyUnavailable
             else {
-                return false
-            }
-            if let deadline = record.replacementDeadline, deadline < now {
                 return false
             }
             return true
@@ -530,7 +557,6 @@ final class WorkspaceManager {
         }
         guard record.currentToken != newToken else { return false }
         record.currentToken = newToken
-        record.replacementDeadline = nil
         upsertNativeFullscreenRecord(record)
         return true
     }
@@ -564,13 +590,14 @@ final class WorkspaceManager {
     }
 
     @discardableResult
-    func expireNativeFullscreenAwaitingReplacementRecords(
-        now: Date = Date()
+    func expireStaleTemporarilyUnavailableNativeFullscreenRecords(
+        now: Date = Date(),
+        staleInterval: TimeInterval = staleUnavailableNativeFullscreenTimeout
     ) -> [WindowModel.Entry] {
         let expiredOriginalTokens = nativeFullscreenRecordsByOriginalToken.values.compactMap { record -> WindowToken? in
-            guard record.transition == .awaitingReplacement,
-                  let deadline = record.replacementDeadline,
-                  deadline < now
+            guard record.availability == .temporarilyUnavailable,
+                  let unavailableSince = record.unavailableSince,
+                  now.timeIntervalSince(unavailableSince) >= staleInterval
             else {
                 return nil
             }
@@ -1372,7 +1399,6 @@ final class WorkspaceManager {
            var record = nativeFullscreenRecordsByOriginalToken[originalToken]
         {
             record.currentToken = newToken
-            record.replacementDeadline = nil
             upsertNativeFullscreenRecord(record)
         }
 
@@ -1641,6 +1667,10 @@ final class WorkspaceManager {
 
     func restoreFromNativeState(for token: WindowToken) -> ParentKind? {
         windows.restoreFromNativeState(for: token)
+    }
+
+    func isNativeFullscreenTemporarilyUnavailable(_ token: WindowToken) -> Bool {
+        nativeFullscreenRecord(for: token)?.availability == .temporarilyUnavailable
     }
 
     private func nativeFullscreenOriginalToken(for token: WindowToken) -> WindowToken? {

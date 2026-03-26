@@ -187,7 +187,10 @@ final class AXEventHandler: CGSEventDelegate {
         "app.zen-browser.zen"
     ]
     private static let managedReplacementGraceDelay: Duration = .milliseconds(150)
-    private static let nativeFullscreenReplacementGraceDelay: Duration = .seconds(1)
+    private static let nativeFullscreenFollowupDelay: Duration = .seconds(1)
+    private static let nativeFullscreenStaleCleanupDelay: Duration = .seconds(
+        Int64(WorkspaceManager.staleUnavailableNativeFullscreenTimeout)
+    )
     private static let stabilizationRetryDelay: Duration = .milliseconds(100)
     private static let createdWindowRetryLimit = 5
     private static let activationRetryLimit = 5
@@ -200,7 +203,8 @@ final class AXEventHandler: CGSEventDelegate {
     private var deferredCreatedWindowOrder: [UInt32] = []
     private var pendingManagedReplacementBursts: [ManagedReplacementKey: PendingManagedReplacementBurst] = [:]
     private var pendingManagedReplacementTasks: [ManagedReplacementKey: Task<Void, Never>] = [:]
-    private var pendingNativeFullscreenReplacementTasks: [WindowToken: Task<Void, Never>] = [:]
+    private var pendingNativeFullscreenFollowupTasks: [WindowToken: Task<Void, Never>] = [:]
+    private var pendingNativeFullscreenStaleCleanupTasks: [WindowToken: Task<Void, Never>] = [:]
     private var pendingWindowRuleReevaluationTask: Task<Void, Never>?
     private var pendingWindowRuleReevaluationTargets: Set<WindowRuleReevaluationTarget> = []
     private var pendingWindowStabilizationTasks: [WindowToken: Task<Void, Never>] = [:]
@@ -790,7 +794,10 @@ final class AXEventHandler: CGSEventDelegate {
         case .unrelatedNoRequest:
             let target = controller.keyboardFocusTarget(for: token, axRef: axRef)
             controller.focusBridge.setFocusedTarget(target)
-            _ = controller.workspaceManager.enterNonManagedFocus(appFullscreen: appFullscreen)
+            let fallbackFullscreen = appFullscreenForFallbackLifecyclePreservation(
+                observedAppFullscreen: appFullscreen
+            )
+            _ = controller.workspaceManager.enterNonManagedFocus(appFullscreen: fallbackFullscreen)
             _ = controller.renderKeyboardFocusBorder(for: target, policy: .direct)
         }
 
@@ -927,7 +934,7 @@ final class AXEventHandler: CGSEventDelegate {
     @discardableResult
     private func suspendManagedWindowForNativeFullscreen(_ entry: WindowModel.Entry) -> Bool {
         guard let controller else { return false }
-        cancelNativeFullscreenReplacementExpiry(containing: entry.token)
+        cancelNativeFullscreenLifecycleTasks(containing: entry.token)
         let changed = controller.workspaceManager.markNativeFullscreenSuspended(entry.token)
         controller.borderManager.hideBorder()
         return changed
@@ -940,7 +947,7 @@ final class AXEventHandler: CGSEventDelegate {
         guard hadRecord || controller.workspaceManager.layoutReason(for: entry.token) == .nativeFullscreen else {
             return false
         }
-        cancelNativeFullscreenReplacementExpiry(containing: entry.token)
+        cancelNativeFullscreenLifecycleTasks(containing: entry.token)
         return controller.workspaceManager.restoreNativeFullscreenRecord(for: entry.token) != nil || hadRecord
     }
 
@@ -953,17 +960,29 @@ final class AXEventHandler: CGSEventDelegate {
         appFullscreen: Bool
     ) -> Bool {
         guard let controller else { return false }
-        guard let record = controller.workspaceManager.nativeFullscreenAwaitingReplacementCandidate(
+        guard let record = controller.workspaceManager.nativeFullscreenUnavailableCandidate(
             for: token.pid,
             activeWorkspaceId: workspaceId
         ) else {
             return false
         }
+        if record.currentToken == token {
+            guard controller.workspaceManager.entry(for: token) != nil else {
+                return false
+            }
+            cancelNativeFullscreenLifecycleTasks(for: record.originalToken)
+            if appFullscreen {
+                _ = controller.workspaceManager.markNativeFullscreenSuspended(token)
+            } else {
+                _ = controller.workspaceManager.restoreNativeFullscreenRecord(for: token)
+            }
+            return true
+        }
         guard rekeyManagedWindowIdentity(from: record.currentToken, to: token, windowId: windowId, axRef: axRef) != nil else {
             return false
         }
 
-        cancelNativeFullscreenReplacementExpiry(for: record.originalToken)
+        cancelNativeFullscreenLifecycleTasks(for: record.originalToken)
 
         if appFullscreen {
             _ = controller.workspaceManager.markNativeFullscreenSuspended(token)
@@ -1029,22 +1048,19 @@ final class AXEventHandler: CGSEventDelegate {
     private func handleNativeFullscreenDestroy(_ token: WindowToken) -> Bool {
         guard let controller,
               let record = controller.workspaceManager.nativeFullscreenRecord(for: token),
-              record.currentToken == token,
-              record.transition != .awaitingReplacement
+              record.currentToken == token
         else {
             return false
         }
 
-        let deadline = Date().addingTimeInterval(1)
-        guard let awaitingRecord = controller.workspaceManager.markNativeFullscreenAwaitingReplacement(
-            token,
-            replacementDeadline: deadline
+        guard let unavailableRecord = controller.workspaceManager.markNativeFullscreenTemporarilyUnavailable(
+            token
         ) else {
             return false
         }
 
         controller.borderManager.hideBorder()
-        scheduleNativeFullscreenReplacementExpiry(for: awaitingRecord.originalToken)
+        scheduleNativeFullscreenFollowup(for: unavailableRecord.originalToken)
         return true
     }
 
@@ -1109,6 +1125,23 @@ final class AXEventHandler: CGSEventDelegate {
         for key in keys {
             pendingManagedReplacementTasks.removeValue(forKey: key)?.cancel()
             flushManagedReplacementBurst(for: key)
+        }
+    }
+
+    func flushPendingNativeFullscreenFollowupsForTests() {
+        let tokens = pendingNativeFullscreenFollowupTasks.keys.sorted {
+            ($0.pid, $0.windowId) < ($1.pid, $1.windowId)
+        }
+        for originalToken in tokens {
+            pendingNativeFullscreenFollowupTasks.removeValue(forKey: originalToken)?.cancel()
+            guard let controller,
+                  let record = controller.workspaceManager.nativeFullscreenRecord(for: originalToken),
+                  record.originalToken == originalToken,
+                  record.availability == .temporarilyUnavailable
+            else {
+                continue
+            }
+            controller.layoutRefreshController.requestFullRescan(reason: .activeSpaceChanged)
         }
     }
 
@@ -1551,40 +1584,59 @@ final class AXEventHandler: CGSEventDelegate {
     }
 
     private func resetNativeFullscreenReplacementState() {
-        for (_, task) in pendingNativeFullscreenReplacementTasks {
+        for (_, task) in pendingNativeFullscreenFollowupTasks {
             task.cancel()
         }
-        pendingNativeFullscreenReplacementTasks.removeAll()
+        pendingNativeFullscreenFollowupTasks.removeAll()
+        for (_, task) in pendingNativeFullscreenStaleCleanupTasks {
+            task.cancel()
+        }
+        pendingNativeFullscreenStaleCleanupTasks.removeAll()
     }
 
-    private func scheduleNativeFullscreenReplacementExpiry(for originalToken: WindowToken) {
-        cancelNativeFullscreenReplacementExpiry(for: originalToken)
-        pendingNativeFullscreenReplacementTasks[originalToken] = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: Self.nativeFullscreenReplacementGraceDelay)
+    private func scheduleNativeFullscreenFollowup(for originalToken: WindowToken) {
+        cancelNativeFullscreenLifecycleTasks(for: originalToken)
+        pendingNativeFullscreenFollowupTasks[originalToken] = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.nativeFullscreenFollowupDelay)
             guard !Task.isCancelled, let self, let controller = self.controller else { return }
-            defer { self.pendingNativeFullscreenReplacementTasks.removeValue(forKey: originalToken) }
+            defer { self.pendingNativeFullscreenFollowupTasks.removeValue(forKey: originalToken) }
             guard let record = controller.workspaceManager.nativeFullscreenRecord(for: originalToken),
                   record.originalToken == originalToken,
-                  record.transition == .awaitingReplacement
+                  record.availability == .temporarilyUnavailable
             else {
                 return
             }
             controller.layoutRefreshController.requestFullRescan(reason: .activeSpaceChanged)
         }
+        pendingNativeFullscreenStaleCleanupTasks[originalToken] = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.nativeFullscreenStaleCleanupDelay)
+            guard !Task.isCancelled, let self, let controller = self.controller else { return }
+            defer { self.pendingNativeFullscreenStaleCleanupTasks.removeValue(forKey: originalToken) }
+            guard let record = controller.workspaceManager.nativeFullscreenRecord(for: originalToken),
+                  record.originalToken == originalToken,
+                  record.availability == .temporarilyUnavailable
+            else {
+                return
+            }
+            let removedEntries = controller.workspaceManager.expireStaleTemporarilyUnavailableNativeFullscreenRecords()
+            guard !removedEntries.isEmpty else { return }
+            controller.layoutRefreshController.requestFullRescan(reason: .activeSpaceChanged)
+        }
     }
 
-    private func cancelNativeFullscreenReplacementExpiry(for originalToken: WindowToken) {
-        pendingNativeFullscreenReplacementTasks.removeValue(forKey: originalToken)?.cancel()
+    func cancelNativeFullscreenLifecycleTasks(for originalToken: WindowToken) {
+        pendingNativeFullscreenFollowupTasks.removeValue(forKey: originalToken)?.cancel()
+        pendingNativeFullscreenStaleCleanupTasks.removeValue(forKey: originalToken)?.cancel()
     }
 
-    private func cancelNativeFullscreenReplacementExpiry(containing token: WindowToken) {
+    func cancelNativeFullscreenLifecycleTasks(containing token: WindowToken) {
         if let controller,
            let originalToken = controller.workspaceManager.nativeFullscreenRecord(for: token)?.originalToken
         {
-            cancelNativeFullscreenReplacementExpiry(for: originalToken)
+            cancelNativeFullscreenLifecycleTasks(for: originalToken)
             return
         }
-        cancelNativeFullscreenReplacementExpiry(for: token)
+        cancelNativeFullscreenLifecycleTasks(for: token)
     }
 
     private func scheduleManagedReplacementFlush(for key: ManagedReplacementKey) {
@@ -1740,7 +1792,10 @@ final class AXEventHandler: CGSEventDelegate {
 
         cancelActivationRetry()
         controller.focusBridge.setFocusedTarget(nil)
-        _ = controller.workspaceManager.enterNonManagedFocus(appFullscreen: false)
+        let fallbackFullscreen = appFullscreenForFallbackLifecyclePreservation(
+            observedAppFullscreen: false
+        )
+        _ = controller.workspaceManager.enterNonManagedFocus(appFullscreen: fallbackFullscreen)
         recordNiriCreateFocusTrace(
             .init(
                 kind: .nonManagedFallbackEntered(
@@ -1750,6 +1805,15 @@ final class AXEventHandler: CGSEventDelegate {
             )
         )
         controller.borderManager.hideBorder()
+    }
+
+    private func appFullscreenForFallbackLifecyclePreservation(
+        observedAppFullscreen: Bool
+    ) -> Bool {
+        guard let controller else { return observedAppFullscreen }
+
+        let hasLifecycleContext = controller.workspaceManager.hasNativeFullscreenLifecycleContext
+        return observedAppFullscreen || hasLifecycleContext
     }
 
     private func activationRequestDisposition(

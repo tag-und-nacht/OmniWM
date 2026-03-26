@@ -871,6 +871,71 @@ private func workspaceConfigurations(
         #expect(manager.nativeFullscreenCommandTarget(frontmostToken: token1) == token1)
     }
 
+    @Test @MainActor func staleTemporarilyUnavailableNativeFullscreenCleanupWaitsForTimeoutAndAppTerminationStillClearsImmediately() {
+        let defaults = makeWorkspaceManagerTestDefaults()
+        let settings = SettingsStore(defaults: defaults)
+        settings.workspaceConfigurations = workspaceConfigurations([
+            ("1", .main)
+        ])
+
+        let manager = WorkspaceManager(settings: settings)
+        let monitor = makeWorkspaceManagerTestMonitor(displayId: 32, name: "Main", x: 0, y: 0)
+        manager.applyMonitorConfigurationChange([monitor])
+
+        guard let workspaceId = manager.workspaceId(for: "1", createIfMissing: true) else {
+            Issue.record("Failed to create workspace")
+            return
+        }
+
+        let firstToken = manager.addWindow(
+            makeWorkspaceManagerTestWindow(windowId: 2331),
+            pid: 2331,
+            windowId: 2331,
+            to: workspaceId
+        )
+        _ = manager.requestNativeFullscreenEnter(firstToken, in: workspaceId)
+        _ = manager.markNativeFullscreenSuspended(firstToken)
+        _ = manager.markNativeFullscreenTemporarilyUnavailable(
+            firstToken,
+            now: Date(timeIntervalSince1970: 100)
+        )
+
+        let earlyRemoved = manager.expireStaleTemporarilyUnavailableNativeFullscreenRecords(
+            now: Date(timeIntervalSince1970: 114),
+            staleInterval: 15
+        )
+        #expect(earlyRemoved.isEmpty)
+        #expect(manager.entry(for: firstToken) != nil)
+        #expect(manager.nativeFullscreenRecord(for: firstToken) != nil)
+
+        let lateRemoved = manager.expireStaleTemporarilyUnavailableNativeFullscreenRecords(
+            now: Date(timeIntervalSince1970: 116),
+            staleInterval: 15
+        )
+        #expect(lateRemoved.count == 1)
+        #expect(manager.entry(for: firstToken) == nil)
+        #expect(manager.nativeFullscreenRecord(for: firstToken) == nil)
+
+        let secondPid: pid_t = 2332
+        let secondToken = manager.addWindow(
+            makeWorkspaceManagerTestWindow(windowId: 2332),
+            pid: secondPid,
+            windowId: 2332,
+            to: workspaceId
+        )
+        _ = manager.requestNativeFullscreenEnter(secondToken, in: workspaceId)
+        _ = manager.markNativeFullscreenSuspended(secondToken)
+        _ = manager.markNativeFullscreenTemporarilyUnavailable(
+            secondToken,
+            now: Date(timeIntervalSince1970: 200)
+        )
+
+        let affectedWorkspaces = manager.removeWindowsForApp(pid: secondPid)
+        #expect(affectedWorkspaces == Set([workspaceId]))
+        #expect(manager.entry(for: secondToken) == nil)
+        #expect(manager.nativeFullscreenRecord(for: secondToken) == nil)
+    }
+
     @Test @MainActor func monitorReconnectPrefersFocusedWorkspaceMonitorForInteractionState() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)

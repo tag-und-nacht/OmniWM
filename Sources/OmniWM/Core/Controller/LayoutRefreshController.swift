@@ -1013,7 +1013,6 @@ import QuartzCore
     private func buildFullRefreshExecutionPlan() async throws -> RefreshExecutionPlan {
         guard let controller else { return .init() }
 
-        _ = controller.workspaceManager.expireNativeFullscreenAwaitingReplacementRecords()
         let windows = await controller.axManager.currentWindowsAsync()
         try Task.checkCancellation()
         var seenKeys: Set<WindowModel.WindowKey> = []
@@ -1038,11 +1037,34 @@ import QuartzCore
             )
             let decision = evaluation.decision
             let existingEntry = controller.workspaceManager.entry(for: token)
+            let temporarilyUnavailableRecord: WorkspaceManager.NativeFullscreenRecord? = if let existingEntry,
+                let record = controller.workspaceManager.nativeFullscreenRecord(for: existingEntry.token),
+                record.availability == .temporarilyUnavailable
+            {
+                record
+            } else {
+                nil
+            }
+            if let temporarilyUnavailableRecord {
+                controller.axEventHandler.cancelNativeFullscreenLifecycleTasks(
+                    containing: temporarilyUnavailableRecord.currentToken
+                )
+            }
+            let shouldPreservePreFullscreenState = existingEntry.map { existingEntry in
+                !appFullscreen
+                    && (
+                        controller.workspaceManager.nativeFullscreenRecord(for: existingEntry.token) != nil
+                            || existingEntry.layoutReason == .nativeFullscreen
+                    )
+            } ?? false
+            let effectiveTrackedMode = shouldPreservePreFullscreenState
+                ? existingEntry?.mode
+                : controller.trackedModeForLifecycle(
+                    decision: decision,
+                    existingEntry: existingEntry
+                )
 
-            guard let trackedMode = controller.trackedModeForLifecycle(
-                decision: decision,
-                existingEntry: existingEntry
-            ) else {
+            guard let trackedMode = effectiveTrackedMode else {
                 if existingEntry != nil {
                     decisionBasedRemovals.append(token)
                 }
@@ -1056,27 +1078,41 @@ import QuartzCore
                 existingEntry: existingEntry,
                 fallbackWorkspaceId: focusedWorkspaceId
             )
-            if controller.workspaceAssignment(pid: pid, windowId: winId) == nil {
-                _ = controller.axEventHandler.restoreNativeFullscreenReplacementIfNeeded(
+            if controller.workspaceAssignment(pid: pid, windowId: winId) == nil,
+               controller.axEventHandler.restoreNativeFullscreenReplacementIfNeeded(
                     token: token,
                     windowId: UInt32(winId),
                     axRef: ax,
                     workspaceId: defaultWorkspace,
                     appFullscreen: appFullscreen
                 )
+            {
+                seenKeys.insert(token)
+                continue
             }
 
+            let wsForWindow: WorkspaceDescriptor.ID
+            let ruleEffects: ManagedWindowRuleEffects
             if let existingEntry {
-                if appFullscreen {
-                    _ = controller.workspaceManager.markNativeFullscreenSuspended(existingEntry.token)
-                } else if controller.workspaceManager.nativeFullscreenRecord(for: existingEntry.token) != nil
-                    || existingEntry.layoutReason == .nativeFullscreen
-                {
+                if shouldPreservePreFullscreenState {
                     _ = controller.workspaceManager.restoreNativeFullscreenRecord(for: existingEntry.token)
+                    wsForWindow = existingEntry.workspaceId
+                    ruleEffects = existingEntry.ruleEffects
+                } else if appFullscreen {
+                    _ = controller.workspaceManager.markNativeFullscreenSuspended(existingEntry.token)
+                    let existingAssignment = controller.workspaceAssignment(pid: pid, windowId: winId)
+                    wsForWindow = existingAssignment ?? defaultWorkspace
+                    ruleEffects = decision.ruleEffects
+                } else {
+                    let existingAssignment = controller.workspaceAssignment(pid: pid, windowId: winId)
+                    wsForWindow = existingAssignment ?? defaultWorkspace
+                    ruleEffects = decision.ruleEffects
                 }
+            } else {
+                let existingAssignment = controller.workspaceAssignment(pid: pid, windowId: winId)
+                wsForWindow = existingAssignment ?? defaultWorkspace
+                ruleEffects = decision.ruleEffects
             }
-            let existingAssignment = controller.workspaceAssignment(pid: pid, windowId: winId)
-            let wsForWindow = existingAssignment ?? defaultWorkspace
             let oldMode = existingEntry?.mode
 
             _ = controller.workspaceManager.addWindow(
@@ -1085,8 +1121,13 @@ import QuartzCore
                 windowId: winId,
                 to: wsForWindow,
                 mode: oldMode ?? trackedMode,
-                ruleEffects: decision.ruleEffects
+                ruleEffects: ruleEffects
             )
+
+            if shouldPreservePreFullscreenState {
+                seenKeys.insert(token)
+                continue
+            }
 
             if let oldMode, oldMode != trackedMode {
                 _ = controller.transitionWindowMode(
@@ -1108,12 +1149,23 @@ import QuartzCore
             _ = controller.workspaceManager.removeWindow(pid: token.pid, windowId: token.windowId)
         }
 
-        for entry in controller.workspaceManager.allEntries()
-        where controller.hiddenAppPIDs.contains(entry.handle.pid)
-            || controller.workspaceManager.layoutReason(for: entry.token) == .macosHiddenApp
-            || controller.workspaceManager.layoutReason(for: entry.token) == .nativeFullscreen
-        {
-            seenKeys.insert(.init(pid: entry.handle.pid, windowId: entry.windowId))
+        let shouldPreserveMissingWindows = shouldPreserveMissingWindowsDuringNativeFullscreen(
+            controller: controller
+        )
+        if shouldPreserveMissingWindows {
+            // Native macOS fullscreen moves the app onto its own Space, so visible-window
+            // enumeration temporarily excludes the rest of the managed workspace.
+            for entry in controller.workspaceManager.allEntries() {
+                seenKeys.insert(.init(pid: entry.handle.pid, windowId: entry.windowId))
+            }
+        } else {
+            for entry in controller.workspaceManager.allEntries()
+            where controller.hiddenAppPIDs.contains(entry.handle.pid)
+                || controller.workspaceManager.layoutReason(for: entry.token) == .macosHiddenApp
+                || controller.workspaceManager.layoutReason(for: entry.token) == .nativeFullscreen
+            {
+                seenKeys.insert(.init(pid: entry.handle.pid, windowId: entry.windowId))
+            }
         }
 
         controller.workspaceManager.removeMissing(keys: seenKeys, requiredConsecutiveMisses: 1)
@@ -1162,6 +1214,12 @@ import QuartzCore
         effects.subscribeManagedWindows = true
 
         return RefreshExecutionPlan(workspacePlans: workspacePlans, effects: effects)
+    }
+
+    private func shouldPreserveMissingWindowsDuringNativeFullscreen(
+        controller: WMController
+    ) -> Bool {
+        controller.workspaceManager.hasNativeFullscreenLifecycleContext
     }
 
     private func partitionWorkspacesByLayoutType(

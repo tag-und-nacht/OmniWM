@@ -1306,6 +1306,213 @@ private func waitUntilAXEventTest(
         #expect(relayoutReasons.isEmpty)
     }
 
+    @Test @MainActor func missingFocusedWindowFallbackPreservesNativeFullscreenLifecycleContext() {
+        let controller = makeAXEventTestController()
+        controller.hasStartedServices = true
+        guard let workspaceId = controller.activeWorkspace()?.id else {
+            Issue.record("Missing active workspace")
+            return
+        }
+
+        let token = controller.workspaceManager.addWindow(
+            AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: 8031),
+            pid: getpid(),
+            windowId: 8031,
+            to: workspaceId
+        )
+        _ = controller.workspaceManager.setManagedFocus(
+            token,
+            in: workspaceId,
+            onMonitor: controller.workspaceManager.monitorId(for: workspaceId)
+        )
+        _ = controller.workspaceManager.requestNativeFullscreenEnter(token, in: workspaceId)
+        _ = controller.workspaceManager.markNativeFullscreenSuspended(token)
+        controller.axEventHandler.focusedWindowRefProvider = { _ in nil }
+
+        controller.axEventHandler.handleAppActivation(
+            pid: getpid(),
+            source: .workspaceDidActivateApplication
+        )
+
+        guard let record = controller.workspaceManager.nativeFullscreenRecord(for: token) else {
+            Issue.record("Missing native fullscreen record after fallback")
+            return
+        }
+        if case .suspended = record.transition {} else {
+            Issue.record("Expected native fullscreen record to remain suspended")
+        }
+        #expect(controller.workspaceManager.layoutReason(for: token) == .nativeFullscreen)
+        #expect(controller.workspaceManager.isNonManagedFocusActive)
+        #expect(controller.workspaceManager.isAppFullscreenActive)
+        #expect(controller.workspaceManager.hasNativeFullscreenLifecycleContext)
+        #expect(controller.workspaceManager.focusedToken == nil)
+    }
+
+    @Test @MainActor func nativeFullscreenEnterDestroySurvivesFollowupBeforeDelayedSameTokenActivation() async {
+        let controller = makeAXEventTestController()
+        defer { controller.axEventHandler.resetDebugStateForTests() }
+        controller.hasStartedServices = true
+        controller.axManager.currentWindowsAsyncOverride = { [] }
+        guard let workspaceId = controller.activeWorkspace()?.id else {
+            Issue.record("Missing active workspace")
+            return
+        }
+
+        let token = controller.workspaceManager.addWindow(
+            AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: 8041),
+            pid: getpid(),
+            windowId: 8041,
+            to: workspaceId
+        )
+        guard let originalEntry = controller.workspaceManager.entry(for: token) else {
+            Issue.record("Missing managed entry before native fullscreen enter destroy")
+            return
+        }
+
+        _ = controller.workspaceManager.requestNativeFullscreenEnter(token, in: workspaceId)
+        controller.axEventHandler.handleRemoved(token: token)
+        controller.axEventHandler.flushPendingNativeFullscreenFollowupsForTests()
+        await controller.layoutRefreshController.waitForSettledRefreshWorkForTests()
+
+        guard let unavailableRecord = controller.workspaceManager.nativeFullscreenRecord(for: token) else {
+            Issue.record("Missing temporarily unavailable native fullscreen record")
+            return
+        }
+        if case .enterRequested = unavailableRecord.transition {} else {
+            Issue.record("Expected delayed enter record to remain enterRequested before activation")
+        }
+        #expect(unavailableRecord.availability == .temporarilyUnavailable)
+        #expect(controller.workspaceManager.entry(for: token)?.handle === originalEntry.handle)
+
+        guard let delayedEntry = controller.workspaceManager.entry(for: token) else {
+            Issue.record("Missing delayed entry for same-token fullscreen activation")
+            return
+        }
+        controller.axEventHandler.handleManagedAppActivation(
+            entry: delayedEntry,
+            isWorkspaceActive: true,
+            appFullscreen: true
+        )
+
+        guard let suspendedRecord = controller.workspaceManager.nativeFullscreenRecord(for: token) else {
+            Issue.record("Missing suspended native fullscreen record after delayed activation")
+            return
+        }
+        if case .suspended = suspendedRecord.transition {} else {
+            Issue.record("Expected delayed enter record to become suspended after activation")
+        }
+        #expect(suspendedRecord.availability == .present)
+        #expect(controller.workspaceManager.entry(for: token)?.handle === originalEntry.handle)
+        #expect(controller.workspaceManager.layoutReason(for: token) == .nativeFullscreen)
+        #expect(controller.workspaceManager.isAppFullscreenActive)
+    }
+
+    @Test @MainActor func nativeFullscreenExitDestroySurvivesFollowupBeforeDelayedSameTokenRestoreActivation() async {
+        let controller = makeAXEventTestController()
+        defer { controller.axEventHandler.resetDebugStateForTests() }
+        controller.hasStartedServices = true
+        controller.axManager.currentWindowsAsyncOverride = { [] }
+        guard let workspaceId = controller.activeWorkspace()?.id else {
+            Issue.record("Missing active workspace")
+            return
+        }
+
+        let token = controller.workspaceManager.addWindow(
+            AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: 8042),
+            pid: getpid(),
+            windowId: 8042,
+            to: workspaceId
+        )
+        _ = controller.workspaceManager.setManagedFocus(
+            token,
+            in: workspaceId,
+            onMonitor: controller.workspaceManager.monitorId(for: workspaceId)
+        )
+        guard let originalEntry = controller.workspaceManager.entry(for: token) else {
+            Issue.record("Missing managed entry before native fullscreen exit destroy")
+            return
+        }
+
+        _ = controller.workspaceManager.requestNativeFullscreenEnter(token, in: workspaceId)
+        _ = controller.workspaceManager.markNativeFullscreenSuspended(token)
+        _ = controller.workspaceManager.requestNativeFullscreenExit(token, initiatedByCommand: true)
+        controller.axEventHandler.handleRemoved(token: token)
+        controller.axEventHandler.flushPendingNativeFullscreenFollowupsForTests()
+        await controller.layoutRefreshController.waitForSettledRefreshWorkForTests()
+
+        guard let unavailableRecord = controller.workspaceManager.nativeFullscreenRecord(for: token) else {
+            Issue.record("Missing temporarily unavailable exit record")
+            return
+        }
+        if case .exitRequested = unavailableRecord.transition {} else {
+            Issue.record("Expected delayed exit record to remain exitRequested before activation")
+        }
+        #expect(unavailableRecord.availability == .temporarilyUnavailable)
+        #expect(controller.workspaceManager.entry(for: token)?.handle === originalEntry.handle)
+
+        guard let delayedEntry = controller.workspaceManager.entry(for: token) else {
+            Issue.record("Missing delayed entry for same-token fullscreen restore")
+            return
+        }
+        controller.axEventHandler.handleManagedAppActivation(
+            entry: delayedEntry,
+            isWorkspaceActive: true,
+            appFullscreen: false
+        )
+
+        #expect(controller.workspaceManager.nativeFullscreenRecord(for: token) == nil)
+        #expect(controller.workspaceManager.entry(for: token)?.handle === originalEntry.handle)
+        #expect(controller.workspaceManager.layoutReason(for: token) == .standard)
+        #expect(controller.workspaceManager.focusedToken == token)
+        #expect(controller.workspaceManager.isNonManagedFocusActive == false)
+        #expect(controller.workspaceManager.isAppFullscreenActive == false)
+    }
+
+    @Test @MainActor func nativeFullscreenUnavailableReplacementRekeysManagedHandleWithoutReplacingIt() {
+        let controller = makeAXEventTestController()
+        defer { controller.axEventHandler.resetDebugStateForTests() }
+        guard let workspaceId = controller.activeWorkspace()?.id else {
+            Issue.record("Missing active workspace")
+            return
+        }
+
+        let originalToken = controller.workspaceManager.addWindow(
+            AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: 8043),
+            pid: getpid(),
+            windowId: 8043,
+            to: workspaceId
+        )
+        guard let originalEntry = controller.workspaceManager.entry(for: originalToken) else {
+            Issue.record("Missing original native fullscreen replacement entry")
+            return
+        }
+
+        _ = controller.workspaceManager.requestNativeFullscreenEnter(originalToken, in: workspaceId)
+        _ = controller.workspaceManager.markNativeFullscreenSuspended(originalToken)
+        controller.axEventHandler.handleRemoved(token: originalToken)
+
+        let replacementToken = WindowToken(pid: getpid(), windowId: 8044)
+        let replacementWindow = AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: 8044)
+        let restored = controller.axEventHandler.restoreNativeFullscreenReplacementIfNeeded(
+            token: replacementToken,
+            windowId: 8044,
+            axRef: replacementWindow,
+            workspaceId: workspaceId,
+            appFullscreen: false
+        )
+
+        guard let replacementEntry = controller.workspaceManager.entry(for: replacementToken) else {
+            Issue.record("Missing rekeyed replacement entry")
+            return
+        }
+
+        #expect(restored)
+        #expect(controller.workspaceManager.entry(for: originalToken) == nil)
+        #expect(replacementEntry.handle === originalEntry.handle)
+        #expect(controller.workspaceManager.nativeFullscreenRecord(for: replacementToken) == nil)
+        #expect(controller.workspaceManager.layoutReason(for: replacementToken) == .standard)
+    }
+
     @Test @MainActor func nativeFullscreenCommandRoundTripsThroughObservedStateTransitions() {
         let controller = makeAXEventTestController()
         guard let workspaceId = controller.activeWorkspace()?.id else {
