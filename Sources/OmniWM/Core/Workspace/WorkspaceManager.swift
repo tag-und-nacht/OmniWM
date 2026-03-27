@@ -676,7 +676,17 @@ final class WorkspaceManager {
     func applySessionPatch(_ patch: WorkspaceSessionPatch) -> Bool {
         var changed = false
 
-        if let viewportState = patch.viewportState {
+        if var viewportState = patch.viewportState {
+            // Guard against a stale gesture snapshot overwriting an in-progress snap animation.
+            // Layout plans are built asynchronously and may arrive after endGesture() has already
+            // transitioned the viewport from .gesture to .spring. Preserve the spring animation.
+            if viewportState.viewOffsetPixels.isGesture {
+                let currentState = niriViewportState(for: patch.workspaceId)
+                if case .spring = currentState.viewOffsetPixels {
+                    viewportState.viewOffsetPixels = currentState.viewOffsetPixels
+                    viewportState.activeColumnIndex = currentState.activeColumnIndex
+                }
+            }
             updateNiriViewportState(viewportState, for: patch.workspaceId)
             changed = true
         }
