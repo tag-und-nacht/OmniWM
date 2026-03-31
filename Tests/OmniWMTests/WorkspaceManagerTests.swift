@@ -184,6 +184,44 @@ private func workspaceConfigurations(
         #expect(manager.monitorId(for: ws2) == restoredDetached.id)
     }
 
+    @Test @MainActor func unassignedThirdMonitorStaysStableAcrossActiveWorkspaceReads() {
+        let defaults = makeWorkspaceManagerTestDefaults()
+        let settings = SettingsStore(defaults: defaults)
+        settings.workspaceConfigurations = workspaceConfigurations([
+            ("1", .main),
+            ("2", .secondary)
+        ])
+
+        let manager = WorkspaceManager(settings: settings)
+        var sessionChangeCount = 0
+        manager.onSessionStateChanged = {
+            sessionChangeCount += 1
+        }
+
+        let main = makeWorkspaceManagerTestMonitor(displayId: 10, name: "Main", x: 0, y: 0)
+        let secondary = makeWorkspaceManagerTestMonitor(displayId: 20, name: "Secondary", x: 1920, y: 0)
+        let third = makeWorkspaceManagerTestMonitor(displayId: 30, name: "Third", x: 3840, y: 0)
+        manager.applyMonitorConfigurationChange([main, secondary, third])
+
+        guard let ws1 = manager.workspaceId(for: "1", createIfMissing: true),
+              let ws2 = manager.workspaceId(for: "2", createIfMissing: true) else {
+            Issue.record("Failed to create expected workspaces")
+            return
+        }
+
+        #expect(manager.activeWorkspace(on: main.id)?.id == ws1)
+        #expect(manager.activeWorkspace(on: secondary.id)?.id == ws2)
+
+        sessionChangeCount = 0
+
+        #expect(manager.activeWorkspace(on: third.id) == nil)
+        #expect(manager.activeWorkspaceOrFirst(on: third.id) == nil)
+        #expect(manager.activeWorkspace(on: third.id) == nil)
+        #expect(manager.currentActiveWorkspace(on: third.id) == nil)
+        #expect(manager.workspaces(on: third.id).isEmpty)
+        #expect(sessionChangeCount == 0)
+    }
+
     @Test @MainActor func secondaryWorkspacesCollapseOntoRemainingMonitorAndReturnWhenSecondaryReappears() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)

@@ -708,6 +708,41 @@ private func prepareNiriState(
         #expect(statusBarController.statusButtonTitleForTests() == " 1 \u{2013} Second App")
     }
 
+    @Test @MainActor func interactionMonitorChangeOnUnassignedThirdDisplayDoesNotRecurseAfterMonitorExpansion() {
+        let controller = makeRefreshTestController(
+            workspaceConfigurations: [
+                WorkspaceConfiguration(name: "1", monitorAssignment: .main),
+                WorkspaceConfiguration(name: "2", monitorAssignment: .secondary)
+            ]
+        )
+        let primary = makeRefreshTestMonitor(displayId: layoutPlanTestMainDisplayId(), name: "Primary", x: 0, y: 0)
+        let secondary = makeRefreshTestMonitor(displayId: layoutPlanTestSyntheticDisplayId(1), name: "Secondary", x: 1920, y: 0)
+        controller.workspaceManager.applyMonitorConfigurationChange([primary, secondary])
+        controller.settings.statusBarShowWorkspaceName = true
+
+        let statusBarController = makeRefreshTestStatusBarController(controller)
+        defer {
+            statusBarController.cleanup()
+            cleanupRefreshTestController(controller)
+        }
+        statusBarController.setup()
+
+        let third = makeRefreshTestMonitor(displayId: layoutPlanTestSyntheticDisplayId(2), name: "Third", x: 3840, y: 0)
+        controller.workspaceManager.applyMonitorConfigurationChange([primary, secondary, third])
+
+        var sessionChangeCount = 0
+        let originalOnSessionStateChanged = controller.workspaceManager.onSessionStateChanged
+        controller.workspaceManager.onSessionStateChanged = {
+            sessionChangeCount += 1
+            originalOnSessionStateChanged?()
+        }
+
+        #expect(controller.workspaceManager.setInteractionMonitor(third.id))
+        #expect(sessionChangeCount == 1)
+        #expect(statusBarController.statusButtonTitleForTests() == "")
+        #expect(statusBarController.statusButtonImagePositionForTests() == .imageOnly)
+    }
+
     @Test @MainActor func niriConfigAndEnableUseRelayoutOnly() async {
         let controller = makeRefreshTestController()
         let recorder = RefreshEventRecorder()

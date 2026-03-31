@@ -146,6 +146,41 @@ private func prepareIPCQueryRouterNiriState(
         #expect(secondaryResult.activeWorkspace?.rawName == "2")
     }
 
+    @Test func interactionMonitorQueriesRemainNilOnUnassignedThirdMonitor() {
+        let primary = makeLayoutPlanPrimaryTestMonitor(name: "Primary")
+        let secondary = makeLayoutPlanSecondaryTestMonitor(name: "Secondary", x: 1920)
+        let third = makeLayoutPlanSecondaryTestMonitor(slot: 2, name: "Third", x: 3840)
+        let controller = makeLayoutPlanTestController(
+            monitors: [primary, secondary, third],
+            workspaceConfigurations: [
+                WorkspaceConfiguration(name: "1", monitorAssignment: .main),
+                WorkspaceConfiguration(name: "2", monitorAssignment: .secondary)
+            ]
+        )
+        let router = IPCQueryRouter(controller: controller, sessionToken: ipcQueryRouterSessionToken)
+
+        var sessionChangeCount = 0
+        let originalOnSessionStateChanged = controller.workspaceManager.onSessionStateChanged
+        controller.workspaceManager.onSessionStateChanged = {
+            sessionChangeCount += 1
+            originalOnSessionStateChanged?()
+        }
+
+        #expect(controller.workspaceManager.setInteractionMonitor(third.id))
+        sessionChangeCount = 0
+
+        let activeWorkspaceResult = router.activeWorkspaceResult()
+        let focusedMonitorResult = router.focusedMonitorResult()
+        let workspacesResult = router.workspacesResult(IPCQueryRequest(name: .workspaces))
+
+        #expect(activeWorkspaceResult.display?.id == "display:\(third.displayId)")
+        #expect(activeWorkspaceResult.workspace == nil)
+        #expect(focusedMonitorResult.display?.id == "display:\(third.displayId)")
+        #expect(focusedMonitorResult.activeWorkspace == nil)
+        #expect(workspacesResult.workspaces.allSatisfy { $0.isCurrent != true })
+        #expect(sessionChangeCount == 0)
+    }
+
     @Test func appsQueryReturnsManagedBundleSummaryInsteadOfFullInventory() {
         let controller = makeLayoutPlanTestController()
         let workspaceId = controller.workspaceManager.workspaceId(for: "1", createIfMissing: false)!

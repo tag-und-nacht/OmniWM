@@ -264,6 +264,39 @@ private func makeStatusBarMenuTestDirectory() -> URL {
         #expect(statusBarController.statusButtonImagePositionForTests() == .imageLeft)
     }
 
+    @Test func statusBarRefreshStaysReadOnlyOnUnassignedThirdMonitor() {
+        let primary = makeLayoutPlanPrimaryTestMonitor(name: "Primary")
+        let secondary = makeLayoutPlanSecondaryTestMonitor(name: "Secondary", x: 1920)
+        let third = makeLayoutPlanSecondaryTestMonitor(slot: 2, name: "Third", x: 3840)
+        let controller = makeLayoutPlanTestController(
+            monitors: [primary, secondary, third],
+            workspaceConfigurations: [
+                WorkspaceConfiguration(name: "1", monitorAssignment: .main),
+                WorkspaceConfiguration(name: "2", monitorAssignment: .secondary)
+            ]
+        )
+        controller.settings.statusBarShowWorkspaceName = true
+
+        #expect(controller.workspaceManager.setInteractionMonitor(third.id))
+
+        var sessionChangeCount = 0
+        let originalOnSessionStateChanged = controller.workspaceManager.onSessionStateChanged
+        controller.workspaceManager.onSessionStateChanged = {
+            sessionChangeCount += 1
+            originalOnSessionStateChanged?()
+        }
+
+        let statusBarController = makeStatusBarController(for: controller)
+        defer { statusBarController.cleanup() }
+
+        sessionChangeCount = 0
+        statusBarController.setup()
+
+        #expect(sessionChangeCount == 0)
+        #expect(statusBarController.statusButtonTitleForTests() == "")
+        #expect(statusBarController.statusButtonImagePositionForTests() == .imageOnly)
+    }
+
     @Test func statusBarTitleUsesDisplayNameOrRawNameAndTruncatesFocusedApp() {
         let monitor = makeLayoutPlanTestMonitor()
         let controller = makeLayoutPlanTestController(
