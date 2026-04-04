@@ -276,15 +276,14 @@ final class WorkspaceNavigationHandler {
 
     func switchWorkspace(rawWorkspaceID: String) {
         guard let controller else { return }
-        controller.borderManager.hideBorder()
-
         let currentWorkspace = controller.activeWorkspace()
         if let currentWorkspace,
            currentWorkspace.name == rawWorkspaceID
         {
-            workspaceBackAndForth()
             return
         }
+
+        controller.borderManager.hideBorder()
 
         if let currentWorkspace {
             saveNiriViewportState(for: currentWorkspace.id)

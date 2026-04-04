@@ -885,6 +885,61 @@ private func prepareNiriState(
         assertNoLegacyReasons(recorder)
     }
 
+    @Test @MainActor func reselectingActiveWorkspaceDoesNotTriggerRefreshOrClearBorder() async {
+        let controller = makeRefreshTestController()
+        guard let workspaceOne = controller.workspaceManager.workspaceId(for: "1", createIfMissing: false),
+              let workspaceTwo = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true),
+              let monitor = controller.workspaceManager.monitors.first
+        else {
+            Issue.record("Failed to create active workspace reselect fixture")
+            return
+        }
+
+        let handles = await prepareNiriState(
+            on: controller,
+            assignments: [
+                (workspaceOne, 352),
+                (workspaceTwo, 353),
+            ],
+            focusedWindowId: 352,
+            ensureWorkspaces: [workspaceTwo]
+        )
+        guard let targetHandle = handles[353] else {
+            Issue.record("Missing target workspace handle")
+            return
+        }
+
+        #expect(controller.workspaceManager.setActiveWorkspace(workspaceTwo, on: monitor.id))
+        #expect(controller.workspaceManager.setManagedFocus(
+            targetHandle.id,
+            in: workspaceTwo,
+            onMonitor: monitor.id
+        ))
+        primeFocusedBorder(on: controller, handle: targetHandle)
+
+        let recorder = RefreshEventRecorder()
+        installRefreshSpies(on: controller, recorder: recorder)
+
+        let previousFocusedToken = controller.workspaceManager.focusedToken
+        let previousBorderWindowId = lastAppliedBorderWindowId(on: controller)
+
+        controller.workspaceNavigationHandler.switchWorkspace(index: 1)
+        await waitForRefreshWork(on: controller)
+
+        #expect(controller.activeWorkspace()?.id == workspaceTwo)
+        #expect(controller.workspaceManager.focusedToken == previousFocusedToken)
+        #expect(controller.workspaceManager.focusedToken == targetHandle.id)
+        #expect(lastAppliedBorderWindowId(on: controller) == previousBorderWindowId)
+        #expect(lastAppliedBorderWindowId(on: controller) == targetHandle.windowId)
+        #expect(controller.niriLayoutHandler.scrollAnimationByDisplay[monitor.displayId] == nil)
+        #expect(controller.niriEngine?.monitor(for: monitor.id)?.workspaceSwitch == nil)
+        #expect(recorder.relayoutEvents.isEmpty)
+        #expect(recorder.visibilityReasons.isEmpty)
+        #expect(recorder.fullRescanReasons.isEmpty)
+        #expect(recorder.windowRemovalReasons.isEmpty)
+        assertNoLegacyReasons(recorder)
+    }
+
     @Test @MainActor func crossMonitorWorkspaceSwitchSkipsAnimationWhenTargetIsAlreadyVisible() async {
         let fixture = makeTwoMonitorRefreshTestController()
         _ = await prepareNiriState(

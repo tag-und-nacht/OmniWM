@@ -176,6 +176,26 @@ private func prepareIPCNiriState(
         #expect(controller.activeWorkspace()?.name == "2")
     }
 
+    @Test func switchWorkspaceReturnsNotFoundWhenTargetWorkspaceIsAlreadyActive() {
+        let controller = makeLayoutPlanTestController()
+        let router = makeIPCCommandRouter(for: controller)
+
+        #expect(router.handle(.switchWorkspace(workspaceNumber: 2)) == .executed)
+        #expect(controller.activeWorkspace()?.name == "2")
+
+        let repeatedSwitchResult = router.handle(
+            .switchWorkspace(workspaceNumber: 2)
+        )
+
+        #expect(repeatedSwitchResult == .notFound)
+        #expect(controller.activeWorkspace()?.name == "2")
+
+        let backAndForthResult = router.handle(.switchWorkspaceBackAndForth)
+
+        #expect(backAndForthResult == .executed)
+        #expect(controller.activeWorkspace()?.name == "1")
+    }
+
     @Test func switchWorkspaceBackAndForthReturnsToPreviousWorkspace() {
         let controller = makeLayoutPlanTestController()
         let router = makeIPCCommandRouter(for: controller)
