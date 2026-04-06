@@ -45,8 +45,17 @@ private func awaitFrameBatchResults(
     from context: AppAXContext,
     frames: [(windowId: Int, frame: CGRect, currentFrameHint: CGRect?)]
 ) async -> [AXFrameApplyResult] {
-    await withCheckedContinuation { continuation in
-        context.setFramesBatch(frames) { results in
+    let requests = frames.enumerated().map { index, frame in
+        AXFrameApplicationRequest(
+            requestId: AXFrameRequestId(index + 1),
+            pid: context.pid,
+            windowId: frame.windowId,
+            frame: frame.frame,
+            currentFrameHint: frame.currentFrameHint
+        )
+    }
+    return await withCheckedContinuation { continuation in
+        context.setFramesBatch(requests) { results in
             continuation.resume(returning: results)
         }
     }

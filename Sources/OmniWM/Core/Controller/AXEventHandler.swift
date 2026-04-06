@@ -1233,6 +1233,11 @@ final class AXEventHandler: CGSEventDelegate {
             oldWindowId: oldToken.windowId,
             newWindow: axRef
         )
+        controller.layoutRefreshController.rekeyPendingRevealTransaction(
+            from: oldToken,
+            to: newToken,
+            entry: entry
+        )
         AXWindowService.invalidateCachedTitles(windowIds: [UInt32(oldToken.windowId), windowId])
         subscribeToWindows([windowId])
         controller.requestWorkspaceBarRefresh()

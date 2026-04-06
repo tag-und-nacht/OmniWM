@@ -4,6 +4,52 @@ import Testing
 
 @testable import OmniWM
 
+private enum ScratchpadFocusOperationEvent: Equatable {
+    case activate(pid_t)
+    case focus(pid_t, UInt32)
+    case raise
+}
+
+private final class ScratchpadFocusRecorder {
+    var events: [ScratchpadFocusOperationEvent] = []
+}
+
+private func scratchpadTestWriteResult(
+    targetFrame: CGRect,
+    currentFrameHint: CGRect?,
+    observedFrame: CGRect?,
+    failureReason: AXFrameWriteFailureReason?
+) -> AXFrameWriteResult {
+    AXFrameWriteResult(
+        targetFrame: targetFrame,
+        observedFrame: observedFrame,
+        writeOrder: AXWindowService.frameWriteOrder(
+            currentFrame: currentFrameHint,
+            targetFrame: targetFrame
+        ),
+        sizeError: .success,
+        positionError: .success,
+        failureReason: failureReason
+    )
+}
+
+@MainActor
+private func makeScratchpadFocusOperations(
+    recorder: ScratchpadFocusRecorder
+) -> WindowFocusOperations {
+    WindowFocusOperations(
+        activateApp: { pid in
+            recorder.events.append(.activate(pid))
+        },
+        focusSpecificWindow: { pid, windowId, _ in
+            recorder.events.append(.focus(pid, windowId))
+        },
+        raiseWindow: { _ in
+            recorder.events.append(.raise)
+        }
+    )
+}
+
 @MainActor
 private func setScratchpadTestFrame(
     on controller: WMController,
@@ -176,5 +222,160 @@ private func setScratchpadTestFrame(
         #expect(controller.workspaceManager.hiddenState(for: token) == nil)
         #expect(controller.axManager.lastAppliedFrame(for: 730) == expectedFrame)
         #expect(controller.workspaceManager.pendingFocusedToken == token)
+    }
+
+    @Test @MainActor func toggleScratchpadWindowFrontsWindowOnlyAfterAsyncRevealSucceeds() async throws {
+        let recorder = ScratchpadFocusRecorder()
+        let fixture = makeTwoMonitorLayoutPlanTestController(
+            primaryMonitor: makeLayoutPlanPrimaryTestMonitor(name: "Primary"),
+            secondaryMonitor: makeLayoutPlanSecondaryTestMonitor(name: "Secondary", x: 1920),
+            windowFocusOperations: makeScratchpadFocusOperations(recorder: recorder)
+        )
+        let controller = fixture.controller
+
+        let token = addLayoutPlanTestWindow(
+            on: controller,
+            workspaceId: fixture.primaryWorkspaceId,
+            windowId: 731
+        )
+        let initialFrame = CGRect(x: 220, y: 160, width: 620, height: 400)
+        setScratchpadTestFrame(on: controller, token: token, frame: initialFrame)
+
+        _ = controller.workspaceManager.setManagedFocus(
+            token,
+            in: fixture.primaryWorkspaceId,
+            onMonitor: fixture.primaryMonitor.id
+        )
+        controller.assignFocusedWindowToScratchpad()
+        _ = controller.workspaceManager.setInteractionMonitor(fixture.secondaryMonitor.id)
+
+        guard let expectedFrame = controller.workspaceManager.resolvedFloatingFrame(
+            for: token,
+            preferredMonitor: fixture.secondaryMonitor
+        ),
+        let entry = controller.workspaceManager.entry(for: token),
+        let context = await AppAXContext.makeForTests(processIdentifier: token.pid)
+        else {
+            Issue.record("Missing scratchpad entry, context, or expected frame for async focus test")
+            return
+        }
+
+        controller.axManager.frameApplyOverrideForTests = nil
+        AppAXContext.contexts[token.pid] = context
+        try await context.installWindowsForTests([entry.axRef])
+
+        let startedWrite = DispatchSemaphore(value: 0)
+        let releaseWrite = DispatchSemaphore(value: 0)
+        AXWindowService.setFrameResultProviderForTests = { _, frame, currentFrameHint in
+            if frame == expectedFrame {
+                startedWrite.signal()
+                _ = releaseWrite.wait(timeout: .now() + 1)
+            }
+            return scratchpadTestWriteResult(
+                targetFrame: frame,
+                currentFrameHint: currentFrameHint,
+                observedFrame: frame,
+                failureReason: nil
+            )
+        }
+        defer {
+            AXWindowService.setFrameResultProviderForTests = nil
+            context.destroy()
+        }
+
+        controller.toggleScratchpadWindow()
+
+        let sawWriteStart = await Task.detached {
+            waitForSemaphoreForTests(startedWrite, timeout: .now() + 1) == .success
+        }.value
+
+        #expect(sawWriteStart)
+        #expect(recorder.events.isEmpty)
+
+        releaseWrite.signal()
+
+        let observedFronting = await waitForConditionForTests {
+            recorder.events.count == 3
+        }
+
+        #expect(observedFronting)
+        #expect(
+            recorder.events == [
+                .activate(token.pid),
+                .focus(token.pid, UInt32(token.windowId)),
+                .raise
+            ]
+        )
+        #expect(controller.workspaceManager.hiddenState(for: token) == nil)
+        #expect(controller.axManager.lastAppliedFrame(for: token.windowId) == expectedFrame)
+    }
+
+    @Test @MainActor func toggleScratchpadWindowFailedHiddenRevealKeepsScratchpadStateAndSkipsFocus() {
+        let recorder = ScratchpadFocusRecorder()
+        let controller = makeLayoutPlanTestController(
+            windowFocusOperations: makeScratchpadFocusOperations(recorder: recorder)
+        )
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing monitor or workspace for scratchpad failure focus test")
+            return
+        }
+
+        let visibleToken = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 733)
+        _ = controller.workspaceManager.setManagedFocus(visibleToken, in: workspaceId, onMonitor: monitor.id)
+
+        let token = controller.workspaceManager.addWindow(
+            makeLayoutPlanTestWindow(windowId: 734),
+            pid: 734,
+            windowId: 734,
+            to: workspaceId,
+            mode: .floating
+        )
+        controller.workspaceManager.setFloatingState(
+            .init(
+                lastFrame: CGRect(x: 240, y: 170, width: 600, height: 390),
+                normalizedOrigin: CGPoint(x: 0.3, y: 0.22),
+                referenceMonitorId: monitor.id,
+                restoreToFloating: true
+            ),
+            for: token
+        )
+        controller.workspaceManager.setHiddenState(
+            .init(
+                proportionalPosition: CGPoint(x: 0.84, y: 0.74),
+                referenceMonitorId: monitor.id,
+                reason: .scratchpad
+            ),
+            for: token
+        )
+        #expect(controller.workspaceManager.setScratchpadToken(token))
+
+        controller.axManager.frameApplyOverrideForTests = { requests in
+            requests.map { request in
+                AXFrameApplyResult(
+                    requestId: request.requestId,
+                    pid: request.pid,
+                    windowId: request.windowId,
+                    targetFrame: request.frame,
+                    currentFrameHint: request.currentFrameHint,
+                    writeResult: scratchpadTestWriteResult(
+                        targetFrame: request.frame,
+                        currentFrameHint: request.currentFrameHint,
+                        observedFrame: request.currentFrameHint,
+                        failureReason: .suppressed
+                    )
+                )
+            }
+        }
+
+        controller.toggleScratchpadWindow()
+
+        #expect(controller.workspaceManager.scratchpadToken() == token)
+        #expect(controller.workspaceManager.hiddenState(for: token)?.isScratchpad == true)
+        #expect(controller.workspaceManager.focusedToken == visibleToken)
+        #expect(controller.workspaceManager.pendingFocusedToken != token)
+        #expect(controller.axManager.lastAppliedFrame(for: token.windowId) == nil)
+        #expect(recorder.events.isEmpty)
     }
 }

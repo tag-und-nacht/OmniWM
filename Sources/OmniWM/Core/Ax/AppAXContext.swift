@@ -52,6 +52,8 @@ final class LockedWindowGenerationMap: @unchecked Sendable {
 }
 
 private struct AppAXFrameWriteRequest: Sendable {
+    let requestId: AXFrameRequestId
+    let pid: pid_t
     let windowId: Int
     let frame: CGRect
     let currentFrameHint: CGRect?
@@ -393,14 +395,15 @@ final class AppAXContext {
     }
 
     func setFramesBatch(
-        _ frames: [(windowId: Int, frame: CGRect, currentFrameHint: CGRect?)],
+        _ frames: [AXFrameApplicationRequest],
         completion: @escaping @MainActor ([AXFrameApplyResult]) -> Void
     ) {
         guard let thread else {
             completion(
                 frames.map {
                     AXFrameApplyResult(
-                        pid: pid,
+                        requestId: $0.requestId,
+                        pid: $0.pid,
                         windowId: $0.windowId,
                         targetFrame: $0.frame,
                         currentFrameHint: $0.currentFrameHint,
@@ -417,6 +420,8 @@ final class AppAXContext {
         nonisolated(unsafe) let appThread = thread
         let requests = frames.map {
             AppAXFrameWriteRequest(
+                requestId: $0.requestId,
+                pid: $0.pid,
                 windowId: $0.windowId,
                 frame: $0.frame,
                 currentFrameHint: $0.currentFrameHint,
@@ -455,7 +460,8 @@ final class AppAXContext {
                 if job.isCancelled {
                     results.append(
                         AXFrameApplyResult(
-                            pid: currentPid,
+                            requestId: request.requestId,
+                            pid: request.pid,
                             windowId: request.windowId,
                             targetFrame: request.frame,
                             currentFrameHint: request.currentFrameHint,
@@ -471,7 +477,8 @@ final class AppAXContext {
                 if !generations.isCurrent(request.generation, for: request.windowId) {
                     results.append(
                         AXFrameApplyResult(
-                            pid: currentPid,
+                            requestId: request.requestId,
+                            pid: request.pid,
                             windowId: request.windowId,
                             targetFrame: request.frame,
                             currentFrameHint: request.currentFrameHint,
@@ -487,7 +494,8 @@ final class AppAXContext {
                 if suppression.contains(request.windowId) {
                     results.append(
                         AXFrameApplyResult(
-                            pid: currentPid,
+                            requestId: request.requestId,
+                            pid: request.pid,
                             windowId: request.windowId,
                             targetFrame: request.frame,
                             currentFrameHint: request.currentFrameHint,
@@ -627,6 +635,7 @@ private func applyFrameWriteRequest(
                 currentFrameHint: currentFrameHint
             )
             return AXFrameApplyResult(
+                requestId: request.requestId,
                 pid: pid,
                 windowId: windowId,
                 targetFrame: targetFrame,
@@ -635,6 +644,7 @@ private func applyFrameWriteRequest(
             )
         }
         return AXFrameApplyResult(
+            requestId: request.requestId,
             pid: pid,
             windowId: windowId,
             targetFrame: targetFrame,
@@ -651,6 +661,7 @@ private func applyFrameWriteRequest(
             currentFrameHint: currentFrameHint
         )
         return AXFrameApplyResult(
+            requestId: request.requestId,
             pid: pid,
             windowId: windowId,
             targetFrame: targetFrame,
@@ -660,6 +671,7 @@ private func applyFrameWriteRequest(
     }
 
     return AXFrameApplyResult(
+        requestId: request.requestId,
         pid: pid,
         windowId: windowId,
         targetFrame: targetFrame,

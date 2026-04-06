@@ -34,6 +34,8 @@ enum AXErrorWrapper: Error {
     case cannotGetWindowId
 }
 
+typealias AXFrameRequestId = UInt64
+
 enum AXFrameWriteOrder {
     case sizeThenPosition
     case positionThenSize
@@ -85,16 +87,52 @@ struct AXFrameWriteResult: Equatable, Sendable {
     }
 }
 
+struct AXFrameApplicationRequest: Equatable, Sendable {
+    let requestId: AXFrameRequestId
+    let pid: pid_t
+    let windowId: Int
+    let frame: CGRect
+    let currentFrameHint: CGRect?
+}
+
 struct AXFrameApplyResult: Equatable, Sendable {
+    let requestId: AXFrameRequestId
     let pid: pid_t
     let windowId: Int
     let targetFrame: CGRect
     let currentFrameHint: CGRect?
     let writeResult: AXFrameWriteResult
 
+    init(
+        requestId: AXFrameRequestId = 0,
+        pid: pid_t,
+        windowId: Int,
+        targetFrame: CGRect,
+        currentFrameHint: CGRect?,
+        writeResult: AXFrameWriteResult
+    ) {
+        self.requestId = requestId
+        self.pid = pid
+        self.windowId = windowId
+        self.targetFrame = targetFrame
+        self.currentFrameHint = currentFrameHint
+        self.writeResult = writeResult
+    }
+
     var confirmedFrame: CGRect? {
         guard writeResult.isVerifiedSuccess else { return nil }
         return writeResult.observedFrame ?? targetFrame
+    }
+
+    func rekeyed(to windowId: Int) -> Self {
+        Self(
+            requestId: requestId,
+            pid: pid,
+            windowId: windowId,
+            targetFrame: targetFrame,
+            currentFrameHint: currentFrameHint,
+            writeResult: writeResult
+        )
     }
 }
 
