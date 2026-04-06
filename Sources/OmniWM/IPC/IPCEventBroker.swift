@@ -1,6 +1,12 @@
 import Foundation
 import OmniWMIPC
 
+struct IPCEventStreamRegistration: Sendable {
+    let channel: IPCSubscriptionChannel
+    let id: UUID
+    let stream: AsyncStream<IPCEventEnvelope>
+}
+
 final class IPCEventDemandTracker: @unchecked Sendable {
     private let lock = NSLock()
     private var counts: [IPCSubscriptionChannel: Int] = [:]
@@ -44,7 +50,7 @@ actor IPCEventBroker {
         self.demandTracker = demandTracker
     }
 
-    func stream(for channel: IPCSubscriptionChannel) -> AsyncStream<IPCEventEnvelope> {
+    func registerStream(for channel: IPCSubscriptionChannel) -> IPCEventStreamRegistration {
         let id = UUID()
         var capturedContinuation: AsyncStream<IPCEventEnvelope>.Continuation?
         let stream = AsyncStream<IPCEventEnvelope>(bufferingPolicy: .bufferingNewest(1)) { continuation in
@@ -60,7 +66,11 @@ actor IPCEventBroker {
             continuations[channel, default: [:]][id] = capturedContinuation
             demandTracker.increment(channel)
         }
-        return stream
+        return IPCEventStreamRegistration(channel: channel, id: id, stream: stream)
+    }
+
+    func stream(for channel: IPCSubscriptionChannel) -> AsyncStream<IPCEventEnvelope> {
+        registerStream(for: channel).stream
     }
 
     func publish(_ event: IPCEventEnvelope) {
@@ -68,6 +78,10 @@ actor IPCEventBroker {
         for continuation in currentContinuations {
             continuation.yield(event)
         }
+    }
+
+    func removeStream(id: UUID, from channel: IPCSubscriptionChannel) {
+        removeContinuation(id: id, from: channel)
     }
 
     func finishAll() {
@@ -84,7 +98,7 @@ actor IPCEventBroker {
     }
 
     private func removeContinuation(id: UUID, from channel: IPCSubscriptionChannel) {
-        continuations[channel]?.removeValue(forKey: id)
+        guard continuations[channel]?.removeValue(forKey: id) != nil else { return }
         demandTracker.decrement(channel)
         if continuations[channel]?.isEmpty == true {
             continuations.removeValue(forKey: channel)

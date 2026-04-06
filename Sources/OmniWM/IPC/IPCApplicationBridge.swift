@@ -119,12 +119,24 @@ actor IPCApplicationBridge {
     }
 
     func stream(for channel: IPCSubscriptionChannel) async -> AsyncStream<IPCEventEnvelope> {
-        await eventBroker.stream(for: channel)
+        await eventBroker.registerStream(for: channel).stream
+    }
+
+    func registerStream(for channel: IPCSubscriptionChannel) async -> IPCEventStreamRegistration {
+        await eventBroker.registerStream(for: channel)
+    }
+
+    func unregisterStream(_ registration: IPCEventStreamRegistration) async {
+        await eventBroker.removeStream(id: registration.id, from: registration.channel)
     }
 
     func initialEvents(for request: IPCSubscribeRequest) async -> [IPCEventEnvelope] {
         guard request.sendInitial else { return [] }
         let channels = IPCAutomationManifest.expandedChannels(for: request)
+        return await initialEvents(for: channels)
+    }
+
+    func initialEvents(for channels: [IPCSubscriptionChannel]) async -> [IPCEventEnvelope] {
         var events: [IPCEventEnvelope] = []
         for channel in channels {
             if let event = await eventEnvelope(for: channel) {
@@ -142,6 +154,10 @@ actor IPCApplicationBridge {
 
     func publishEventForTests(_ channel: IPCSubscriptionChannel) async {
         guard let event = await eventEnvelope(for: channel) else { return }
+        await eventBroker.publish(event)
+    }
+
+    func publishEventEnvelopeForTests(_ event: IPCEventEnvelope) async {
         await eventBroker.publish(event)
     }
 
