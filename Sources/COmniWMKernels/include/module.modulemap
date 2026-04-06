@@ -1,0 +1,4 @@
+module COmniWMKernels {
+    header "COmniWMKernels.h"
+    export *
+}

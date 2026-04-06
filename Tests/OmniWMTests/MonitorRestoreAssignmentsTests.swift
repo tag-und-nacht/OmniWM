@@ -24,6 +24,48 @@ private func makeMonitor(
 }
 
 @Suite struct MonitorRestoreAssignmentsTests {
+    @Test func emptyInputsProduceNoAssignments() {
+        let workspaceId = WorkspaceDescriptor.ID()
+
+        #expect(
+            resolveWorkspaceRestoreAssignments(
+                snapshots: [],
+                monitors: [makeMonitor(displayId: 1000, name: "Solo", x: 0, y: 0)],
+                workspaceExists: { $0 == workspaceId }
+            )
+                .isEmpty
+        )
+
+        #expect(
+            resolveWorkspaceRestoreAssignments(
+                snapshots: [
+                    WorkspaceRestoreSnapshot(
+                        monitor: .init(monitor: makeMonitor(displayId: 1001, name: "Solo", x: 0, y: 0)),
+                        workspaceId: workspaceId
+                    )
+                ],
+                monitors: [],
+                workspaceExists: { $0 == workspaceId }
+            )
+                .isEmpty
+        )
+    }
+
+    @Test func filteringAwayAllSnapshotsProducesNoAssignments() {
+        let monitor = makeMonitor(displayId: 100, name: "Solo", x: 0, y: 0)
+        let workspaceId = WorkspaceDescriptor.ID()
+
+        let assignments = resolveWorkspaceRestoreAssignments(
+            snapshots: [
+                WorkspaceRestoreSnapshot(monitor: .init(monitor: monitor), workspaceId: workspaceId)
+            ],
+            monitors: [monitor],
+            workspaceExists: { _ in false }
+        )
+
+        #expect(assignments.isEmpty)
+    }
+
     @Test func resolvesByDisplayIdWhenAvailable() {
         let left = makeMonitor(displayId: 100, name: "Dell", x: 0, y: 0)
         let right = makeMonitor(displayId: 200, name: "LG", x: 1920, y: 0)
@@ -43,6 +85,42 @@ private func makeMonitor(
 
         #expect(assignments[left.id] == wsLeft)
         #expect(assignments[right.id] == wsRight)
+    }
+
+    @Test func exactDisplayIdTakesPrecedenceOverCloserFallbackGeometry() {
+        let exactButFar = makeMonitor(displayId: 300, name: "Studio", x: 5000, y: 0)
+        let closerButInexact = makeMonitor(displayId: 400, name: "Studio", x: 0, y: 0)
+        let snapshotMonitor = makeMonitor(displayId: 300, name: "Studio", x: 0, y: 0)
+        let workspaceId = WorkspaceDescriptor.ID()
+
+        let assignments = resolveWorkspaceRestoreAssignments(
+            snapshots: [
+                WorkspaceRestoreSnapshot(monitor: .init(monitor: snapshotMonitor), workspaceId: workspaceId)
+            ],
+            monitors: [closerButInexact, exactButFar],
+            workspaceExists: { $0 == workspaceId }
+        )
+
+        #expect(assignments[exactButFar.id] == workspaceId)
+        #expect(assignments[closerButInexact.id] == nil)
+    }
+
+    @Test func exactDisplayIdMatchTakesPrecedenceOverCloserGeometry() {
+        let oldMonitor = makeMonitor(displayId: 100, name: "Center", x: 1000, y: 0)
+        let exactButFar = makeMonitor(displayId: 100, name: "Center", x: 4000, y: 0)
+        let closerButDifferentId = makeMonitor(displayId: 200, name: "Center", x: 1000, y: 0)
+        let workspaceId = WorkspaceDescriptor.ID()
+
+        let assignments = resolveWorkspaceRestoreAssignments(
+            snapshots: [
+                WorkspaceRestoreSnapshot(monitor: .init(monitor: oldMonitor), workspaceId: workspaceId)
+            ],
+            monitors: [closerButDifferentId, exactButFar],
+            workspaceExists: { _ in true }
+        )
+
+        #expect(assignments[exactButFar.id] == workspaceId)
+        #expect(assignments[closerButDifferentId.id] == nil)
     }
 
     @Test func resolvesDuplicateMonitorNamesByGeometryFallback() {
@@ -68,6 +146,64 @@ private func makeMonitor(
 
         #expect(assignments[newLeft.id] == wsLeft)
         #expect(assignments[newRight.id] == wsRight)
+    }
+
+    @Test func lowerNamePenaltyWinsBeforeGeometryDelta() {
+        let snapshot = makeMonitor(displayId: 500, name: "Studio Display", x: 0, y: 0)
+        let geometryMatchWrongName = makeMonitor(displayId: 510, name: "Other", x: 0, y: 0)
+        let fartherNameMatch = makeMonitor(displayId: 520, name: "Studio Display", x: 300, y: 0)
+        let workspaceId = WorkspaceDescriptor.ID()
+
+        let assignments = resolveWorkspaceRestoreAssignments(
+            snapshots: [
+                WorkspaceRestoreSnapshot(monitor: .init(monitor: snapshot), workspaceId: workspaceId)
+            ],
+            monitors: [geometryMatchWrongName, fartherNameMatch],
+            workspaceExists: { $0 == workspaceId }
+        )
+
+        #expect(assignments[fartherNameMatch.id] == workspaceId)
+        #expect(assignments[geometryMatchWrongName.id] == nil)
+    }
+
+    @Test func lowerGeometryDeltaWinsWhenNamePenaltyTies() {
+        let snapshot = makeMonitor(displayId: 530, name: "Dell", x: 0, y: 0)
+        let farther = makeMonitor(displayId: 540, name: "Dell", x: 3000, y: 0)
+        let nearer = makeMonitor(displayId: 550, name: "Dell", x: 200, y: 0)
+        let workspaceId = WorkspaceDescriptor.ID()
+
+        let assignments = resolveWorkspaceRestoreAssignments(
+            snapshots: [
+                WorkspaceRestoreSnapshot(monitor: .init(monitor: snapshot), workspaceId: workspaceId)
+            ],
+            monitors: [farther, nearer],
+            workspaceExists: { $0 == workspaceId }
+        )
+
+        #expect(assignments[nearer.id] == workspaceId)
+        #expect(assignments[farther.id] == nil)
+    }
+
+    @Test func higherAssignedCountWinsBeforeLowerPenaltyOrGeometry() {
+        let snapshot1 = makeMonitor(displayId: 600, name: "Matched", x: 0, y: 0)
+        let snapshot2 = makeMonitor(displayId: 610, name: "Second", x: 2000, y: 0)
+        let firstMonitor = makeMonitor(displayId: 700, name: "Matched", x: 0, y: 0)
+        let secondMonitor = makeMonitor(displayId: 710, name: "Other", x: 2000, y: 0)
+        let workspace1 = WorkspaceDescriptor.ID()
+        let workspace2 = WorkspaceDescriptor.ID()
+
+        let assignments = resolveWorkspaceRestoreAssignments(
+            snapshots: [
+                WorkspaceRestoreSnapshot(monitor: .init(monitor: snapshot1), workspaceId: workspace1),
+                WorkspaceRestoreSnapshot(monitor: .init(monitor: snapshot2), workspaceId: workspace2)
+            ],
+            monitors: [firstMonitor, secondMonitor],
+            workspaceExists: { _ in true }
+        )
+
+        #expect(assignments.count == 2)
+        #expect(assignments[firstMonitor.id] == workspace1)
+        #expect(assignments[secondMonitor.id] == workspace2)
     }
 
     @Test func filtersUnknownWorkspacesAndDuplicateWorkspaceSnapshots() {

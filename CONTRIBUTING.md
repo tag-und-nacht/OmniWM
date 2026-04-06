@@ -32,13 +32,18 @@ Bug fixes, documentation improvements, performance work, focused cleanups, featu
 - Include testing notes **if possible**. Mention what you ran, checked, or verified.
 - Add screenshots, recordings, or CLI examples when they help explain the change.
 - Update documentation when behavior, workflows, or interfaces change.
+- Rebuild the Zig kernels with `./Scripts/build-zig-kernels.sh debug` before `swift build` or `swift test`.
+- When touching `Zig/omniwm_kernels`, run `zig test Zig/omniwm_kernels/src/root.zig`.
 
 ## Basic Workflow
 
 1. Fork the repository.
 2. Create a branch for your change.
-3. Make the change and test it.
-4. Open a pull request with clear context and reasoning.
+3. Build the Zig kernels with `./Scripts/build-zig-kernels.sh debug` before `swift build` or `swift test`.
+4. Use `./Scripts/build-zig-kernels.sh release` before packaging or release builds.
+5. Run `zig test Zig/omniwm_kernels/src/root.zig` when your change touches the kernel library.
+6. Make the change and test it.
+7. Open a pull request with clear context and reasoning.
 
 ## Questions and Ideas
 

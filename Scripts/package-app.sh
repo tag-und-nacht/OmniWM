@@ -30,6 +30,9 @@ if ! lipo "$GHOSTTY_LIBRARY" -verify_arch arm64 x86_64 >/dev/null 2>&1; then
   exit 1
 fi
 
+echo "Building Zig kernels..."
+"$ROOT_DIR/Scripts/build-zig-kernels.sh" "$CONFIG"
+
 echo "Building OmniWM universal binary ($CONFIG)..."
 LIBRARY_PATH="$GHOSTTY_LIBRARY_DIR${LIBRARY_PATH:+:$LIBRARY_PATH}" swift build -c "$CONFIG" --arch arm64 --arch x86_64
 

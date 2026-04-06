@@ -4,6 +4,7 @@ import PackageDescription
 
 let packageDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
 let ghosttyMacOSLibraryDirectory = "\(packageDirectory)/Frameworks/GhosttyKit.xcframework/macos-arm64_x86_64"
+let zigKernelLibraryDirectory = "\(packageDirectory)/.build/zig-kernels/lib"
 
 let package = Package(
     name: "OmniWM",
@@ -26,6 +27,11 @@ let package = Package(
             path: "Frameworks/GhosttyKit.xcframework"
         ),
         .target(
+            name: "COmniWMKernels",
+            path: "Sources/COmniWMKernels",
+            publicHeadersPath: "include"
+        ),
+        .target(
             name: "OmniWMIPC",
             path: "Sources/OmniWMIPC",
             swiftSettings: [
@@ -34,7 +40,7 @@ let package = Package(
         ),
         .target(
             name: "OmniWM",
-            dependencies: ["GhosttyKit", "OmniWMIPC"],
+            dependencies: ["GhosttyKit", "OmniWMIPC", "COmniWMKernels"],
             path: "Sources/OmniWM",
             resources: [
                 .process("Resources")
@@ -51,8 +57,10 @@ let package = Package(
                 .linkedFramework("Metal"),
                 .linkedFramework("MetalKit"),
                 .linkedFramework("QuartzCore"),
+                .linkedLibrary("omniwm_kernels"),
                 .linkedLibrary("z"),
                 .linkedLibrary("c++"),
+                .unsafeFlags(["-L\(zigKernelLibraryDirectory)"]),
                 .unsafeFlags(["-L\(ghosttyMacOSLibraryDirectory)"]),
                 .unsafeFlags(["-F/System/Library/PrivateFrameworks", "-framework", "SkyLight"])
             ]

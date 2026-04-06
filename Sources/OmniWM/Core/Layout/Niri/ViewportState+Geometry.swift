@@ -1,16 +1,31 @@
+import COmniWMKernels
 import Foundation
 
-extension ViewportState {
-    private func allowedOffsetRange(
-        targetPos: CGFloat,
-        totalSpan: CGFloat,
-        viewportSpan: CGFloat
-    ) -> ClosedRange<CGFloat>? {
-        guard totalSpan > viewportSpan else { return nil }
+extension CenterFocusedColumn {
+    fileprivate var zigRawValue: UInt32 {
+        switch self {
+        case .never:
+            return UInt32(OMNIWM_CENTER_FOCUSED_COLUMN_NEVER)
+        case .always:
+            return UInt32(OMNIWM_CENTER_FOCUSED_COLUMN_ALWAYS)
+        case .onOverflow:
+            return UInt32(OMNIWM_CENTER_FOCUSED_COLUMN_ON_OVERFLOW)
+        }
+    }
+}
 
-        let minOffset = -targetPos
-        let maxOffset = totalSpan - viewportSpan - targetPos
-        return minOffset ... maxOffset
+extension ViewportState {
+    private func withSpanBuffer<Result>(
+        containers: [NiriContainer],
+        sizeKeyPath: KeyPath<NiriContainer, CGFloat>,
+        _ body: (UnsafeBufferPointer<Double>) -> Result
+    ) -> Result {
+        withUnsafeTemporaryAllocation(of: Double.self, capacity: containers.count) { spans in
+            for (index, container) in containers.enumerated() {
+                spans[index] = container[keyPath: sizeKeyPath]
+            }
+            return body(UnsafeBufferPointer(start: spans.baseAddress, count: containers.count))
+        }
     }
 
     func columnX(at index: Int, columns: [NiriContainer], gap: CGFloat) -> CGFloat {
@@ -21,79 +36,55 @@ extension ViewportState {
         totalSpan(containers: columns, gap: gap, sizeKeyPath: \.cachedWidth)
     }
 
-    func containerPosition(at index: Int, containers: [NiriContainer], gap: CGFloat, sizeKeyPath: KeyPath<NiriContainer, CGFloat>) -> CGFloat {
-        var pos: CGFloat = 0
-        for i in 0 ..< index {
-            guard i < containers.count else { break }
-            pos += containers[i][keyPath: sizeKeyPath] + gap
-        }
-        return pos
-    }
-
-    func totalSpan(containers: [NiriContainer], gap: CGFloat, sizeKeyPath: KeyPath<NiriContainer, CGFloat>) -> CGFloat {
-        guard !containers.isEmpty else { return 0 }
-        let sizeSum = containers.reduce(0) { $0 + $1[keyPath: sizeKeyPath] }
-        let gapSum = CGFloat(max(0, containers.count - 1)) * gap
-        return sizeSum + gapSum
-    }
-
-    func computeCenteredOffset(containerIndex: Int, containers: [NiriContainer], gap: CGFloat, viewportSpan: CGFloat, sizeKeyPath: KeyPath<NiriContainer, CGFloat>) -> CGFloat {
-        guard !containers.isEmpty, containerIndex < containers.count else { return 0 }
-
-        let total = totalSpan(containers: containers, gap: gap, sizeKeyPath: sizeKeyPath)
-        let pos = containerPosition(at: containerIndex, containers: containers, gap: gap, sizeKeyPath: sizeKeyPath)
-
-        if total <= viewportSpan {
-            return -pos - (viewportSpan - total) / 2
-        }
-
-        let containerSize = containers[containerIndex][keyPath: sizeKeyPath]
-        let centeredOffset = -(viewportSpan - containerSize) / 2
-
-        guard let allowedOffsetRange = allowedOffsetRange(
-            targetPos: pos,
-            totalSpan: total,
-            viewportSpan: viewportSpan
-        ) else {
-            return centeredOffset
-        }
-
-        return centeredOffset.clamped(to: allowedOffsetRange)
-    }
-
-    private func computeFitOffset(
-        currentViewPos: CGFloat,
-        viewSpan: CGFloat,
-        targetPos: CGFloat,
-        targetSpan: CGFloat,
-        scale: CGFloat = 2.0
+    func containerPosition(
+        at index: Int,
+        containers: [NiriContainer],
+        gap: CGFloat,
+        sizeKeyPath: KeyPath<NiriContainer, CGFloat>
     ) -> CGFloat {
-        let pixelEpsilon: CGFloat = 1.0 / max(scale, 1.0)
+        guard index >= 0 else { return 0 }
 
-        if viewSpan <= targetSpan + pixelEpsilon {
-            return 0
+        return withSpanBuffer(containers: containers, sizeKeyPath: sizeKeyPath) { spans in
+            omniwm_geometry_container_position(
+                spans.baseAddress,
+                spans.count,
+                gap,
+                numericCast(index)
+            )
         }
+    }
 
-        let targetEnd = targetPos + targetSpan
-
-        // Padding is a preference for clipped targets, not a reason to move a
-        // viewport when the focused container is already fully visible.
-        if currentViewPos - pixelEpsilon <= targetPos
-            && targetEnd <= currentViewPos + viewSpan + pixelEpsilon
-        {
-            return currentViewPos - targetPos
+    func totalSpan(
+        containers: [NiriContainer],
+        gap: CGFloat,
+        sizeKeyPath: KeyPath<NiriContainer, CGFloat>
+    ) -> CGFloat {
+        withSpanBuffer(containers: containers, sizeKeyPath: sizeKeyPath) { spans in
+            omniwm_geometry_total_span(
+                spans.baseAddress,
+                spans.count,
+                gap
+            )
         }
+    }
 
-        let exactStart = targetPos
-        let exactEnd = targetEnd - viewSpan
+    func computeCenteredOffset(
+        containerIndex: Int,
+        containers: [NiriContainer],
+        gap: CGFloat,
+        viewportSpan: CGFloat,
+        sizeKeyPath: KeyPath<NiriContainer, CGFloat>
+    ) -> CGFloat {
+        guard containerIndex >= 0 else { return 0 }
 
-        let distToStart = abs(currentViewPos - exactStart)
-        let distToEnd = abs(currentViewPos - exactEnd)
-
-        if distToStart <= distToEnd {
-            return exactStart - targetPos
-        } else {
-            return exactEnd - targetPos
+        return withSpanBuffer(containers: containers, sizeKeyPath: sizeKeyPath) { spans in
+            omniwm_geometry_centered_offset(
+                spans.baseAddress,
+                spans.count,
+                gap,
+                viewportSpan,
+                numericCast(containerIndex)
+            )
         }
     }
 
@@ -109,101 +100,22 @@ extension ViewportState {
         fromContainerIndex: Int? = nil,
         scale: CGFloat = 2.0
     ) -> CGFloat {
-        guard !containers.isEmpty, containerIndex >= 0, containerIndex < containers.count else { return 0 }
+        guard containerIndex >= 0 else { return 0 }
 
-        let effectiveCenterMode = (containers.count == 1 && alwaysCenterSingleColumn) ? .always : centerMode
-        let currentViewEnd = currentViewStart + viewportSpan
-        let pixelEpsilon: CGFloat = 1.0 / max(scale, 1.0)
-
-        let targetPos = containerPosition(at: containerIndex, containers: containers, gap: gap, sizeKeyPath: sizeKeyPath)
-        let targetSize = containers[containerIndex][keyPath: sizeKeyPath]
-        let targetEnd = targetPos + targetSize
-
-        func isFullyVisible(pos: CGFloat, end: CGFloat) -> Bool {
-            currentViewStart - pixelEpsilon <= pos && end <= currentViewEnd + pixelEpsilon
-        }
-
-        var targetOffset: CGFloat
-
-        switch effectiveCenterMode {
-        case .always:
-            targetOffset = computeCenteredOffset(
-                containerIndex: containerIndex,
-                containers: containers,
-                gap: gap,
-                viewportSpan: viewportSpan,
-                sizeKeyPath: sizeKeyPath
-            )
-
-        case .onOverflow:
-            if targetSize > viewportSpan {
-                targetOffset = computeCenteredOffset(
-                    containerIndex: containerIndex,
-                    containers: containers,
-                    gap: gap,
-                    viewportSpan: viewportSpan,
-                    sizeKeyPath: sizeKeyPath
-                )
-            } else if let fromIdx = fromContainerIndex,
-                      fromIdx != containerIndex,
-                      containers.indices.contains(fromIdx)
-            {
-                let sourcePos = containerPosition(at: fromIdx, containers: containers, gap: gap, sizeKeyPath: sizeKeyPath)
-                let sourceSize = containers[fromIdx][keyPath: sizeKeyPath]
-                let sourceEnd = sourcePos + sourceSize
-                let pairStart = min(sourcePos, targetPos)
-                let pairEnd = max(sourceEnd, targetEnd)
-                let pairSpan = pairEnd - pairStart
-
-                if (isFullyVisible(pos: sourcePos, end: sourceEnd) && isFullyVisible(pos: targetPos, end: targetEnd))
-                    || pairSpan <= viewportSpan
-                {
-                    targetOffset = computeFitOffset(
-                        currentViewPos: currentViewStart,
-                        viewSpan: viewportSpan,
-                        targetPos: targetPos,
-                        targetSpan: targetSize,
-                        scale: scale
-                    )
-                } else {
-                    targetOffset = computeCenteredOffset(
-                        containerIndex: containerIndex,
-                        containers: containers,
-                        gap: gap,
-                        viewportSpan: viewportSpan,
-                        sizeKeyPath: sizeKeyPath
-                    )
-                }
-            } else {
-                targetOffset = computeFitOffset(
-                    currentViewPos: currentViewStart,
-                    viewSpan: viewportSpan,
-                    targetPos: targetPos,
-                    targetSpan: targetSize,
-                    scale: scale
-                )
-            }
-
-        case .never:
-            targetOffset = computeFitOffset(
-                currentViewPos: currentViewStart,
-                viewSpan: viewportSpan,
-                targetPos: targetPos,
-                targetSpan: targetSize,
-                scale: scale
+        return withSpanBuffer(containers: containers, sizeKeyPath: sizeKeyPath) { spans in
+            omniwm_geometry_visible_offset(
+                spans.baseAddress,
+                spans.count,
+                gap,
+                viewportSpan,
+                Int32(containerIndex),
+                currentViewStart,
+                centerMode.zigRawValue,
+                alwaysCenterSingleColumn ? 1 : 0,
+                Int32(fromContainerIndex ?? -1),
+                scale
             )
         }
-
-        let total = totalSpan(containers: containers, gap: gap, sizeKeyPath: sizeKeyPath)
-        if let allowedOffsetRange = allowedOffsetRange(
-            targetPos: targetPos,
-            totalSpan: total,
-            viewportSpan: viewportSpan
-        ) {
-            targetOffset = targetOffset.clamped(to: allowedOffsetRange)
-        }
-
-        return targetOffset
     }
 
     func computeCenteredOffset(
@@ -212,7 +124,13 @@ extension ViewportState {
         gap: CGFloat,
         viewportWidth: CGFloat
     ) -> CGFloat {
-        computeCenteredOffset(containerIndex: columnIndex, containers: columns, gap: gap, viewportSpan: viewportWidth, sizeKeyPath: \.cachedWidth)
+        computeCenteredOffset(
+            containerIndex: columnIndex,
+            containers: columns,
+            gap: gap,
+            viewportSpan: viewportWidth,
+            sizeKeyPath: \.cachedWidth
+        )
     }
 
     func computeVisibleOffset(
@@ -226,14 +144,14 @@ extension ViewportState {
         fromColumnIndex: Int? = nil,
         scale: CGFloat = 2.0
     ) -> CGFloat {
-        let colX = columnX(at: columnIndex, columns: columns, gap: gap)
+        let columnPosition = columnX(at: columnIndex, columns: columns, gap: gap)
         return computeVisibleOffset(
             containerIndex: columnIndex,
             containers: columns,
             gap: gap,
             viewportSpan: viewportWidth,
             sizeKeyPath: \.cachedWidth,
-            currentViewStart: colX + currentOffset,
+            currentViewStart: columnPosition + currentOffset,
             centerMode: centerMode,
             alwaysCenterSingleColumn: alwaysCenterSingleColumn,
             fromContainerIndex: fromColumnIndex,

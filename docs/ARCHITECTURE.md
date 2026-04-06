@@ -45,12 +45,12 @@ This document is for contributors who want to understand OmniWM's internals. It 
 
 ### SwiftPM Targets
 
-OmniWM is built with Swift Package Manager (Swift 6.2, strict concurrency). There are four targets with a clear dependency graph:
+OmniWM is built with Swift Package Manager (Swift 6.2, strict concurrency). There are five targets with a clear dependency graph:
 
 ```
-OmniWMIPC          (zero dependencies — shared IPC protocol models)
-    ^         ^
-    |          \
+OmniWMIPC         COmniWMKernels
+    ^                   ^
+    |                    \
 OmniWMCtl      OmniWM + GhosttyKit   (CLI tool)       (main library)
                    ^
                    |
@@ -61,7 +61,8 @@ OmniWMCtl      OmniWM + GhosttyKit   (CLI tool)       (main library)
 |--------|---------|--------------|
 | `OmniWMIPC` | Shared IPC data models and wire format | None |
 | `OmniWMCtl` | CLI tool (`omniwmctl`) | OmniWMIPC |
-| `OmniWM` | Core window manager library | OmniWMIPC, GhosttyKit, system frameworks |
+| `COmniWMKernels` | Checked-in C header target for Zig kernel imports | None |
+| `OmniWM` | Core window manager library | OmniWMIPC, GhosttyKit, COmniWMKernels, system frameworks |
 | `OmniWMApp` | Executable wrapper with SwiftUI scene | OmniWM |
 
 ### Source Directory Map
@@ -107,10 +108,13 @@ Sources/
 │   └── UI/                          SwiftUI settings, status bar, workspace bar,
 │                                    command palette, hidden bar, updater popup
 │                                    (34 files)
+├── COmniWMKernels/                  C import surface for Zig kernels (header + stub)
 ├── OmniWMApp/                       2 files: @main entry + settings redirect
 ├── OmniWMCtl/                       7 files: CLI parser, IPC client, renderer
 └── OmniWMIPC/                       5 files: models, wire format, socket path
 ```
+
+`Zig/omniwm_kernels/` lives at the repository root beside `Sources/`. It contains the leaf kernels that are built into `.build/zig-kernels/lib/libomniwm_kernels.a`.
 
 ### External Dependencies
 
@@ -120,14 +124,19 @@ OmniWM has **zero third-party package dependencies**. All functionality is built
 - **SkyLight**: A private Apple framework for low-latency window server access, linked via `-framework SkyLight` unsafe flag
 - **GhosttyKit**: A local binary xcframework at `Frameworks/GhosttyKit.xcframework` prepared outside git, providing terminal emulation for the Quake Terminal feature
 - **System libraries**: libz, libc++
+- **Zig kernels**: `Zig/omniwm_kernels/src/`, built into `.build/zig-kernels/lib/libomniwm_kernels.a` by `./Scripts/build-zig-kernels.sh`
+- **Zig toolchain**: required to rebuild the leaf-kernel static library via `./Scripts/build-zig-kernels.sh`
 
 ### Building & Running
 
 ```bash
 # Debug build
+./Scripts/build-zig-kernels.sh debug
 swift build
 
 # Run tests
+./Scripts/build-zig-kernels.sh debug
+zig test Zig/omniwm_kernels/src/root.zig
 swift test
 
 # Code quality
@@ -490,6 +499,8 @@ Entries are indexed by both `WindowToken` and raw `windowId` for fast lookup fro
 **Directory:** `Sources/OmniWM/Core/Layout/Niri/`
 
 Niri arranges windows in vertical columns that scroll horizontally, inspired by the [Niri](https://github.com/YaLTeR/niri) Wayland compositor.
+
+Three leaf kernels in this area now live in `Zig/omniwm_kernels/src` and are imported through the checked-in `COmniWMKernels` C header target: axis constraint solving, viewport geometry, and monitor restore assignment matching. Their Swift counterparts remain thin wrappers so the surrounding layout engine, navigation, and AppKit-facing orchestration stay in Swift.
 
 **Node Tree:**
 
@@ -995,9 +1006,11 @@ OmniWM uses SkyLight (private macOS framework) for low-latency window operations
 
 ## 7. Testing
 
-**Runner:** `swift test` via SwiftPM. Requires macOS 15+.
+**Runner:** `./Scripts/build-zig-kernels.sh debug && swift test` via SwiftPM. Requires macOS 15+ and the Zig toolchain to rebuild the leaf kernels from source.
 
-**Test directory:** `Tests/OmniWMTests/` (55 files: 52 test files + 3 support files)
+**Kernel tests:** `cd Zig/omniwm_kernels && zig build test`
+
+**Test directory:** `Tests/OmniWMTests/`
 
 **Test patterns:**
 
