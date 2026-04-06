@@ -59,7 +59,7 @@ private func setScratchpadTestFrame(
     controller.axManager.applyFramesParallel([(token.pid, token.windowId, frame)])
 }
 
-@Suite struct WMControllerScratchpadTests {
+@Suite(.serialized) struct WMControllerScratchpadTests {
     @Test @MainActor func assignFocusedWindowToScratchpadHidesTiledWindowAndRejectsSecondAssignment() {
         let controller = makeLayoutPlanTestController()
         guard let monitor = controller.workspaceManager.monitors.first,
