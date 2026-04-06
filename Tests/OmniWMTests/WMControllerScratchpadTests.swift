@@ -247,40 +247,44 @@ private func setScratchpadTestFrame(
             onMonitor: fixture.primaryMonitor.id
         )
         controller.assignFocusedWindowToScratchpad()
+        await waitForLayoutPlanRefreshWork(on: controller)
         _ = controller.workspaceManager.setInteractionMonitor(fixture.secondaryMonitor.id)
 
         guard let expectedFrame = controller.workspaceManager.resolvedFloatingFrame(
             for: token,
             preferredMonitor: fixture.secondaryMonitor
-        ),
-        let entry = controller.workspaceManager.entry(for: token),
-        let context = await AppAXContext.makeForTests(processIdentifier: token.pid)
+        )
         else {
-            Issue.record("Missing scratchpad entry, context, or expected frame for async focus test")
+            Issue.record("Missing scratchpad entry or expected frame for async focus test")
             return
         }
 
-        controller.axManager.frameApplyOverrideForTests = nil
-        AppAXContext.contexts[token.pid] = context
-        try await context.installWindowsForTests([entry.axRef])
-
         let startedWrite = DispatchSemaphore(value: 0)
         let releaseWrite = DispatchSemaphore(value: 0)
-        AXWindowService.setFrameResultProviderForTests = { _, frame, currentFrameHint in
-            if frame == expectedFrame {
-                startedWrite.signal()
-                _ = releaseWrite.wait(timeout: .now() + 1)
+        controller.axManager.frameApplyOverrideForTests = { requests in
+            requests.map { request in
+                if request.windowId == token.windowId {
+                    startedWrite.signal()
+                    _ = releaseWrite.wait(timeout: .now() + 1)
+                }
+
+                return AXFrameApplyResult(
+                    requestId: request.requestId,
+                    pid: request.pid,
+                    windowId: request.windowId,
+                    targetFrame: request.frame,
+                    currentFrameHint: request.currentFrameHint,
+                    writeResult: scratchpadTestWriteResult(
+                        targetFrame: request.frame,
+                        currentFrameHint: request.currentFrameHint,
+                        observedFrame: request.frame,
+                        failureReason: nil
+                    )
+                )
             }
-            return scratchpadTestWriteResult(
-                targetFrame: frame,
-                currentFrameHint: currentFrameHint,
-                observedFrame: frame,
-                failureReason: nil
-            )
         }
         defer {
-            AXWindowService.setFrameResultProviderForTests = nil
-            context.destroy()
+            controller.axManager.frameApplyOverrideForTests = nil
         }
 
         controller.toggleScratchpadWindow()

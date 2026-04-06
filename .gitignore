@@ -1,5 +1,7 @@
 # Build artifacts
 .build/
+Zig/omniwm_kernels/.zig-cache/
+Zig/omniwm_kernels/zig-out/
 
 # SwiftPM
 .swiftpm/xcode/xcuserdata/

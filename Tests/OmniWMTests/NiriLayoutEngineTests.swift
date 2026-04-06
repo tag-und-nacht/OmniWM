@@ -5552,6 +5552,7 @@ private func makeCenteredCrossMonitorFixture(
             activeWorkspaces: [workspaceId]
         )
         controller.layoutRefreshController.executeLayoutPlans(initialPlans)
+        await waitForLayoutPlanRefreshWork(on: controller)
 
         let gap = CGFloat(controller.workspaceManager.gaps)
         let workingFrame = controller.insetWorkingFrame(for: monitor)
@@ -5588,6 +5589,13 @@ private func makeCenteredCrossMonitorFixture(
                 in: workspaceId,
                 onMonitor: monitor.id
             )
+            controller.layoutRefreshController.stopAllScrollAnimations()
+        }
+
+        func settleViewport() {
+            controller.workspaceManager.withNiriViewportState(for: workspaceId) { state in
+                state.viewOffsetPixels = .static(state.viewOffsetPixels.target())
+            }
             controller.layoutRefreshController.stopAllScrollAnimations()
         }
 
@@ -5826,6 +5834,7 @@ private func makeCenteredCrossMonitorFixture(
         #expect(midToggleState.viewOffsetPixels.isAnimating)
 
         controller.layoutRefreshController.settleAllAnimationsForTests()
+        settleViewport()
 
         let settledState = controller.workspaceManager.niriViewportState(for: workspaceId)
         #expect(!settledState.viewOffsetPixels.isAnimating)

@@ -130,6 +130,9 @@ func makeLayoutPlanTestController(
         settings: settings,
         windowFocusOperations: operations
     )
+    // These fixtures assume viewport motion starts enabled unless a test
+    // explicitly turns it off later.
+    controller.setAnimationsEnabled(true, persist: false)
     installSynchronousFrameApplySuccessOverride(on: controller)
     controller.workspaceManager.applyMonitorConfigurationChange(monitors)
     return controller
