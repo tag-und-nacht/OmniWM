@@ -2162,6 +2162,15 @@ import QuartzCore
         pendingRevealTransactionsByWindowId[windowId] != nil
     }
 
+    fileprivate func shouldUsePendingRevealTransaction(
+        for entry: WindowModel.Entry,
+        hiddenState: WindowModel.HiddenState
+    ) -> Bool {
+        !hiddenState.workspaceInactive
+            && entry.mode == .floating
+            && hiddenState.restoresViaFloatingState
+    }
+
     fileprivate func beginPendingRevealTransaction(
         for entry: WindowModel.Entry,
         hiddenState: WindowModel.HiddenState,
@@ -2289,12 +2298,19 @@ import QuartzCore
             return
         }
         pendingRevealVerificationTasksByWindowId.removeValue(forKey: windowId)?.cancel()
+        let frameEntry = [(pendingTransaction.pid, pendingTransaction.windowId)]
+
+        if pendingTransaction.hiddenState.workspaceInactive {
+            controller.workspaceManager.setHiddenState(nil, for: pendingTransaction.token)
+            controller.axManager.unsuppressFrameWrites(frameEntry)
+            return
+        }
 
         if controller.workspaceManager.hiddenState(for: pendingTransaction.token) == nil {
             controller.workspaceManager.setHiddenState(pendingTransaction.hiddenState, for: pendingTransaction.token)
         }
         if controller.workspaceManager.hiddenState(for: pendingTransaction.token) != nil {
-            controller.axManager.suppressFrameWrites([(pendingTransaction.pid, pendingTransaction.windowId)])
+            controller.axManager.suppressFrameWrites(frameEntry)
         }
     }
 
@@ -2357,7 +2373,13 @@ import QuartzCore
             recordRevealTrace(
                 "start windowId=\(entry.windowId) mode=none outcome=noGeometry"
             )
-            controller.axManager.suppressFrameWrites(frameEntry)
+            if hiddenState.workspaceInactive {
+                controller.workspaceManager.setHiddenState(nil, for: entry.token)
+                controller.axManager.unsuppressFrameWrites(frameEntry)
+                onSuccess?()
+            } else {
+                controller.axManager.suppressFrameWrites(frameEntry)
+            }
         case let .positionPlan(plan):
             recordRevealTrace(
                 "start windowId=\(entry.windowId) mode=positionPlan"
@@ -2367,6 +2389,17 @@ import QuartzCore
             controller.axManager.unsuppressFrameWrites(frameEntry)
             onSuccess?()
         case let .asyncFrame(frame):
+            if !shouldUsePendingRevealTransaction(for: entry, hiddenState: hiddenState) {
+                recordRevealTrace(
+                    "start windowId=\(entry.windowId) mode=asyncFrame immediate targetFrame=\(NSStringFromRect(frame))"
+                )
+                controller.workspaceManager.setHiddenState(nil, for: entry.token)
+                controller.axManager.unsuppressFrameWrites(frameEntry)
+                controller.axManager.forceApplyNextFrame(for: entry.windowId)
+                controller.axManager.applyFramesParallel([(entry.pid, entry.windowId, frame)])
+                onSuccess?()
+                return
+            }
             guard beginPendingRevealTransaction(
                 for: entry,
                 hiddenState: hiddenState,
@@ -2580,6 +2613,12 @@ final class LayoutDiffExecutor {
         }
 
         for (entry, hiddenState) in restoreEntries {
+            guard refreshController.shouldUsePendingRevealTransaction(
+                for: entry,
+                hiddenState: hiddenState
+            ) else {
+                continue
+            }
             if let targetFrame = frameChangeByToken[entry.token] {
                 if refreshController.beginPendingRevealTransaction(
                     for: entry,
@@ -2598,6 +2637,12 @@ final class LayoutDiffExecutor {
 
         for (entry, hiddenState) in shownEntries {
             guard let hiddenState else { continue }
+            guard refreshController.shouldUsePendingRevealTransaction(
+                for: entry,
+                hiddenState: hiddenState
+            ) else {
+                continue
+            }
             if let targetFrame = frameChangeByToken[entry.token] {
                 if refreshController.beginPendingRevealTransaction(
                     for: entry,

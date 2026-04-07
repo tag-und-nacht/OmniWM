@@ -1298,7 +1298,7 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
         #expect(controller.axManager.lastAppliedFrame(for: token.windowId) == floatingFrame)
     }
 
-    @Test @MainActor func unhideWindowFailurePreservesWorkspaceHiddenState() {
+    @Test @MainActor func unhideWindowFailureDoesNotRestoreWorkspaceHiddenState() {
         let controller = makeLayoutPlanTestController()
         guard let monitor = controller.workspaceManager.monitors.first,
               let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
@@ -1357,12 +1357,13 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
 
         controller.layoutRefreshController.unhideWindow(entry, monitor: monitor)
 
-        #expect(controller.workspaceManager.hiddenState(for: token)?.workspaceInactive == true)
+        #expect(controller.workspaceManager.hiddenState(for: token) == nil)
         #expect(controller.axManager.lastAppliedFrame(for: token.windowId) == nil)
         #expect(controller.axManager.hasPendingFrameWrite(for: token.windowId) == false)
+        #expect(controller.axManager.recentFrameWriteFailure(for: token.windowId) == .suppressed)
     }
 
-    @Test @MainActor func executeLayoutPlanShowWithCachedRevealFrameForceAppliesAndCompletesReveal() {
+    @Test @MainActor func executeLayoutPlanShowWithCachedVisibleFrameClearsHiddenStateWithoutRevealTransaction() {
         let controller = makeLayoutPlanTestController()
         guard let monitor = controller.workspaceManager.monitors.first,
               let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
@@ -1410,7 +1411,7 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
             )
         )
 
-        #expect(attemptCount == 1)
+        #expect(attemptCount == 0)
         #expect(controller.workspaceManager.hiddenState(for: token) == nil)
         #expect(controller.axManager.lastAppliedFrame(for: token.windowId) == frame)
     }
@@ -1512,12 +1513,12 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
         #expect(completedReveal)
     }
 
-    @Test @MainActor func executeLayoutPlanShowFrameFailurePreservesHiddenState() {
+    @Test @MainActor func executeLayoutPlanRestoreFrameFailureDoesNotRehideWorkspaceInactiveWindow() {
         let controller = makeLayoutPlanTestController()
         guard let monitor = controller.workspaceManager.monitors.first,
               let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
         else {
-            Issue.record("Missing monitor or active workspace for layout show failure test")
+            Issue.record("Missing monitor or active workspace for layout restore failure test")
             return
         }
 
@@ -1543,8 +1544,17 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
         }
 
         var diff = WorkspaceLayoutDiff()
-        diff.visibilityChanges = [.show(token)]
         diff.frameChanges = [LayoutFrameChange(token: token, frame: frame, forceApply: false)]
+        diff.restoreChanges = [
+            LayoutRestoreChange(
+                token: token,
+                hiddenState: WindowModel.HiddenState(
+                    proportionalPosition: CGPoint(x: 0.5, y: 0.5),
+                    referenceMonitorId: monitor.id,
+                    workspaceInactive: true
+                )
+            )
+        ]
         diff.borderMode = .none
 
         controller.layoutRefreshController.executeLayoutPlan(
@@ -1556,9 +1566,10 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
             )
         )
 
-        #expect(controller.workspaceManager.hiddenState(for: token)?.workspaceInactive == true)
+        #expect(controller.workspaceManager.hiddenState(for: token) == nil)
         #expect(controller.axManager.lastAppliedFrame(for: token.windowId) == nil)
         #expect(controller.axManager.hasPendingFrameWrite(for: token.windowId) == false)
+        #expect(controller.axManager.recentFrameWriteFailure(for: token.windowId) == .suppressed)
     }
 
     @Test @MainActor func unhideWindowPositionPlanRevealClearsHiddenStateSynchronously() {

@@ -594,6 +594,19 @@ private func prepareNiriState(
     }
 
     let workspaceIds = Set(assignments.map(\.workspaceId)).union(ensureWorkspaces)
+    syncNiriWorkspaceStatesForRefreshTests(on: controller, workspaceIds: workspaceIds, engine: engine)
+
+    return handlesByWindowId
+}
+
+@MainActor
+private func syncNiriWorkspaceStatesForRefreshTests(
+    on controller: WMController,
+    workspaceIds: Set<WorkspaceDescriptor.ID>,
+    engine: NiriLayoutEngine? = nil
+) {
+    guard let engine = engine ?? controller.niriEngine else { return }
+
     for workspaceId in workspaceIds {
         let handles = controller.workspaceManager.entries(in: workspaceId).map(\.handle)
         let selectedNodeId = controller.workspaceManager.niriViewportState(for: workspaceId).selectedNodeId
@@ -611,8 +624,6 @@ private func prepareNiriState(
             state.selectedNodeId = resolvedSelection
         }
     }
-
-    return handlesByWindowId
 }
 
 @Suite(.serialized) struct RefreshRoutingTests {
@@ -1666,6 +1677,75 @@ private func prepareNiriState(
         #expect(recorder.relayoutEvents.map(\.1) == [.immediateRelayout])
         #expect(recorder.fullRescanReasons.isEmpty)
         assertNoLegacyReasons(recorder)
+    }
+
+    @Test @MainActor func inactiveWorkspaceHandleAppActivationRevealsHiddenWindow() async {
+        let controller = makeRefreshTestController()
+        controller.hasStartedServices = true
+        controller.enableNiriLayout()
+        await waitForRefreshWork(on: controller)
+        controller.syncMonitorsToNiriEngine()
+
+        guard let workspaceOne = controller.workspaceManager.workspaceId(for: "1", createIfMissing: false),
+              let workspaceTwo = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true),
+              let monitor = controller.workspaceManager.monitors.first
+        else {
+            Issue.record("Failed to create inactive-workspace reveal fixture")
+            return
+        }
+
+        let sourcePid: pid_t = 2_311
+        let targetPid: pid_t = 2_312
+        let sourceToken = controller.workspaceManager.addWindow(
+            makeRefreshTestWindow(windowId: 311),
+            pid: sourcePid,
+            windowId: 311,
+            to: workspaceOne
+        )
+        let targetToken = controller.workspaceManager.addWindow(
+            makeRefreshTestWindow(windowId: 312),
+            pid: targetPid,
+            windowId: 312,
+            to: workspaceTwo
+        )
+        _ = controller.workspaceManager.rememberFocus(sourceToken, in: workspaceOne)
+        _ = controller.workspaceManager.rememberFocus(targetToken, in: workspaceTwo)
+        _ = controller.workspaceManager.setManagedFocus(
+            sourceToken,
+            in: workspaceOne,
+            onMonitor: monitor.id
+        )
+        syncNiriWorkspaceStatesForRefreshTests(
+            on: controller,
+            workspaceIds: [workspaceOne, workspaceTwo]
+        )
+
+        let hiddenFrame = CGRect(x: -1400, y: 140, width: 760, height: 520)
+        controller.axManager.applyFramesParallel([(targetPid, targetToken.windowId, hiddenFrame)])
+        setWorkspaceInactiveHiddenStateForLayoutPlanTests(on: controller, token: targetToken, monitor: monitor)
+        controller.axManager.markWindowInactive(targetToken.windowId)
+        controller.axEventHandler.isFullscreenProvider = { _ in false }
+        controller.axEventHandler.focusedWindowRefProvider = { pid in
+            guard pid == targetPid else { return nil }
+            return makeRefreshTestWindow(windowId: targetToken.windowId)
+        }
+
+        controller.axEventHandler.handleAppActivation(
+            pid: targetPid,
+            source: .workspaceDidActivateApplication
+        )
+        await waitForRefreshWork(on: controller)
+
+        #expect(controller.activeWorkspace()?.id == workspaceTwo)
+        #expect(controller.workspaceManager.focusedToken == targetToken)
+        #expect(controller.workspaceManager.hiddenState(for: targetToken) == nil)
+        #expect(!controller.axManager.inactiveWorkspaceWindowIds.contains(targetToken.windowId))
+
+        guard let appliedFrame = controller.axManager.lastAppliedFrame(for: targetToken.windowId) else {
+            Issue.record("Expected visible frame for activated hidden window")
+            return
+        }
+        #expect(monitor.visibleFrame.contains(CGPoint(x: appliedFrame.midX, y: appliedFrame.midY)))
     }
 
     @Test @MainActor func activeSpaceChangeDoesNotFrameWriteNativeFullscreenSuspendedWindowInNiri() async {
@@ -3356,6 +3436,74 @@ private func prepareNiriState(
         #expect(recorder.relayoutEvents.map(\.1) == [.immediateRelayout])
         #expect(recorder.fullRescanReasons.isEmpty)
         assertNoLegacyReasons(recorder)
+    }
+
+    @Test @MainActor func focusWindowFromBarRevealsHiddenWindowOnInactiveWorkspace() async {
+        var focusRequests: [(pid_t, UInt32)] = []
+        let controller = makeRefreshTestController(
+            windowFocusOperations: WindowFocusOperations(
+                activateApp: { _ in },
+                focusSpecificWindow: { pid, windowId, _ in
+                    focusRequests.append((pid, windowId))
+                },
+                raiseWindow: { _ in }
+            )
+        )
+        guard let workspaceOne = controller.workspaceManager.workspaceId(for: "1", createIfMissing: false),
+              let workspaceTwo = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true),
+              let monitor = controller.workspaceManager.monitors.first
+        else {
+            Issue.record("Missing same-monitor workspace-bar reveal fixture")
+            return
+        }
+
+        let handlesByWindowId = await prepareNiriState(
+            on: controller,
+            assignments: [
+                (workspaceOne, 431),
+                (workspaceTwo, 432),
+            ],
+            focusedWindowId: 431,
+            ensureWorkspaces: [workspaceTwo]
+        )
+        guard let targetHandle = handlesByWindowId[432] else {
+            Issue.record("Missing target window handle for workspace-bar reveal test")
+            return
+        }
+
+        let targetToken = targetHandle.id
+        let hiddenFrame = CGRect(x: -1400, y: 140, width: 760, height: 520)
+        controller.axManager.applyFramesParallel([(targetToken.pid, targetToken.windowId, hiddenFrame)])
+        setWorkspaceInactiveHiddenStateForLayoutPlanTests(on: controller, token: targetToken, monitor: monitor)
+        controller.axManager.markWindowInactive(targetToken.windowId)
+        controller.axEventHandler.isFullscreenProvider = { _ in false }
+        controller.axEventHandler.focusedWindowRefProvider = { pid in
+            guard pid == targetToken.pid else { return nil }
+            return makeRefreshTestWindow(windowId: targetToken.windowId)
+        }
+
+        let didStartFocus = controller.windowActionHandler.focusWindowFromBar(token: targetToken)
+        #expect(didStartFocus)
+        await waitForRefreshWork(on: controller)
+        await waitUntil {
+            controller.activeWorkspace()?.id == workspaceTwo &&
+                controller.workspaceManager.hiddenState(for: targetToken) == nil &&
+                !controller.axManager.inactiveWorkspaceWindowIds.contains(targetToken.windowId) &&
+                controller.workspaceManager.pendingFocusedToken == targetToken &&
+                focusRequests.contains { $0.0 == targetToken.pid && $0.1 == UInt32(targetToken.windowId) }
+        }
+
+        #expect(controller.activeWorkspace()?.id == workspaceTwo)
+        #expect(controller.workspaceManager.pendingFocusedToken == targetToken)
+        #expect(controller.workspaceManager.hiddenState(for: targetToken) == nil)
+        #expect(!controller.axManager.inactiveWorkspaceWindowIds.contains(targetToken.windowId))
+        #expect(focusRequests.contains { $0.0 == targetToken.pid && $0.1 == UInt32(targetToken.windowId) })
+
+        guard let appliedFrame = controller.axManager.lastAppliedFrame(for: targetToken.windowId) else {
+            Issue.record("Expected visible frame for workspace-bar reveal")
+            return
+        }
+        #expect(monitor.visibleFrame.contains(CGPoint(x: appliedFrame.midX, y: appliedFrame.midY)))
     }
 
     @Test @MainActor func conservativeLifecycleAndPolicyCallersUseFullRescan() async {

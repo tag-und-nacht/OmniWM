@@ -1030,7 +1030,7 @@ private func waitUntilAXEventTest(
         #expect(controller.workspaceManager.pendingFocusedToken == nil)
     }
 
-    @Test @MainActor func workspaceDidActivateApplicationRevealsManagedWindowOnInactiveWorkspace() {
+    @Test @MainActor func workspaceDidActivateApplicationRevealsManagedWindowOnInactiveWorkspace() async {
         let controller = makeAXEventTestController()
         controller.hasStartedServices = true
         guard let workspaceOne = controller.workspaceManager.workspaceId(for: "1", createIfMissing: false),
@@ -1067,12 +1067,13 @@ private func waitUntilAXEventTest(
         }
 
         #expect(controller.activeWorkspace()?.id == workspaceOne)
-        #expect(controller.workspaceManager.focusedToken == nil)
+        #expect(controller.workspaceManager.focusedToken == sourceToken)
 
         controller.axEventHandler.handleAppActivation(
             pid: targetPid,
             source: .workspaceDidActivateApplication
         )
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
 
         #expect(controller.activeWorkspace()?.id == workspaceTwo)
         #expect(controller.workspaceManager.focusedToken == targetToken)
@@ -1081,7 +1082,7 @@ private func waitUntilAXEventTest(
         #expect(controller.workspaceManager.isNonManagedFocusActive == false)
     }
 
-    @Test @MainActor func cgsFrontAppChangedRevealsManagedWindowOnInactiveWorkspace() {
+    @Test @MainActor func cgsFrontAppChangedRevealsManagedWindowOnInactiveWorkspace() async {
         let controller = makeAXEventTestController()
         controller.hasStartedServices = true
         guard let workspaceOne = controller.workspaceManager.workspaceId(for: "1", createIfMissing: false),
@@ -1118,12 +1119,13 @@ private func waitUntilAXEventTest(
         }
 
         #expect(controller.activeWorkspace()?.id == workspaceOne)
-        #expect(controller.workspaceManager.focusedToken == nil)
+        #expect(controller.workspaceManager.focusedToken == sourceToken)
 
         controller.axEventHandler.handleAppActivation(
             pid: targetPid,
             source: .cgsFrontAppChanged
         )
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
 
         #expect(controller.activeWorkspace()?.id == workspaceTwo)
         #expect(controller.workspaceManager.focusedToken == targetToken)
