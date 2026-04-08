@@ -161,6 +161,20 @@ private func hasFrameChange(
     changes.contains { $0.token == token }
 }
 
+private func expectConfig(
+    _ config: SpringConfig,
+    matches expected: SpringConfig,
+    sourceLocation: SourceLocation = #_sourceLocation
+) {
+    #expect(config.response == expected.response, sourceLocation: sourceLocation)
+    #expect(config.dampingFraction == expected.dampingFraction, sourceLocation: sourceLocation)
+    #expect(config.blendDuration == expected.blendDuration, sourceLocation: sourceLocation)
+    #expect(config.duration == expected.duration, sourceLocation: sourceLocation)
+    #expect(config.bounce == expected.bounce, sourceLocation: sourceLocation)
+    #expect(config.epsilon == expected.epsilon, sourceLocation: sourceLocation)
+    #expect(config.velocityEpsilon == expected.velocityEpsilon, sourceLocation: sourceLocation)
+}
+
 private enum CrossMonitorWorkspaceSide {
     case primary
     case secondary
@@ -891,6 +905,19 @@ private func makeCenteredCrossMonitorFixture(
             gaps: gaps,
             area: area
         )
+    }
+
+    @Test func niriWindowMovementUsesExactSnappyConfig() {
+        let engine = NiriLayoutEngine()
+
+        expectConfig(engine.windowMovementAnimationConfig, matches: .snappy)
+    }
+
+    @Test func niriWorkspaceSwitchUsesExactSnappyConfig() {
+        let monitor = makeTestMonitor(displayId: 1, name: "Main", x: 0)
+        let niriMonitor = NiriMonitor(monitor: monitor)
+
+        expectConfig(niriMonitor.workspaceSwitchConfig, matches: .snappy)
     }
 
     @Test func selectionFallbackAfterRemoval_sameSibling() {

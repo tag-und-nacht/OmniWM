@@ -131,10 +131,7 @@ final class NiriLayoutEngine {
     var resizeConfiguration = ResizeConfiguration.default
     var moveConfiguration = MoveConfiguration.default
 
-    var windowMovementAnimationConfig: SpringConfig = .balanced.with(
-        epsilon: 0.0001,
-        velocityEpsilon: 0.01
-    )
+    var windowMovementAnimationConfig: SpringConfig = .snappy
     var animationClock: AnimationClock?
     var displayRefreshRate: Double = 60.0
 

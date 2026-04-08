@@ -771,10 +771,18 @@ IPCClient ──── Unix Socket ────► IPCConnection (per client)
 ```swift
 struct SpringConfig {
     // Presets:
-    static let snappy   = SpringConfig(response: 0.22, dampingFraction: 0.95)
-    static let balanced = SpringConfig(response: 0.30, dampingFraction: 0.88)
-    static let gentle   = SpringConfig(response: 0.45, dampingFraction: 0.78)
-    static let reducedMotion = SpringConfig(response: 0.18, dampingFraction: 0.98)
+    static let snappy   = SpringConfig(
+        response: 0.22,
+        dampingFraction: 0.95,
+        epsilon: 0.0001,
+        velocityEpsilon: 0.01
+    )
+    static let reducedMotion = SpringConfig(
+        response: 0.18,
+        dampingFraction: 0.98,
+        epsilon: 0.4,
+        velocityEpsilon: 6.0
+    )
 }
 ```
 
@@ -786,7 +794,7 @@ Used for: viewport scrolling (Niri), workspace switch transitions, window moveme
 
 **DisplayLink integration:** `LayoutRefreshController` manages a `CADisplayLink` per display. On each frame tick, it recalculates animated layouts and applies frames, producing 60/120Hz smooth animations.
 
-**Accessibility:** All animation configs support `resolvedForReduceMotion()`, which returns the `reducedMotion` preset when the user has enabled "Reduce Motion" in macOS accessibility settings.
+**Accessibility:** All animation configs support `resolvedForReduceMotion()`, which returns the exact `reducedMotion` preset when the user has enabled "Reduce Motion" in macOS accessibility settings.
 
 ### 4.11 Border System
 
@@ -1077,7 +1085,7 @@ OmniWM uses SkyLight (private macOS framework) for low-latency window operations
 | `ProportionalSize` | `.proportion(CGFloat)` or `.fixed(CGFloat)` — Niri column width specification. |
 | `WeightedSize` | `.auto(weight:)` or `.fixed(CGFloat)` — Niri window height within a column. |
 | `NodeId` | UUID-based identifier for Niri layout tree nodes. |
-| `SpringConfig` | Animation parameters: `response`, `dampingFraction`. Presets: `.snappy`, `.balanced`, `.gentle`. |
+| `SpringConfig` | Animation parameters: `response`, `dampingFraction`, `epsilon`, `velocityEpsilon`. Presets: `.snappy`, `.reducedMotion`. |
 | `WindowDecision` | Result of rule evaluation: `disposition`, `source`, `workspaceName`, `ruleEffects`. |
 | `WindowRuleFacts` | Input for rule evaluation: app name, AX facts (role, subrole, title), size constraints. |
 | `LayoutType` | `.defaultLayout`, `.niri`, or `.dwindle` — per-workspace layout selection. |

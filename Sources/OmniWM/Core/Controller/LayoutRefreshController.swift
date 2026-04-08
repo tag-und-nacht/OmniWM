@@ -323,7 +323,7 @@ import QuartzCore
             from: 0,
             to: 1,
             startTime: now,
-            config: .balanced.with(epsilon: 0.01, velocityEpsilon: 0.1),
+            config: .snappy,
             displayRefreshRate: refreshRate
         )
 

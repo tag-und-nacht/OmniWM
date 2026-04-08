@@ -13,7 +13,7 @@ final class OverviewAnimator {
     private var displayLink: CADisplayLink?
     private var displayId: CGDirectDisplayID?
 
-    private let animationConfig: SpringConfig = .balanced
+    private let animationConfig: SpringConfig = .snappy
 
     var isAnimating: Bool {
         openAnimation != nil || closeAnimation != nil

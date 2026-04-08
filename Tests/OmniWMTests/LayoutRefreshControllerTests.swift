@@ -1032,6 +1032,65 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
         #expect(controller.axManager.lastAppliedFrame(for: token.windowId) == floatingFrame)
     }
 
+    @Test @MainActor func windowCloseAnimationUsesExactSnappyConfigAndSettlesToExpectedFrame() {
+        let controller = makeLayoutPlanTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing monitor or active workspace for window close animation test")
+            return
+        }
+
+        let token = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 593)
+        guard let entry = controller.workspaceManager.entry(for: token) else {
+            Issue.record("Missing entry for window close animation test")
+            return
+        }
+
+        let initialFrame = CGRect(x: 220, y: 160, width: 760, height: 520)
+        var appliedFrames: [CGRect] = []
+
+        AXWindowService.fastFrameProviderForTests = { _ in initialFrame }
+        AXWindowService.setFrameResultProviderForTests = { _, frame, currentFrameHint in
+            appliedFrames.append(frame)
+            return layoutRefreshControllerTestWriteResult(
+                targetFrame: frame,
+                currentFrameHint: currentFrameHint,
+                observedFrame: frame,
+                failureReason: nil
+            )
+        }
+        defer {
+            AXWindowService.fastFrameProviderForTests = nil
+            AXWindowService.setFrameResultProviderForTests = nil
+        }
+
+        controller.layoutRefreshController.startWindowCloseAnimation(entry: entry, monitor: monitor)
+
+        let animation = controller.layoutRefreshController.layoutState
+            .closingAnimationsByDisplay[monitor.displayId]?[entry.windowId]
+        guard let animation else {
+            Issue.record("Expected closing animation to be registered")
+            return
+        }
+        let expectedFinalFrame = initialFrame.offsetBy(
+            dx: animation.displacement.x,
+            dy: animation.displacement.y
+        )
+
+        #expect(animation.animation.config.response == SpringConfig.snappy.response)
+        #expect(animation.animation.config.dampingFraction == SpringConfig.snappy.dampingFraction)
+        #expect(animation.animation.config.epsilon == SpringConfig.snappy.epsilon)
+        #expect(animation.animation.config.velocityEpsilon == SpringConfig.snappy.velocityEpsilon)
+
+        controller.layoutRefreshController.settleAllAnimationsForTests()
+
+        #expect(appliedFrames.last == expectedFinalFrame)
+        #expect(
+            controller.layoutRefreshController.layoutState.closingAnimationsByDisplay[monitor.displayId] == nil
+        )
+    }
+
     @Test @MainActor func restoreScratchpadWindowWithoutRestoreGeometryKeepsHiddenStateAndSkipsSuccessAction() {
         let controller = makeLayoutPlanTestController()
         AXWindowService.fastFrameProviderForTests = { _ in nil }

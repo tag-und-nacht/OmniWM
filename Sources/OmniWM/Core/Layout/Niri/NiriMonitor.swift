@@ -23,10 +23,7 @@ final class NiriMonitor {
 
     var animationClock: AnimationClock?
 
-    var workspaceSwitchConfig: SpringConfig = .balanced.with(
-        epsilon: 0.01,
-        velocityEpsilon: 0.05
-    )
+    var workspaceSwitchConfig: SpringConfig = .snappy
 
     var resolvedSettings: ResolvedNiriSettings?
 

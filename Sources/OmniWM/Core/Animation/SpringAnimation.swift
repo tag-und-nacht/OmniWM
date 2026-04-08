@@ -41,22 +41,8 @@ struct SpringConfig {
         response: 0.22,
         dampingFraction: 0.95,
         blendDuration: 0.0,
-        epsilon: 0.5,
-        velocityEpsilon: 8.0
-    )
-    static let balanced = SpringConfig(
-        response: 0.30,
-        dampingFraction: 0.88,
-        blendDuration: 0.0,
-        epsilon: 0.6,
-        velocityEpsilon: 10.0
-    )
-    static let gentle = SpringConfig(
-        response: 0.45,
-        dampingFraction: 0.78,
-        blendDuration: 0.0,
-        epsilon: 0.8,
-        velocityEpsilon: 12.0
+        epsilon: 0.0001,
+        velocityEpsilon: 0.01
     )
     static let reducedMotion = SpringConfig(
         response: 0.18,
@@ -70,28 +56,7 @@ struct SpringConfig {
 
     func resolvedForReduceMotion(_ reduceMotion: Bool) -> SpringConfig {
         guard reduceMotion else { return self }
-        return SpringConfig.reducedMotion.with(
-            epsilon: epsilon,
-            velocityEpsilon: velocityEpsilon
-        )
-    }
-
-    func with(epsilon: Double, velocityEpsilon: Double) -> SpringConfig {
-        if let response, let dampingFraction {
-            return SpringConfig(
-                response: response,
-                dampingFraction: dampingFraction,
-                blendDuration: blendDuration,
-                epsilon: epsilon,
-                velocityEpsilon: velocityEpsilon
-            )
-        }
-        return SpringConfig(
-            duration: duration,
-            bounce: bounce,
-            epsilon: epsilon,
-            velocityEpsilon: velocityEpsilon
-        )
+        return SpringConfig.reducedMotion
     }
 
     var appleSpring: Spring {
