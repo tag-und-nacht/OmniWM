@@ -1,3 +1,4 @@
+import AppKit
 import ApplicationServices
 import CoreGraphics
 import Foundation
@@ -20,6 +21,14 @@ private func hasDwindleAnimationDirective(
 
 private func layoutTokenSet(_ changes: [LayoutFrameChange]) -> Set<WindowToken> {
     Set(changes.map(\.token))
+}
+
+private func isAlignedToScale(_ value: CGFloat, scale: CGFloat, tolerance: CGFloat = 0.0001) -> Bool {
+    abs((value * scale).rounded() - (value * scale)) < tolerance
+}
+
+private func layoutPlanTestMonitorScale(_ monitor: Monitor) -> CGFloat {
+    NSScreen.screens.first(where: { $0.displayId == monitor.displayId })?.backingScaleFactor ?? 2.0
 }
 
 private func applyResolvedDwindleSettingsForEngineTests(
@@ -381,13 +390,13 @@ struct DwindleLayoutEngineTests {
 
         #expect(frames.count == 2)
         #expect(placeholder.cachedFrame == nil)
-        #expect(abs((rightSubtree.cachedFrame?.height ?? 0) - (200 * (CGFloat(400) / 401))) < 0.001)
+        #expect(abs((rightSubtree.cachedFrame?.height ?? 0) - (200 * (CGFloat(400) / 401))) < 1.0)
         let expectedY = CGFloat(200) / 401
         let expectedHeight = 200 * (CGFloat(400) / 401)
-        #expect(abs((frames[firstToken]?.minY ?? 0) - expectedY) < 0.001)
-        #expect(abs((frames[firstToken]?.height ?? 0) - expectedHeight) < 0.001)
-        #expect(abs((frames[secondToken]?.minY ?? 0) - expectedY) < 0.001)
-        #expect(abs((frames[secondToken]?.height ?? 0) - expectedHeight) < 0.001)
+        #expect(abs((frames[firstToken]?.minY ?? 0) - expectedY) < 1.0)
+        #expect(abs((frames[firstToken]?.height ?? 0) - expectedHeight) < 1.0)
+        #expect(abs((frames[secondToken]?.minY ?? 0) - expectedY) < 1.0)
+        #expect(abs((frames[secondToken]?.height ?? 0) - expectedHeight) < 1.0)
         #expect(frames[firstToken]?.width == 200)
         #expect(frames[secondToken]?.width == 200)
     }
@@ -423,9 +432,14 @@ struct DwindleLayoutEngineTests {
         )
 
         #expect(root.cachedFrame == CGRect(x: 0, y: 0, width: 600, height: 300))
-        #expect(abs((firstSubtree.cachedFrame?.height ?? 0) - (300 * (CGFloat(500) / 501))) < 0.001)
-        #expect(frames[firstToken] == CGRect(x: 0, y: 0, width: 300, height: 300 * (CGFloat(500) / 501)))
-        #expect(frames[secondToken] == CGRect(x: 300, y: 0, width: 300, height: 300 * (CGFloat(500) / 501)))
+        let expectedHeight = 300 * (CGFloat(500) / 501)
+        #expect(abs((firstSubtree.cachedFrame?.height ?? 0) - expectedHeight) < 1.0)
+        #expect(abs((frames[firstToken]?.height ?? 0) - expectedHeight) < 1.0)
+        #expect(abs((frames[secondToken]?.height ?? 0) - expectedHeight) < 1.0)
+        #expect(frames[firstToken]?.minX == 0)
+        #expect(frames[secondToken]?.minX == 300)
+        #expect(frames[firstToken]?.width == 300)
+        #expect(frames[secondToken]?.width == 300)
     }
 
     @Test func `sync windows keeps stable node for reobserved token`() {
@@ -687,7 +701,14 @@ struct DwindleLayoutEngineTests {
             oldFrame: animatedStartFrame,
             newFrame: baseFrame,
             clock: nil,
-            config: CubicConfig(duration: 10.0)
+            config: SpringConfig(
+                response: 10.0,
+                dampingFraction: 1.0,
+                epsilon: 0.0001,
+                velocityEpsilon: 0.01
+            ),
+            displayRefreshRate: 60.0,
+            pixelEpsilon: 1.0
         )
 
         let animatedPoint = CGPoint(x: animatedStartFrame.midX, y: animatedStartFrame.midY)
@@ -699,6 +720,381 @@ struct DwindleLayoutEngineTests {
                 at: CACurrentMediaTime()
             ) == handle.id
         )
+    }
+
+    @Test func `toggle fullscreen clears previous fullscreen leaf`() {
+        let engine = DwindleLayoutEngine()
+        let wsId = UUID()
+        let firstHandle = makeTestHandle(pid: 72)
+        let secondHandle = makeTestHandle(pid: 73)
+
+        _ = engine.syncWindows([firstHandle, secondHandle], in: wsId, focusedHandle: firstHandle)
+        _ = engine.calculateLayout(
+            for: wsId,
+            screen: CGRect(x: 0, y: 0, width: 1600, height: 1000)
+        )
+
+        guard let firstNode = engine.findNode(for: firstHandle.id),
+              let secondNode = engine.findNode(for: secondHandle.id)
+        else {
+            Issue.record("Expected Dwindle nodes for fullscreen exclusivity test")
+            return
+        }
+
+        engine.setSelectedNode(firstNode, in: wsId)
+        #expect(engine.toggleFullscreen(in: wsId) == firstHandle.id)
+        #expect(firstNode.isFullscreen)
+
+        engine.setSelectedNode(secondNode, in: wsId)
+        #expect(engine.toggleFullscreen(in: wsId) == secondHandle.id)
+
+        #expect(engine.findNode(for: firstHandle.id)?.isFullscreen == false)
+        #expect(engine.findNode(for: secondHandle.id)?.isFullscreen == true)
+    }
+
+    @Test func `calculate layout rounds canonical frames when scale is provided`() {
+        let engine = DwindleLayoutEngine()
+        let wsId = UUID()
+        let token = makeDwindleTestToken(1020)
+        let root = engine.ensureRoot(for: wsId)
+
+        root.kind = .leaf(handle: token, fullscreen: false)
+        engine.settings.singleWindowAspectRatio = DwindleSingleWindowAspectRatio.fill.size
+
+        let frames = engine.calculateLayout(
+            for: wsId,
+            screen: CGRect(x: 0.25, y: 0.25, width: 100.25, height: 50.25),
+            scale: 2.0
+        )
+
+        guard let frame = frames[token], let cachedFrame = root.cachedFrame else {
+            Issue.record("Expected a canonical Dwindle frame for scale rounding test")
+            return
+        }
+
+        #expect(isAlignedToScale(frame.minX, scale: 2.0))
+        #expect(isAlignedToScale(frame.minY, scale: 2.0))
+        #expect(isAlignedToScale(frame.width, scale: 2.0))
+        #expect(isAlignedToScale(frame.height, scale: 2.0))
+        #expect(cachedFrame == frame)
+    }
+
+    @Test func `relayout animation ignores subpixel deltas below one physical pixel`() {
+        let engine = DwindleLayoutEngine()
+        let wsId = UUID()
+        let handle = makeTestHandle(pid: 74)
+
+        _ = engine.syncWindows([handle], in: wsId, focusedHandle: handle)
+        let frames = engine.calculateLayout(
+            for: wsId,
+            screen: CGRect(x: 0, y: 0, width: 1600, height: 1000),
+            scale: 2.0
+        )
+
+        guard let frame = frames[handle.id] else {
+            Issue.record("Expected base Dwindle frame for subpixel animation threshold test")
+            return
+        }
+
+        let animationFrames = engine.prepareAnimationFramesForRelayout(
+            oldFrames: [handle.id: frame],
+            newFrames: [handle.id: frame.offsetBy(dx: 0.4, dy: 0)],
+            in: wsId,
+            motion: .enabled,
+            scale: 2.0,
+            at: CACurrentMediaTime()
+        )
+
+        #expect(animationFrames.animationsActive == false)
+        #expect(engine.findNode(for: handle.id)?.moveXAnimation == nil)
+    }
+
+    @Test func `prepare relayout animation seeds new split from split edge`() {
+        let engine = DwindleLayoutEngine()
+        let wsId = UUID()
+        let firstToken = makeDwindleTestToken(1021)
+        let secondToken = makeDwindleTestToken(1022)
+        let screen = CGRect(x: 0, y: 0, width: 1600, height: 1000)
+
+        engine.settings.smartSplit = false
+        engine.animationClock = AnimationClock(time: 10.0)
+
+        _ = engine.syncWindows([firstToken], in: wsId, focusedToken: firstToken)
+        let oldFrames = engine.calculateLayout(for: wsId, screen: screen, scale: 1.0)
+        _ = engine.addWindow(token: secondToken, to: wsId, activeWindowFrame: oldFrames[firstToken])
+        let newFrames = engine.calculateLayout(for: wsId, screen: screen, scale: 1.0)
+
+        guard let baseTime = engine.animationClock?.now() else {
+            Issue.record("Expected a Dwindle animation clock for insertion seed test")
+            return
+        }
+
+        let animationFrames = engine.prepareAnimationFramesForRelayout(
+            oldFrames: oldFrames,
+            newFrames: newFrames,
+            in: wsId,
+            motion: .enabled,
+            scale: 1.0,
+            at: baseTime
+        )
+
+        guard let animatedFrame = animationFrames.frames[secondToken],
+              let targetFrame = newFrames[secondToken],
+              let originalFrame = oldFrames[firstToken]
+        else {
+            Issue.record("Expected seeded animation frames for new Dwindle split window")
+            return
+        }
+
+        #expect(animationFrames.animationsActive)
+        #expect(animatedFrame.width == 1.0)
+        #expect(animatedFrame.minX == targetFrame.minX)
+        #expect(animatedFrame.height == originalFrame.height)
+        #expect(engine.findNode(for: secondToken)?.insertionSeed == nil)
+    }
+
+    @Test func `animated frame lifecycle interpolates clears and settles`() {
+        let engine = DwindleLayoutEngine()
+        let wsId = UUID()
+        let handle = makeTestHandle(pid: 75)
+        let clock = AnimationClock(time: 20.0)
+
+        _ = engine.syncWindows([handle], in: wsId, focusedHandle: handle)
+        let baseFrames = engine.calculateLayout(
+            for: wsId,
+            screen: CGRect(x: 0, y: 0, width: 1600, height: 1000),
+            scale: 1.0
+        )
+
+        guard let baseFrame = baseFrames[handle.id],
+              let node = engine.findNode(for: handle.id)
+        else {
+            Issue.record("Expected Dwindle node state for animation lifecycle test")
+            return
+        }
+
+        let oldFrame = baseFrame.offsetBy(dx: baseFrame.width + 80, dy: 0)
+        let baseTime = clock.now()
+        node.animateFrom(
+            oldFrame: oldFrame,
+            newFrame: baseFrame,
+            clock: clock,
+            config: .dwindle,
+            displayRefreshRate: 120.0,
+            pixelEpsilon: 1.0
+        )
+
+        let midFrames = engine.calculateAnimatedFrames(
+            baseFrames: [handle.id: baseFrame],
+            in: wsId,
+            at: baseTime + 0.08,
+            scale: 1.0
+        )
+        let settledTime = baseTime + 5.0
+
+        #expect(node.moveXAnimation != nil)
+        #expect((midFrames[handle.id]?.minX ?? 0) > baseFrame.minX)
+        #expect((midFrames[handle.id]?.minX ?? 0) < oldFrame.minX)
+
+        engine.tickAnimations(at: settledTime, in: wsId)
+        #expect(engine.hasActiveAnimations(in: wsId, at: settledTime) == false)
+
+        node.animateFrom(
+            oldFrame: oldFrame,
+            newFrame: baseFrame,
+            clock: clock,
+            config: .dwindle,
+            displayRefreshRate: 120.0,
+            pixelEpsilon: 1.0
+        )
+        #expect(node.moveXAnimation != nil)
+
+        node.animateFrom(
+            oldFrame: oldFrame,
+            newFrame: baseFrame,
+            clock: clock,
+            config: .dwindle,
+            displayRefreshRate: 120.0,
+            pixelEpsilon: 1.0,
+            animated: false
+        )
+        #expect(node.moveXAnimation == nil)
+        #expect(node.moveYAnimation == nil)
+        #expect(node.sizeWAnimation == nil)
+        #expect(node.sizeHAnimation == nil)
+    }
+
+    @Test func `animated frames round to configured physical pixels`() {
+        let engine = DwindleLayoutEngine()
+        let wsId = UUID()
+        let handle = makeTestHandle(pid: 76)
+        let clock = AnimationClock(time: 30.0)
+
+        _ = engine.syncWindows([handle], in: wsId, focusedHandle: handle)
+        let baseFrames = engine.calculateLayout(
+            for: wsId,
+            screen: CGRect(x: 0, y: 0, width: 1600, height: 1000),
+            scale: 2.0
+        )
+
+        guard let baseFrame = baseFrames[handle.id],
+              let node = engine.findNode(for: handle.id)
+        else {
+            Issue.record("Expected Dwindle node state for physical-pixel rounding test")
+            return
+        }
+
+        let oldFrame = baseFrame.offsetBy(dx: baseFrame.width + 101, dy: 0)
+        let baseTime = clock.now()
+        node.animateFrom(
+            oldFrame: oldFrame,
+            newFrame: baseFrame,
+            clock: clock,
+            config: .dwindle,
+            displayRefreshRate: 60.0,
+            pixelEpsilon: 0.5
+        )
+
+        let scaleTwoFrame = engine.calculateAnimatedFrames(
+            baseFrames: [handle.id: baseFrame],
+            in: wsId,
+            at: baseTime + 0.07,
+            scale: 2.0
+        )[handle.id]
+        let scaleOneFrame = engine.calculateAnimatedFrames(
+            baseFrames: [handle.id: baseFrame],
+            in: wsId,
+            at: baseTime + 0.07,
+            scale: 1.0
+        )[handle.id]
+
+        guard let scaleTwoFrame, let scaleOneFrame else {
+            Issue.record("Expected animated Dwindle frames for physical-pixel rounding test")
+            return
+        }
+
+        #expect(isAlignedToScale(scaleTwoFrame.minX, scale: 2.0))
+        #expect(isAlignedToScale(scaleTwoFrame.width, scale: 2.0))
+        #expect(isAlignedToScale(scaleOneFrame.minX, scale: 1.0))
+        #expect(isAlignedToScale(scaleOneFrame.width, scale: 1.0))
+    }
+
+    @Test func `capture presented frames returns in flight rendered frame`() {
+        let engine = DwindleLayoutEngine()
+        let wsId = UUID()
+        let handle = makeTestHandle(pid: 77)
+        let clock = AnimationClock(time: 40.0)
+
+        _ = engine.syncWindows([handle], in: wsId, focusedHandle: handle)
+        let baseFrames = engine.calculateLayout(
+            for: wsId,
+            screen: CGRect(x: 0, y: 0, width: 1600, height: 1000),
+            scale: 1.0
+        )
+
+        guard let baseFrame = baseFrames[handle.id],
+              let node = engine.findNode(for: handle.id)
+        else {
+            Issue.record("Expected Dwindle node state for presented-frame capture test")
+            return
+        }
+
+        let oldFrame = baseFrame.offsetBy(dx: baseFrame.width + 90, dy: 0)
+        let baseTime = clock.now()
+        node.animateFrom(
+            oldFrame: oldFrame,
+            newFrame: baseFrame,
+            clock: clock,
+            config: .dwindle,
+            displayRefreshRate: 120.0,
+            pixelEpsilon: 1.0
+        )
+
+        let sampleTime = baseTime + 0.08
+        let presentedFrames = engine.capturePresentedFrames(
+            in: wsId,
+            at: sampleTime,
+            scale: 1.0
+        )
+        let animatedFrames = engine.calculateAnimatedFrames(
+            baseFrames: [handle.id: baseFrame],
+            in: wsId,
+            at: sampleTime,
+            scale: 1.0
+        )
+
+        guard let presentedFrame = presentedFrames[handle.id],
+              let animatedFrame = animatedFrames[handle.id]
+        else {
+            Issue.record("Expected presented Dwindle frame for capture test")
+            return
+        }
+
+        #expect(engine.currentFrames(in: wsId)[handle.id] == baseFrame)
+        #expect(presentedFrame == animatedFrame)
+        #expect(presentedFrame != baseFrame)
+    }
+
+    @Test func `overlapping relayout starts from presented frame at physical pixel scale`() {
+        let engine = DwindleLayoutEngine()
+        let wsId = UUID()
+        let handle = makeTestHandle(pid: 78)
+        let clock = AnimationClock(time: 50.0)
+        engine.animationClock = clock
+
+        _ = engine.syncWindows([handle], in: wsId, focusedHandle: handle)
+        let baseFrames = engine.calculateLayout(
+            for: wsId,
+            screen: CGRect(x: 0, y: 0, width: 1600, height: 1000),
+            scale: 2.0
+        )
+
+        guard let baseFrame = baseFrames[handle.id],
+              let node = engine.findNode(for: handle.id)
+        else {
+            Issue.record("Expected Dwindle node state for overlapping relayout test")
+            return
+        }
+
+        let oldFrame = baseFrame.offsetBy(dx: baseFrame.width + 101, dy: 0)
+        let baseTime = clock.now()
+        node.animateFrom(
+            oldFrame: oldFrame,
+            newFrame: baseFrame,
+            clock: clock,
+            config: .dwindle,
+            displayRefreshRate: 60.0,
+            pixelEpsilon: 0.5
+        )
+
+        let sampleTime = baseTime + 0.07
+        let presentedStartFrames = engine.capturePresentedFrames(
+            in: wsId,
+            at: sampleTime,
+            scale: 2.0
+        )
+        let targetFrame = baseFrame.offsetBy(dx: -120, dy: 0)
+        let animationFrames = engine.prepareAnimationFramesForRelayout(
+            oldFrames: presentedStartFrames,
+            newFrames: [handle.id: targetFrame],
+            in: wsId,
+            motion: .enabled,
+            scale: 2.0,
+            at: sampleTime
+        )
+
+        guard let presentedStartFrame = presentedStartFrames[handle.id],
+              let restartedFrame = animationFrames.frames[handle.id]
+        else {
+            Issue.record("Expected overlapping Dwindle relayout frames")
+            return
+        }
+
+        #expect(animationFrames.animationsActive)
+        #expect(restartedFrame != targetFrame)
+        #expect(restartedFrame.minX >= targetFrame.minX)
+        #expect(restartedFrame.minX < presentedStartFrame.minX)
+        #expect(isAlignedToScale(restartedFrame.minX, scale: 2.0))
     }
 
     @Test @MainActor func `steady relayout plan uses tokens without visibility diffs`() async throws {
@@ -728,6 +1124,28 @@ struct DwindleLayoutEngineTests {
 
         #expect(layoutTokenSet(plan.diff.frameChanges) == Set([firstToken, secondToken]))
         #expect(plan.diff.visibilityChanges.isEmpty)
+    }
+
+    @Test @MainActor func `relayout plan threads monitor refresh rate into dwindle engine`() async throws {
+        let controller = makeLayoutPlanTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing monitor or active workspace for Dwindle refresh-rate test")
+            return
+        }
+
+        configureWorkspaceAsDwindle(on: controller, workspaceId: workspaceId)
+        controller.enableDwindleLayout()
+        controller.layoutRefreshController.layoutState.refreshRateByDisplay[monitor.displayId] = 120.0
+        await waitForLayoutPlanRefreshWork(on: controller)
+
+        _ = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 699)
+        _ = try await controller.dwindleLayoutHandler.layoutWithDwindleEngine(
+            activeWorkspaces: [workspaceId]
+        )
+
+        #expect(controller.dwindleEngine?.displayRefreshRate == 120.0)
     }
 
     @Test @MainActor func `relayout plan starts animation when frames change`() async throws {
@@ -766,6 +1184,52 @@ struct DwindleLayoutEngineTests {
             )
         )
         #expect(plan.diff.visibilityChanges.isEmpty)
+    }
+
+    @Test @MainActor func `repeated swap window keeps dwindle animation active mid flight`() async throws {
+        let controller = makeLayoutPlanTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing monitor or active workspace for repeated Dwindle swap test")
+            return
+        }
+
+        configureWorkspaceAsDwindle(on: controller, workspaceId: workspaceId)
+        controller.enableDwindleLayout()
+        await waitForLayoutPlanRefreshWork(on: controller)
+
+        let firstToken = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 711)
+        _ = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 712)
+        _ = controller.workspaceManager.setManagedFocus(firstToken, in: workspaceId, onMonitor: monitor.id)
+
+        let initialPlans = try await controller.dwindleLayoutHandler.layoutWithDwindleEngine(
+            activeWorkspaces: [workspaceId]
+        )
+        controller.layoutRefreshController.executeLayoutPlans(initialPlans)
+
+        controller.dwindleLayoutHandler.swapWindow(direction: .right)
+        await waitForLayoutPlanRefreshWork(on: controller)
+
+        controller.dwindleLayoutHandler.swapWindow(direction: .left)
+        await waitForLayoutPlanRefreshWork(on: controller)
+
+        guard let engine = controller.dwindleEngine else {
+            Issue.record("Missing Dwindle engine for repeated swap test")
+            return
+        }
+
+        let sampleTime = controller.animationClock.now()
+        let canonicalFrames = engine.currentFrames(in: workspaceId)
+        let presentedFrames = engine.capturePresentedFrames(
+            in: workspaceId,
+            at: sampleTime,
+            scale: layoutPlanTestMonitorScale(monitor)
+        )
+
+        #expect(controller.layoutRefreshController.hasDwindleAnimationRunning(in: workspaceId))
+        #expect(engine.hasActiveAnimations(in: workspaceId, at: sampleTime))
+        #expect(presentedFrames != canonicalFrames)
     }
 
     @Test @MainActor func `active animation tick reapplies focused border`() async throws {
@@ -808,6 +1272,54 @@ struct DwindleLayoutEngineTests {
 
         #expect(controller.dwindleLayoutHandler.dwindleAnimationByDisplay[monitor.displayId]?.0 == workspaceId)
         #expect(lastAppliedBorderWindowIdForLayoutPlanTests(on: controller) == 703)
+    }
+
+    @Test @MainActor func `same workspace summon right reuses presented frames mid animation`() async throws {
+        let controller = makeLayoutPlanTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing monitor or active workspace for Dwindle summon-right animation test")
+            return
+        }
+
+        configureWorkspaceAsDwindle(on: controller, workspaceId: workspaceId)
+        controller.enableDwindleLayout()
+        await waitForLayoutPlanRefreshWork(on: controller)
+
+        let anchorToken = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 721)
+        _ = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 722)
+        let summonedToken = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 723)
+        _ = controller.workspaceManager.setManagedFocus(anchorToken, in: workspaceId, onMonitor: monitor.id)
+
+        let initialPlans = try await controller.dwindleLayoutHandler.layoutWithDwindleEngine(
+            activeWorkspaces: [workspaceId]
+        )
+        controller.layoutRefreshController.executeLayoutPlans(initialPlans)
+
+        controller.dwindleLayoutHandler.cycleSize(forward: true)
+        await waitForLayoutPlanRefreshWork(on: controller)
+
+        #expect(controller.windowActionHandler.summonWindowRight(handle: WindowHandle(id: summonedToken)))
+        await waitForLayoutPlanRefreshWork(on: controller)
+
+        guard let engine = controller.dwindleEngine else {
+            Issue.record("Missing Dwindle engine for summon-right animation test")
+            return
+        }
+
+        let sampleTime = controller.animationClock.now()
+        let canonicalFrames = engine.currentFrames(in: workspaceId)
+        let presentedFrames = engine.capturePresentedFrames(
+            in: workspaceId,
+            at: sampleTime,
+            scale: layoutPlanTestMonitorScale(monitor)
+        )
+
+        #expect(controller.layoutRefreshController.hasDwindleAnimationRunning(in: workspaceId))
+        #expect(engine.hasActiveAnimations(in: workspaceId, at: sampleTime))
+        #expect(presentedFrames != canonicalFrames)
+        #expect(controller.workspaceManager.lastFocusedToken(in: workspaceId) == summonedToken)
     }
 
     @Test @MainActor func `fullscreen relayout suppresses focused border`() async throws {
@@ -946,8 +1458,14 @@ struct DwindleLayoutEngineTests {
             return
         }
 
-        #expect(baselineFrame.width > overrideFrame.width)
-        #expect(abs(overrideFrame.width - overrideFrame.height) < 0.5)
+        guard let finalOverrideFrame = controller.dwindleEngine?.currentFrames(in: workspaceId)[token] else {
+            Issue.record("Expected the Dwindle engine to retain the final override frame")
+            return
+        }
+
+        #expect(baselineFrame.width >= overrideFrame.width)
+        #expect(finalOverrideFrame.width < baselineFrame.width)
+        #expect(abs(finalOverrideFrame.width - finalOverrideFrame.height) < 0.5)
     }
 
     @Test @MainActor func `non focused workspace plan does not clear focused border`() async throws {

@@ -296,13 +296,17 @@ extension DwindleNode {
         oldFrame: CGRect,
         newFrame: CGRect,
         clock: AnimationClock?,
-        config: CubicConfig
+        config: SpringConfig = .dwindle,
+        displayRefreshRate: Double = 60.0,
+        pixelEpsilon: CGFloat = 1.0
     ) {
         animateFrom(
             oldFrame: oldFrame,
             newFrame: newFrame,
             clock: clock,
             config: config,
+            displayRefreshRate: displayRefreshRate,
+            pixelEpsilon: pixelEpsilon,
             animated: true
         )
     }

@@ -608,7 +608,7 @@ final class AXManager {
     private func shouldRetryFrameWrite(after result: AXFrameApplyResult) -> Bool {
         guard let failureReason = result.writeResult.failureReason else { return false }
         switch failureReason {
-        case .cancelled, .suppressed:
+        case .cancelled, .suppressed, .invalidTargetFrame:
             return false
         default:
             return true

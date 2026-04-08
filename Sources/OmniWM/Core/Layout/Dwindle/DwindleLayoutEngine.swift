@@ -30,6 +30,11 @@ private struct DwindleKernelSnapshot {
     let rawNodes: ContiguousArray<omniwm_dwindle_node_input>
 }
 
+struct DwindleAnimationFrames {
+    let frames: [WindowToken: CGRect]
+    let animationsActive: Bool
+}
+
 final class DwindleLayoutEngine {
     private var roots: [WorkspaceDescriptor.ID: DwindleNode] = [:]
     private var tokenToNode: [WindowToken: DwindleNode] = [:]
@@ -38,7 +43,6 @@ final class DwindleLayoutEngine {
     private var windowConstraints: [WindowToken: WindowSizeConstraints] = [:]
 
     var settings: DwindleSettings = .init()
-    private var monitorSettings: [Monitor.ID: ResolvedDwindleSettings] = [:]
     var animationClock: AnimationClock?
     var displayRefreshRate: Double = 60.0
 
@@ -50,35 +54,7 @@ final class DwindleLayoutEngine {
         windowConstraints[token] ?? .unconstrained
     }
 
-    func updateMonitorSettings(_ resolved: ResolvedDwindleSettings, for monitorId: Monitor.ID) {
-        monitorSettings[monitorId] = resolved
-    }
-
-    func cleanupRemovedMonitor(_ monitorId: Monitor.ID) {
-        monitorSettings.removeValue(forKey: monitorId)
-    }
-
-    func effectiveSettings(for monitorId: Monitor.ID) -> DwindleSettings {
-        guard let resolved = monitorSettings[monitorId] else { return settings }
-
-        var effective = settings
-        effective.smartSplit = resolved.smartSplit
-        effective.defaultSplitRatio = resolved.defaultSplitRatio
-        effective.splitWidthMultiplier = resolved.splitWidthMultiplier
-        if !resolved.singleWindowAspectRatio.isFillScreen {
-            effective.singleWindowAspectRatio = resolved.singleWindowAspectRatio.size
-        }
-        if !resolved.useGlobalGaps {
-            effective.innerGap = resolved.innerGap
-            effective.outerGapTop = resolved.outerGapTop
-            effective.outerGapBottom = resolved.outerGapBottom
-            effective.outerGapLeft = resolved.outerGapLeft
-            effective.outerGapRight = resolved.outerGapRight
-        }
-        return effective
-    }
-
-    var windowMovementAnimationConfig: CubicConfig = .init(duration: 0.3)
+    var windowMovementAnimationConfig: SpringConfig = .dwindle
 
     func root(for workspaceId: WorkspaceDescriptor.ID) -> DwindleNode? {
         roots[workspaceId]
@@ -211,6 +187,13 @@ final class DwindleLayoutEngine {
 
         let existingLeaf = DwindleNode(kind: .leaf(handle: existingHandle, fullscreen: fullscreen))
         let newLeaf = DwindleNode(kind: .leaf(handle: newWindow, fullscreen: false))
+        if let targetRect {
+            newLeaf.insertionSeed = DwindleInsertionSeed(
+                sourceFrame: targetRect,
+                orientation: orientation,
+                appearsFirst: newFirst
+            )
+        }
 
         leaf.kind = .split(orientation: orientation, ratio: settings.defaultSplitRatio)
 
@@ -412,7 +395,8 @@ final class DwindleLayoutEngine {
 
     func calculateLayout(
         for workspaceId: WorkspaceDescriptor.ID,
-        screen: CGRect
+        screen: CGRect,
+        scale: CGFloat? = nil
     ) -> [WindowToken: CGRect] {
         guard let root = roots[workspaceId] else { return [:] }
 
@@ -448,7 +432,12 @@ final class DwindleLayoutEngine {
             "omniwm_dwindle_solve returned \(status)"
         )
 
-        return applyKernelFrames(rawFrames, snapshot: snapshot, windowCount: windowCount)
+        return applyKernelFrames(
+            rawFrames,
+            snapshot: snapshot,
+            windowCount: windowCount,
+            scale: scale
+        )
     }
 
     private func makeKernelSnapshot(from root: DwindleNode) -> DwindleKernelSnapshot {
@@ -555,7 +544,8 @@ final class DwindleLayoutEngine {
     private func applyKernelFrames(
         _ rawFrames: ContiguousArray<omniwm_dwindle_node_frame>,
         snapshot: DwindleKernelSnapshot,
-        windowCount: Int
+        windowCount: Int,
+        scale: CGFloat?
     ) -> [WindowToken: CGRect] {
         var frames: [WindowToken: CGRect] = [:]
         frames.reserveCapacity(windowCount)
@@ -570,16 +560,18 @@ final class DwindleLayoutEngine {
                 width: rawFrame.width,
                 height: rawFrame.height
             )
-            node.cachedFrame = frame
+            let roundedFrame = roundedFrame(frame, scale: scale)
+            node.cachedFrame = roundedFrame
 
             if case let .leaf(handle, _) = node.kind, let handle {
-                frames[handle] = frame
+                frames[handle] = roundedFrame
             }
         }
 
         return frames
     }
 
+    // Canonical cached layout frames, excluding any in-flight animation offsets.
     func currentFrames(in workspaceId: WorkspaceDescriptor.ID) -> [WindowToken: CGRect] {
         guard let root = roots[workspaceId] else { return [:] }
         var frames: [WindowToken: CGRect] = [:]
@@ -594,6 +586,20 @@ final class DwindleLayoutEngine {
         for child in node.children {
             collectCurrentFrames(node: child, into: &frames)
         }
+    }
+
+    func capturePresentedFrames(
+        in workspaceId: WorkspaceDescriptor.ID,
+        at time: TimeInterval,
+        scale: CGFloat
+    ) -> [WindowToken: CGRect] {
+        let canonicalFrames = currentFrames(in: workspaceId)
+        return calculateAnimatedFrames(
+            baseFrames: canonicalFrames,
+            in: workspaceId,
+            at: time,
+            scale: scale
+        )
     }
 
     func hitTestFocusableWindow(
@@ -870,8 +876,25 @@ final class DwindleLayoutEngine {
             return nil
         }
 
-        selected.kind = .leaf(handle: handle, fullscreen: !fullscreen)
+        let newFullscreen = !fullscreen
+        if newFullscreen, let root = roots[workspaceId] {
+            clearFullscreenFlags(in: root, except: selected.id)
+        }
+        selected.kind = .leaf(handle: handle, fullscreen: newFullscreen)
         return handle
+    }
+
+    private func clearFullscreenFlags(in node: DwindleNode, except selectedId: DwindleNodeId) {
+        if case let .leaf(handle, fullscreen) = node.kind,
+           fullscreen,
+           node.id != selectedId
+        {
+            node.kind = .leaf(handle: handle, fullscreen: false)
+        }
+
+        for child in node.children {
+            clearFullscreenFlags(in: child, except: selectedId)
+        }
     }
 
     @discardableResult
@@ -1060,6 +1083,19 @@ final class DwindleLayoutEngine {
         }
     }
 
+    func clearAnimations(in workspaceId: WorkspaceDescriptor.ID) {
+        guard let root = roots[workspaceId] else { return }
+        clearAnimationsRecursive(root)
+    }
+
+    private func clearAnimationsRecursive(_ node: DwindleNode) {
+        node.clearAnimations()
+        node.insertionSeed = nil
+        for child in node.children {
+            clearAnimationsRecursive(child)
+        }
+    }
+
     func hasActiveAnimations(in workspaceId: WorkspaceDescriptor.ID, at time: TimeInterval) -> Bool {
         guard let root = roots[workspaceId] else { return false }
         return hasActiveAnimationsRecursive(root, at: time)
@@ -1073,19 +1109,35 @@ final class DwindleLayoutEngine {
         return false
     }
 
-    func animateWindowMovements(
+    func prepareAnimationFramesForRelayout(
         oldFrames: [WindowToken: CGRect],
         newFrames: [WindowToken: CGRect],
-        motion: MotionSnapshot
-    ) {
-        for (handle, newFrame) in newFrames {
-            guard let oldFrame = oldFrames[handle],
-                  let node = tokenToNode[handle] else { continue }
+        in workspaceId: WorkspaceDescriptor.ID,
+        motion: MotionSnapshot,
+        scale: CGFloat,
+        at time: TimeInterval
+    ) -> DwindleAnimationFrames {
+        let pixelEpsilon = Self.pixelEpsilon(for: scale)
+        guard motion.animationsEnabled else {
+            clearAnimations(in: workspaceId)
+            return DwindleAnimationFrames(frames: newFrames, animationsActive: false)
+        }
 
-            let changed = abs(oldFrame.origin.x - newFrame.origin.x) > 0.5 ||
-                abs(oldFrame.origin.y - newFrame.origin.y) > 0.5 ||
-                abs(oldFrame.width - newFrame.width) > 0.5 ||
-                abs(oldFrame.height - newFrame.height) > 0.5
+        for (handle, newFrame) in newFrames {
+            guard let node = tokenToNode[handle] else { continue }
+
+            let seedOldFrame = node.insertionSeed?.startingFrame(
+                for: newFrame,
+                pixelEpsilon: pixelEpsilon
+            )
+            let oldFrame = oldFrames[handle] ?? seedOldFrame
+            node.insertionSeed = nil
+
+            guard let oldFrame else { continue }
+            let changed = abs(oldFrame.origin.x - newFrame.origin.x) > pixelEpsilon ||
+                abs(oldFrame.origin.y - newFrame.origin.y) > pixelEpsilon ||
+                abs(oldFrame.width - newFrame.width) > pixelEpsilon ||
+                abs(oldFrame.height - newFrame.height) > pixelEpsilon
 
             if changed {
                 node.animateFrom(
@@ -1093,6 +1145,62 @@ final class DwindleLayoutEngine {
                     newFrame: newFrame,
                     clock: animationClock,
                     config: windowMovementAnimationConfig,
+                    displayRefreshRate: displayRefreshRate,
+                    pixelEpsilon: pixelEpsilon,
+                    animated: true
+                )
+            }
+        }
+
+        return animationFrames(
+            from: newFrames,
+            in: workspaceId,
+            at: time,
+            scale: scale
+        )
+    }
+
+    func animationFrames(
+        from baseFrames: [WindowToken: CGRect],
+        in workspaceId: WorkspaceDescriptor.ID,
+        at time: TimeInterval,
+        scale: CGFloat
+    ) -> DwindleAnimationFrames {
+        let renderedFrames = calculateAnimatedFrames(
+            baseFrames: baseFrames,
+            in: workspaceId,
+            at: time,
+            scale: scale
+        )
+        return DwindleAnimationFrames(
+            frames: renderedFrames,
+            animationsActive: hasActiveAnimations(in: workspaceId, at: time)
+        )
+    }
+
+    func animateWindowMovements(
+        oldFrames: [WindowToken: CGRect],
+        newFrames: [WindowToken: CGRect],
+        motion: MotionSnapshot
+    ) {
+        let pixelEpsilon = Self.pixelEpsilon(for: 1.0)
+        for (handle, newFrame) in newFrames {
+            guard let oldFrame = oldFrames[handle],
+                  let node = tokenToNode[handle] else { continue }
+
+            let changed = abs(oldFrame.origin.x - newFrame.origin.x) > pixelEpsilon ||
+                abs(oldFrame.origin.y - newFrame.origin.y) > pixelEpsilon ||
+                abs(oldFrame.width - newFrame.width) > pixelEpsilon ||
+                abs(oldFrame.height - newFrame.height) > pixelEpsilon
+
+            if changed {
+                node.animateFrom(
+                    oldFrame: oldFrame,
+                    newFrame: newFrame,
+                    clock: animationClock,
+                    config: windowMovementAnimationConfig,
+                    displayRefreshRate: displayRefreshRate,
+                    pixelEpsilon: pixelEpsilon,
                     animated: motion.animationsEnabled
                 )
             }
@@ -1102,28 +1210,44 @@ final class DwindleLayoutEngine {
     func calculateAnimatedFrames(
         baseFrames: [WindowToken: CGRect],
         in _: WorkspaceDescriptor.ID,
-        at time: TimeInterval
+        at time: TimeInterval,
+        scale: CGFloat? = nil
     ) -> [WindowToken: CGRect] {
         var result = baseFrames
+        let pixelEpsilon = Self.pixelEpsilon(for: scale ?? 1.0)
 
         for (handle, frame) in baseFrames {
             guard let node = tokenToNode[handle] else { continue }
             let posOffset = node.renderOffset(at: time)
             let sizeOffset = node.renderSizeOffset(at: time)
 
-            let hasAnimation = abs(posOffset.x) > 0.1 || abs(posOffset.y) > 0.1 ||
-                abs(sizeOffset.width) > 0.1 || abs(sizeOffset.height) > 0.1
+            let hasAnimation = abs(posOffset.x) > pixelEpsilon || abs(posOffset.y) > pixelEpsilon ||
+                abs(sizeOffset.width) > pixelEpsilon || abs(sizeOffset.height) > pixelEpsilon
 
             if hasAnimation {
-                result[handle] = CGRect(
-                    x: frame.origin.x + posOffset.x,
-                    y: frame.origin.y + posOffset.y,
-                    width: frame.width + sizeOffset.width,
-                    height: frame.height + sizeOffset.height
+                result[handle] = roundedFrame(
+                    CGRect(
+                        x: frame.origin.x + posOffset.x,
+                        y: frame.origin.y + posOffset.y,
+                        width: frame.width + sizeOffset.width,
+                        height: frame.height + sizeOffset.height
+                    ),
+                    scale: scale
                 )
+            } else {
+                result[handle] = roundedFrame(frame, scale: scale)
             }
         }
 
         return result
+    }
+
+    private static func pixelEpsilon(for scale: CGFloat) -> CGFloat {
+        1.0 / max(scale, 1.0)
+    }
+
+    private func roundedFrame(_ frame: CGRect, scale: CGFloat?) -> CGRect {
+        guard let scale else { return frame }
+        return frame.roundedToPhysicalPixels(scale: scale)
     }
 }

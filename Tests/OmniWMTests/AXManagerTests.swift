@@ -1,3 +1,4 @@
+import ApplicationServices
 import CoreGraphics
 import Foundation
 import Testing
@@ -24,6 +25,17 @@ private func axManagerTestWriteResult(
 }
 
 @Suite(.serialized) struct AXManagerTests {
+    @Test func invalidTargetFrameIsRejectedLocally() {
+        let window = AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: 999)
+        let invalidFrame = CGRect(x: 100, y: 100, width: 0, height: 480)
+
+        let result = AXWindowService.setFrame(window, frame: invalidFrame)
+
+        #expect(result.failureReason == AXFrameWriteFailureReason.invalidTargetFrame)
+        #expect(result.observedFrame == nil)
+        #expect(result.targetFrame == invalidFrame)
+    }
+
     @Test @MainActor func failedWriteRetriesOnceAndPromotesConfirmedFrameAfterSuccess() async {
         let controller = makeLayoutPlanTestController()
         guard let monitor = controller.workspaceManager.monitors.first,

@@ -44,6 +44,13 @@ struct SpringConfig {
         epsilon: 0.0001,
         velocityEpsilon: 0.01
     )
+    static let dwindle = SpringConfig(
+        response: 0.26,
+        dampingFraction: 1.0,
+        blendDuration: 0.0,
+        epsilon: 0.0001,
+        velocityEpsilon: 0.01
+    )
     static let reducedMotion = SpringConfig(
         response: 0.18,
         dampingFraction: 0.98,

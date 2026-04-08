@@ -33,4 +33,18 @@ private func expectSpringConfig(
         #expect(resolved.epsilon == SpringConfig.reducedMotion.epsilon)
         #expect(resolved.velocityEpsilon == SpringConfig.reducedMotion.velocityEpsilon)
     }
+
+    @Test func dwindlePresetMatchesExactNoBounceConfig() {
+        expectSpringConfig(.dwindle, matches: SpringConfig(
+            response: 0.26,
+            dampingFraction: 1.0,
+            blendDuration: 0.0,
+            epsilon: 0.0001,
+            velocityEpsilon: 0.01
+        ))
+        #expect(SpringConfig.dwindle.response == 0.26)
+        #expect(SpringConfig.dwindle.dampingFraction == 1.0)
+        #expect(SpringConfig.dwindle.epsilon == 0.0001)
+        #expect(SpringConfig.dwindle.velocityEpsilon == 0.01)
+    }
 }

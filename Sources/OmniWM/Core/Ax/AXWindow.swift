@@ -42,6 +42,7 @@ enum AXFrameWriteOrder {
 }
 
 enum AXFrameWriteFailureReason: Equatable, Sendable {
+    case invalidTargetFrame
     case valueCreationFailed
     case sizeWriteFailed(AXError)
     case positionWriteFailed(AXError)
@@ -308,6 +309,14 @@ enum AXWindowService {
             return setFrameResultProviderForTests(window, frame, currentFrameHint)
         }
 
+        guard isValidTargetFrame(frame) else {
+            return .skipped(
+                targetFrame: frame,
+                currentFrameHint: currentFrameHint,
+                failureReason: .invalidTargetFrame
+            )
+        }
+
         let writeOrder = frameWriteOrder(
             currentFrame: currentFrameHint ?? (try? self.frame(window)),
             targetFrame: frame
@@ -364,6 +373,15 @@ enum AXWindowService {
 
     private static func convertToAX(_ rect: CGRect) -> CGRect {
         ScreenCoordinateSpace.toWindowServer(rect: rect)
+    }
+
+    private static func isValidTargetFrame(_ frame: CGRect) -> Bool {
+        frame.origin.x.isFinite &&
+        frame.origin.y.isFinite &&
+        frame.width.isFinite &&
+        frame.height.isFinite &&
+        frame.width > 0 &&
+        frame.height > 0
     }
 
     static func subrole(_ window: AXWindowRef) -> String? {

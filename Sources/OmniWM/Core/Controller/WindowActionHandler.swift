@@ -491,7 +491,11 @@ final class WindowActionHandler {
         }
 
         if sourceWorkspaceId == targetWorkspaceId {
-            guard engine.summonWindowRight(token, beside: focusedToken, in: targetWorkspaceId) else {
+            guard controller.dwindleLayoutHandler.summonWindowRight(
+                token,
+                beside: focusedToken,
+                in: targetWorkspaceId
+            ) else {
                 return false
             }
             commitSummonedWindowFocus(token: token, workspaceId: targetWorkspaceId)

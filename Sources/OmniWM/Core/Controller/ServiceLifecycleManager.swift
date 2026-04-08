@@ -159,7 +159,6 @@ final class ServiceLifecycleManager {
         controller.layoutRefreshController.cleanupForMonitorDisconnect(displayId: outputId.displayId, migrateAnimations: false)
 
         controller.niriEngine?.cleanupRemovedMonitor(monitorId)
-        controller.dwindleEngine?.cleanupRemovedMonitor(monitorId)
     }
 
     private func handleMonitorConfigurationChanged() {

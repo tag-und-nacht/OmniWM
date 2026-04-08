@@ -485,11 +485,7 @@ final class WMController {
     }
 
     func updateMonitorDwindleSettings() {
-        guard let engine = dwindleEngine else { return }
-        for monitor in workspaceManager.monitors {
-            let resolved = settings.resolvedDwindleSettings(for: monitor)
-            engine.updateMonitorSettings(resolved, for: monitor.id)
-        }
+        guard dwindleEngine != nil else { return }
         layoutRefreshController.requestRelayout(reason: .monitorSettingsChanged)
     }
 

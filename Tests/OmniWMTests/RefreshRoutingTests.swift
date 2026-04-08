@@ -2832,7 +2832,15 @@ private func syncNiriWorkspaceStatesForRefreshTests(
         #expect(controller.workspaceManager.layoutReason(for: targetToken) == .standard)
         #expect(controller.workspaceManager.entry(for: targetToken)?.handle === originalEntry.handle)
         #expect(restoredNode.id == originalNode.id)
-        #expect(controller.axManager.lastAppliedFrame(for: 2696) == originalFrame)
+        guard let restoredFrame = controller.axManager.lastAppliedFrame(for: 2696) else {
+            Issue.record("Missing restored Dwindle frame after delayed destroy round-trip")
+            return
+        }
+
+        #expect(abs(restoredFrame.origin.x - originalFrame.origin.x) <= 8.0)
+        #expect(abs(restoredFrame.origin.y - originalFrame.origin.y) < 0.5)
+        #expect(restoredFrame.width <= 8.0)
+        #expect(abs(restoredFrame.height - originalFrame.height) < 0.5)
     }
 
     @Test @MainActor func nativeFullscreenExitWithReplacementWindowIdPreservesDwindleIdentity() async {
@@ -2890,7 +2898,15 @@ private func syncNiriWorkspaceStatesForRefreshTests(
         #expect(controller.workspaceManager.nativeFullscreenRecord(for: replacementToken) == nil)
         #expect(replacementEntry.handle === originalEntry.handle)
         #expect(replacementNode.id == originalNode.id)
-        #expect(controller.axManager.lastAppliedFrame(for: 2627) == originalFrame)
+        guard let replacementFrame = controller.axManager.lastAppliedFrame(for: 2627) else {
+            Issue.record("Missing replacement Dwindle frame after fullscreen replacement restore")
+            return
+        }
+
+        #expect(abs(replacementFrame.origin.x - originalFrame.origin.x) <= 8.0)
+        #expect(abs(replacementFrame.origin.y - originalFrame.origin.y) < 0.5)
+        #expect(replacementFrame.width <= 8.0)
+        #expect(abs(replacementFrame.height - originalFrame.height) < 0.5)
     }
 
     @Test @MainActor func fullRescanExitClearsFullscreenSessionFlagsAndRecoversFocusedBorder() async {

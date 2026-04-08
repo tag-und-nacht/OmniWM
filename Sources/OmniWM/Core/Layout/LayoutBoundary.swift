@@ -62,6 +62,7 @@ struct DwindleWorkspaceSnapshot {
     let confirmedFocusedToken: WindowToken?
     let selectedToken: WindowToken?
     let settings: ResolvedDwindleSettings
+    let displayRefreshRate: Double
     let isActiveWorkspace: Bool
 }
 
