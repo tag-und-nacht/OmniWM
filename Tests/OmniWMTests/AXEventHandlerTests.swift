@@ -4796,6 +4796,41 @@ private func waitUntilAXEventTest(
         #expect(relayoutReasons == [.axWindowCreated])
     }
 
+    @Test @MainActor func evaluateWindowDispositionAppliesManualOverrideOutsideKernel() {
+        let controller = makeAXEventTestController(trackedBundleId: "com.example.manual")
+        let pid = getpid()
+        let axRef = AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: 907)
+        let token = WindowToken(pid: pid, windowId: 907)
+        guard let workspaceId = controller.activeWorkspace()?.id else {
+            Issue.record("Missing active workspace")
+            return
+        }
+
+        _ = controller.workspaceManager.addWindow(axRef, pid: pid, windowId: token.windowId, to: workspaceId)
+        controller.workspaceManager.setCachedConstraints(.unconstrained, for: token)
+        controller.workspaceManager.setManualLayoutOverride(.forceFloat, for: token)
+        controller.axEventHandler.windowFactsProvider = { _, _ in
+            makeAXEventWindowRuleFacts(bundleId: "com.example.manual", appName: "Manual Override Test")
+        }
+        defer { controller.axEventHandler.windowFactsProvider = nil }
+
+        let evaluation = controller.evaluateWindowDisposition(axRef: axRef, pid: pid)
+        let baseDecision = controller.windowRuleEngine.decision(
+            for: evaluation.facts,
+            token: token,
+            appFullscreen: evaluation.appFullscreen
+        )
+
+        #expect(baseDecision.disposition == .managed)
+        #expect(baseDecision.source == .heuristic)
+        #expect(evaluation.manualOverride == .forceFloat)
+        #expect(evaluation.decision.disposition == .floating)
+        #expect(evaluation.decision.source == .manualOverride)
+        #expect(evaluation.decision.layoutDecisionKind == .explicitLayout)
+        #expect(evaluation.decision.heuristicReasons.isEmpty)
+        #expect(evaluation.decision.deferredReason == nil)
+    }
+
     @Test @MainActor func builtInFloatingCreatePreservesUserWorkspaceAssignmentAndRuleEffects() async {
         let controller = makeAXEventTestController(trackedBundleId: "com.apple.calculator")
         controller.windowRuleEngine.rebuild(

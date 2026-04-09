@@ -110,6 +110,32 @@ private func makeWindowRuleFacts(
         #expect(decision.heuristicReasons.isEmpty)
     }
 
+    @Test func explicitUserRuleBeatsCleanShotSpecialCaseClassification() {
+        let engine = WindowRuleEngine()
+        let rule = AppRule(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000126")!,
+            bundleId: WindowRuleEngine.cleanShotBundleId,
+            layout: .tile
+        )
+        engine.rebuild(rules: [rule])
+
+        let decision = engine.decision(
+            for: makeWindowRuleFacts(
+                bundleId: WindowRuleEngine.cleanShotBundleId,
+                subrole: kAXStandardWindowSubrole as String,
+                appPolicy: .accessory,
+                windowServer: WindowServerInfo(id: 9, pid: 41, level: 103, frame: .zero)
+            ),
+            token: nil,
+            appFullscreen: false
+        )
+
+        #expect(decision.disposition == .managed)
+        #expect(decision.layoutDecisionKind == .explicitLayout)
+        #expect(decision.heuristicReasons.isEmpty)
+        #expect(decision.source == .userRule(rule.id))
+    }
+
     @Test func moreSpecificTitleRuleBeatsGenericBundleRule() {
         let engine = WindowRuleEngine()
         let genericRule = AppRule(
@@ -161,6 +187,46 @@ private func makeWindowRuleFacts(
         #expect(decision.deferredReason == .attributeFetchFailed)
         #expect(decision.trackedMode == nil)
         #expect(decision.heuristicReasons == [.attributeFetchFailed])
+    }
+
+    @Test func builtInFloatingRuleStillWinsWhenAttributeFetchFails() {
+        let engine = WindowRuleEngine()
+
+        let decision = engine.decision(
+            for: makeWindowRuleFacts(
+                bundleId: "com.apple.calculator",
+                attributeFetchSucceeded: false
+            ),
+            token: nil,
+            appFullscreen: false
+        )
+
+        #expect(decision.disposition == .floating)
+        #expect(decision.layoutDecisionKind == .explicitLayout)
+        #expect(decision.deferredReason == nil)
+        #expect(decision.heuristicReasons.isEmpty)
+        if case .builtInRule("defaultFloatingApp") = decision.source {
+        } else {
+            Issue.record("Expected degraded-AX Calculator windows to keep the explicit built-in floating rule")
+        }
+    }
+
+    @Test func builtInFloatingRuleStillWinsBeforeFullscreenFallback() {
+        let engine = WindowRuleEngine()
+
+        let decision = engine.decision(
+            for: makeWindowRuleFacts(bundleId: "com.apple.calculator"),
+            token: nil,
+            appFullscreen: true
+        )
+
+        #expect(decision.disposition == .floating)
+        #expect(decision.layoutDecisionKind == .explicitLayout)
+        #expect(decision.deferredReason == nil)
+        if case .builtInRule("defaultFloatingApp") = decision.source {
+        } else {
+            Issue.record("Expected Calculator to keep the explicit built-in floating rule before fullscreen fallback")
+        }
     }
 
     @Test func tileRuleDefersWhenAttributeFetchFails() {
@@ -238,11 +304,11 @@ private func makeWindowRuleFacts(
 
         let decision = engine.decision(
             for: makeWindowRuleFacts(
-                bundleId: WindowRuleEngine.cleanShotBundleId,
-                subrole: kAXStandardWindowSubrole as String,
-                appPolicy: .accessory,
-                windowServer: WindowServerInfo(id: 1, pid: 41, level: 103, frame: .zero)
-            ),
+            bundleId: WindowRuleEngine.cleanShotBundleId,
+            subrole: kAXStandardWindowSubrole as String,
+            appPolicy: .accessory,
+            windowServer: WindowServerInfo(id: 1, pid: 41, level: 103, frame: .zero)
+        ),
             token: nil,
             appFullscreen: false
         )
@@ -252,6 +318,40 @@ private func makeWindowRuleFacts(
         if case .builtInRule("cleanShotRecordingOverlay") = decision.source {
         } else {
             Issue.record("Expected CleanShot capture overlays to use the built-in floating rule")
+        }
+    }
+
+    @Test func cleanShotSpecialCasePreservesMatchedUserWorkspaceAndEffects() {
+        let engine = WindowRuleEngine()
+        let rule = AppRule(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000166")!,
+            bundleId: WindowRuleEngine.cleanShotBundleId,
+            assignToWorkspace: "4",
+            minWidth: 610,
+            minHeight: 420
+        )
+        engine.rebuild(rules: [rule])
+
+        let decision = engine.decision(
+            for: makeWindowRuleFacts(
+                bundleId: WindowRuleEngine.cleanShotBundleId,
+                subrole: kAXStandardWindowSubrole as String,
+                appPolicy: .accessory,
+                windowServer: WindowServerInfo(id: 10, pid: 41, level: 103, frame: .zero)
+            ),
+            token: nil,
+            appFullscreen: false
+        )
+
+        #expect(decision.disposition == .floating)
+        #expect(decision.layoutDecisionKind == .explicitLayout)
+        #expect(decision.workspaceName == "4")
+        #expect(decision.ruleEffects.minWidth == 610)
+        #expect(decision.ruleEffects.minHeight == 420)
+        #expect(decision.ruleEffects.matchedRuleId == rule.id)
+        if case .builtInRule("cleanShotRecordingOverlay") = decision.source {
+        } else {
+            Issue.record("Expected CleanShot overlays to preserve matched user metadata while reporting the built-in source")
         }
     }
 
@@ -448,7 +548,9 @@ private func makeWindowRuleFacts(
         let rule = AppRule(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000161")!,
             bundleId: "com.example.illustrator",
-            assignToWorkspace: "2"
+            assignToWorkspace: "2",
+            minWidth: 880,
+            minHeight: 640
         )
         engine.rebuild(rules: [rule])
 
@@ -467,6 +569,9 @@ private func makeWindowRuleFacts(
         #expect(decision.disposition == .floating)
         #expect(decision.trackedMode == .floating)
         #expect(decision.workspaceName == "2")
+        #expect(decision.ruleEffects.minWidth == 880)
+        #expect(decision.ruleEffects.minHeight == 640)
+        #expect(decision.ruleEffects.matchedRuleId == rule.id)
     }
 
     @Test func titleSensitiveFallbackDefersUntilTitleArrives() {
@@ -484,6 +589,7 @@ private func makeWindowRuleFacts(
         #expect(decision.disposition == .undecided)
         #expect(decision.deferredReason == .requiredTitleMissing)
         #expect(decision.trackedMode == nil)
+        #expect(decision.source == .heuristic)
     }
 
     @Test func invalidRegexOnlyRuleIsTrackedAndExcludedFromCompiledRules() {

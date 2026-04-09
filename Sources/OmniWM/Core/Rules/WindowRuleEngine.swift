@@ -299,6 +299,8 @@ final class WindowRuleEngine {
         token: WindowToken?,
         appFullscreen: Bool
     ) -> WindowDecision {
+        _ = token
+
         let userRule = bestMatch(in: compiledUserRules, facts: facts)
         let builtInRule = bestMatch(in: builtInRules, facts: facts)
 
@@ -309,188 +311,85 @@ final class WindowRuleEngine {
             matchedRuleId: userRule?.rule.id
         )
 
-        if let userRule,
-           let userDecision = explicitDecision(
-               userRule,
-               workspaceName: workspaceName,
-               effects: effects
-           )
-        {
-            return userDecision
-        }
-
-        // Built-in layout can still inherit workspace assignment and sizing effects
-        // from a matching user auto rule.
-        if let builtInRule,
-           let builtInDecision = explicitDecision(
-               builtInRule,
-               workspaceName: workspaceName,
-               effects: effects
-           )
-        {
-            return builtInDecision
-        }
-
-        if let cleanShotDecision = cleanShotRecordingOverlayDecision(
-            for: facts,
-            workspaceName: workspaceName,
-            effects: effects
-        ) {
-            return cleanShotDecision
-        }
-
-        if facts.ax.title == nil,
-           requiresTitle(for: facts.ax.bundleId)
-        {
-            return WindowDecision(
-                disposition: .undecided,
-                source: userRule.map { .userRule($0.rule.id) }
-                    ?? builtInRule.map { builtInRuleSource(for: $0) }
-                    ?? .heuristic,
-                layoutDecisionKind: .fallbackLayout,
-                workspaceName: workspaceName,
-                ruleEffects: effects,
-                heuristicReasons: [],
-                deferredReason: .requiredTitleMissing
-            )
-        }
-
-        if appFullscreen {
-            return WindowDecision(
-                disposition: .managed,
-                source: userRule.map { .userRule($0.rule.id) }
-                    ?? builtInRule.map { builtInRuleSource(for: $0) }
-                    ?? .heuristic,
-                layoutDecisionKind: .fallbackLayout,
-                workspaceName: workspaceName,
-                ruleEffects: effects,
-                heuristicReasons: [],
-                deferredReason: nil
-            )
-        }
-
-        if !facts.ax.attributeFetchSucceeded {
-            if let userRule, userRule.rule.effectiveLayoutAction == .float {
-                return fallbackDecisionForMatchedUserRule(
-                    userRule,
-                    workspaceName: workspaceName,
-                    effects: effects,
-                    heuristicReasons: [.attributeFetchFailed]
-                )
-            }
-            return WindowDecision(
-                disposition: .undecided,
-                source: userRule.map { .userRule($0.rule.id) } ?? .heuristic,
-                layoutDecisionKind: .fallbackLayout,
-                workspaceName: workspaceName,
-                ruleEffects: effects,
-                heuristicReasons: [.attributeFetchFailed],
-                deferredReason: .attributeFetchFailed
-            )
-        }
-
-        let heuristic = AXWindowService.heuristicDisposition(
-            for: facts.ax,
-            sizeConstraints: facts.sizeConstraints
+        let kernelOutput = solveWindowDecisionKernel(
+            matchedUserAction: userRule?.rule.effectiveLayoutAction,
+            matchedBuiltInAction: builtInRule?.rule.effectiveLayoutAction,
+            matchedBuiltInSourceKind: builtInRule.flatMap { builtInSourceKind(for: $0) },
+            specialCaseKind: specialCaseKind(for: facts),
+            facts: facts.ax,
+            titleRequired: requiresTitle(for: facts.ax.bundleId),
+            appFullscreen: appFullscreen
         )
 
         return WindowDecision(
-            disposition: heuristic.disposition,
-            source: userRule.map { .userRule($0.rule.id) } ?? .heuristic,
-            layoutDecisionKind: .fallbackLayout,
+            disposition: kernelOutput.disposition,
+            source: decisionSource(
+                from: kernelOutput,
+                userRule: userRule
+            ),
+            layoutDecisionKind: kernelOutput.layoutDecisionKind,
             workspaceName: workspaceName,
             ruleEffects: effects,
-            heuristicReasons: heuristic.reasons,
-            deferredReason: heuristic.disposition == .undecided ? .attributeFetchFailed : nil
+            heuristicReasons: kernelOutput.heuristicReasons,
+            deferredReason: kernelOutput.deferredReason
         )
     }
 
-    private func fallbackDecisionForMatchedUserRule(
-        _ compiled: CompiledRule,
-        workspaceName: String?,
-        effects: ManagedWindowRuleEffects,
-        heuristicReasons: [AXWindowHeuristicReason]
-    ) -> WindowDecision {
-        let disposition: WindowDecisionDisposition = switch compiled.rule.effectiveLayoutAction {
-        case .float:
-            .floating
-        case .tile, .auto:
-            .managed
-        }
-
-        return WindowDecision(
-            disposition: disposition,
-            source: .userRule(compiled.rule.id),
-            layoutDecisionKind: .fallbackLayout,
-            workspaceName: workspaceName,
-            ruleEffects: effects,
-            heuristicReasons: heuristicReasons,
-            deferredReason: nil
-        )
-    }
-
-    private func cleanShotRecordingOverlayDecision(
-        for facts: WindowRuleFacts,
-        workspaceName: String?,
-        effects: ManagedWindowRuleEffects
-    ) -> WindowDecision? {
+    private func specialCaseKind(for facts: WindowRuleFacts) -> WindowDecisionSpecialCaseKind {
         guard facts.ax.bundleId == Self.cleanShotBundleId,
               facts.ax.subrole == (kAXStandardWindowSubrole as String),
               facts.windowServer?.level == 103
         else {
-            return nil
+            return .none
         }
 
-        return WindowDecision(
-            disposition: .floating,
-            source: .builtInRule(Self.cleanShotRecordingOverlayRuleName),
-            layoutDecisionKind: .explicitLayout,
-            workspaceName: workspaceName,
-            ruleEffects: effects,
-            heuristicReasons: [],
-            deferredReason: nil
-        )
+        return .cleanShotRecordingOverlay
     }
 
-    private func explicitDecision(
-        _ compiled: CompiledRule,
-        workspaceName: String?,
-        effects: ManagedWindowRuleEffects
-    ) -> WindowDecision? {
-        let source: WindowDecisionSource = switch compiled.source {
-        case .user:
-            .userRule(compiled.rule.id)
-        case let .builtIn(name):
-            .builtInRule(name)
+    private func decisionSource(
+        from output: WindowDecisionKernelOutput,
+        userRule: CompiledRule?
+    ) -> WindowDecisionSource {
+        switch output.sourceKind {
+        case .userRule:
+            guard let userRule else {
+                preconditionFailure("Window decision kernel returned a user-rule source without a matched user rule")
+            }
+            return .userRule(userRule.rule.id)
+        case .builtInRule:
+            guard let builtInSourceKind = output.builtInSourceKind else {
+                preconditionFailure("Window decision kernel returned a built-in source without a built-in source kind")
+            }
+            return .builtInRule(builtInRuleName(for: builtInSourceKind))
+        case .heuristic:
+            return .heuristic
         }
-
-        let disposition: WindowDecisionDisposition
-        switch compiled.rule.effectiveLayoutAction {
-        case .float:
-            disposition = .floating
-        case .tile:
-            disposition = .managed
-        case .auto:
-            return nil
-        }
-
-        return WindowDecision(
-            disposition: disposition,
-            source: source,
-            layoutDecisionKind: .explicitLayout,
-            workspaceName: workspaceName,
-            ruleEffects: effects,
-            heuristicReasons: [],
-            deferredReason: nil
-        )
     }
 
-    private func builtInRuleSource(for compiled: CompiledRule) -> WindowDecisionSource {
+    private func builtInSourceKind(for compiled: CompiledRule) -> WindowDecisionBuiltInSourceKind? {
         switch compiled.source {
-        case let .builtIn(name):
-            .builtInRule(name)
         case .user:
-            .heuristic
+            return nil
+        case let .builtIn(name):
+            switch name {
+            case "defaultFloatingApp":
+                return .defaultFloatingApp
+            case "browserPictureInPicture":
+                return .browserPictureInPicture
+            default:
+                preconditionFailure("Unknown built-in window rule source '\(name)'")
+            }
+        }
+    }
+
+    private func builtInRuleName(for sourceKind: WindowDecisionBuiltInSourceKind) -> String {
+        switch sourceKind {
+        case .defaultFloatingApp:
+            "defaultFloatingApp"
+        case .browserPictureInPicture:
+            "browserPictureInPicture"
+        case .cleanShotRecordingOverlay:
+            Self.cleanShotRecordingOverlayRuleName
         }
     }
 

@@ -3,12 +3,14 @@ const dwindle_layout = @import("dwindle_layout.zig");
 const niri_layout = @import("niri_layout.zig");
 const overview_projection = @import("overview_projection.zig");
 const reconcile = @import("reconcile.zig");
+const window_decision = @import("window_decision.zig");
 
 comptime {
     _ = dwindle_layout;
     _ = niri_layout;
     _ = overview_projection;
     _ = reconcile;
+    _ = window_decision;
 }
 
 const kernel_ok: i32 = 0;

@@ -551,64 +551,23 @@ enum AXWindowService {
         sizeConstraints: WindowSizeConstraints? = nil,
         overriddenWindowType: AXWindowType? = nil
     ) -> AXWindowHeuristicDisposition {
+        _ = sizeConstraints
+
         if let overriddenWindowType {
             let disposition: WindowDecisionDisposition = overriddenWindowType == .tiling ? .managed : .floating
             return AXWindowHeuristicDisposition(disposition: disposition, reasons: [])
         }
 
-        if !facts.attributeFetchSucceeded {
-            return AXWindowHeuristicDisposition(
-                disposition: .undecided,
-                reasons: [.attributeFetchFailed]
-            )
-        }
-
-        let hasAnyButton = facts.hasCloseButton
-            || facts.hasFullscreenButton
-            || facts.hasZoomButton
-            || facts.hasMinimizeButton
-
-        if facts.appPolicy == .accessory && !facts.hasCloseButton {
-            return AXWindowHeuristicDisposition(
-                disposition: .floating,
-                reasons: [.accessoryWithoutClose]
-            )
-        }
-
-        if !hasAnyButton && facts.subrole != kAXStandardWindowSubrole as String {
-            return AXWindowHeuristicDisposition(
-                disposition: .floating,
-                reasons: [.noButtonsOnNonStandardSubrole]
-            )
-        }
-
-        if let subrole = facts.subrole,
-           subrole != (kAXStandardWindowSubrole as String)
-        {
-            return AXWindowHeuristicDisposition(
-                disposition: .floating,
-                reasons: [.nonStandardSubrole]
-            )
-        }
-
-        if !facts.hasFullscreenButton {
-            return AXWindowHeuristicDisposition(
-                disposition: .floating,
-                reasons: [.missingFullscreenButton]
-            )
-        }
-
-        if facts.fullscreenButtonEnabled != true {
-            return AXWindowHeuristicDisposition(
-                disposition: .floating,
-                reasons: [.disabledFullscreenButton]
-            )
-        }
-
-        return AXWindowHeuristicDisposition(
-            disposition: .managed,
-            reasons: []
+        return solveWindowDecisionKernel(
+            matchedUserAction: nil,
+            matchedBuiltInAction: nil,
+            matchedBuiltInSourceKind: nil,
+            specialCaseKind: .none,
+            facts: facts,
+            titleRequired: false,
+            appFullscreen: false
         )
+        .heuristicDisposition
     }
 
     static func sizeConstraints(_ window: AXWindowRef, currentSize: CGSize? = nil) -> WindowSizeConstraints {

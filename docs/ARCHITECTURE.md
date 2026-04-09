@@ -507,7 +507,7 @@ Entries are indexed by both `WindowToken` and raw `windowId` for fast lookup fro
 
 Niri arranges windows in vertical columns that scroll horizontally, inspired by the [Niri](https://github.com/YaLTeR/niri) Wayland compositor.
 
-Seven leaf kernels now live in `Zig/omniwm_kernels/src` and are imported through the checked-in `COmniWMKernels` C header target: axis constraint solving, viewport geometry, monitor restore assignment matching, the Niri bulk projection/layout solver, the Overview projection solver, the Dwindle frame solver, and the Reconcile state-transition kernel. Their Swift counterparts remain thin wrappers so the surrounding layout engine, overview/controller policy, navigation, Reconcile orchestration, and AppKit-facing policy stay in Swift.
+Eight leaf kernels now live in `Zig/omniwm_kernels/src` and are imported through the checked-in `COmniWMKernels` C header target: axis constraint solving, viewport geometry, monitor restore assignment matching, the Niri bulk projection/layout solver, the Overview projection solver, the Dwindle frame solver, the Window Decision kernel, and the Reconcile state-transition kernel. Their Swift counterparts remain thin wrappers so the surrounding layout engine, overview/controller policy, navigation, rule matching, Reconcile orchestration, and AppKit-facing policy stay in Swift.
 
 The Niri tree stays Swift-owned. Swift resolves workspace selection, monitor ownership, viewport state, and AppKit policy, then flattens the current columns/windows into compact snapshot arrays for one `omniwm_niri_layout_solve` call. Zig owns the deterministic bulk projection math for canonical/rendered container rects, window frames, resolved spans, and hidden-edge classification before Swift applies those outputs back onto the existing nodes.
 
@@ -682,12 +682,16 @@ Events are buffered in a lock-protected `PendingCGSEventState` and drained on th
 
 **File:** `Sources/OmniWM/Core/Rules/WindowRuleEngine.swift`
 
-Evaluates windows against rules to produce a `WindowDecision`. Evaluation order (first match wins):
+Evaluates windows against rules to produce a `WindowDecision`. Swift still owns rule compilation, regex matching, invalid-regex reporting, title-fetch gating, AX/AppKit/window-server fact collection, matched-rule metadata, and manual overrides. Once Swift has selected the best matching user rule plus best matching built-in rule and normalized the relevant scalar facts, it flattens that snapshot into one `omniwm_window_decision_solve` call. Zig owns the deterministic base-decision precedence across explicit user rules, explicit built-in rules, special-case built-ins, title deferral, fullscreen fallback, degraded-AX handling, and heuristic fallback.
 
-1. **Manual overrides** — user has explicitly toggled float/tile on this window
-2. **User-defined rules** — configured in settings, matching on bundle ID, app name, title (literal or regex), AX role/subrole
-3. **Built-in rules** — hardcoded rules for known system UI
-4. **Heuristics** — size constraints, window role/subrole analysis
+Base decision evaluation order:
+
+1. **Explicit user rules** — configured in settings, matching on bundle ID, app name, title (literal or regex), AX role/subrole
+2. **Explicit built-in rules** — hardcoded rules for known system UI
+3. **Special-case built-ins** — normalized window-server-assisted cases such as the CleanShot recording overlay
+4. **Fallback stages** — title-missing deferral, fullscreen handling, degraded-AX handling, and heuristic classification
+
+Manual overrides still wrap the base decision later in `WMController`, so the rule engine boundary remains a leaf kernel instead of an orchestration rewrite.
 
 **Key types:**
 
