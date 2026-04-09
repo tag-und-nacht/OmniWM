@@ -241,6 +241,10 @@ enum AXWindowService {
         }
     }
 
+    static func shouldTreatAsTopLevelWindow(role: String?, subrole: String?) -> Bool {
+        role == kAXWindowRole as String || subrole == kAXStandardWindowSubrole as String
+    }
+
     static func windowId(_ window: AXWindowRef) -> Int {
         window.windowId
     }

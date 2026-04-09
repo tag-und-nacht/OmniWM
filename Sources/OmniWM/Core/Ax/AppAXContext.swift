@@ -297,9 +297,28 @@ final class AppAXContext {
                     kAXRoleAttribute as CFString,
                     &roleValue
                 )
-                guard roleResult == .success,
-                      let role = roleValue as? String,
-                      role == kAXWindowRole as String else { continue }
+                let role: String? = if roleResult == .success {
+                    roleValue as? String
+                } else {
+                    nil
+                }
+
+                var subrole: String?
+                if role != kAXWindowRole as String {
+                    var subroleValue: CFTypeRef?
+                    let subroleResult = AXUIElementCopyAttributeValue(
+                        element,
+                        kAXSubroleAttribute as CFString,
+                        &subroleValue
+                    )
+                    if subroleResult == .success {
+                        subrole = subroleValue as? String
+                    }
+                }
+
+                guard AXWindowService.shouldTreatAsTopLevelWindow(role: role, subrole: subrole) else {
+                    continue
+                }
 
                 let axRef = AXWindowRef(element: element, windowId: windowId)
                 newWindows[windowId] = element

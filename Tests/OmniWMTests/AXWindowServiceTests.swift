@@ -5,6 +5,42 @@ import Testing
 @testable import OmniWM
 
 @Suite struct AXWindowServiceTests {
+    @Test func axWindowRoleIsAcceptedDuringTopLevelEnumeration() {
+        #expect(
+            AXWindowService.shouldTreatAsTopLevelWindow(
+                role: kAXWindowRole as String,
+                subrole: kAXStandardWindowSubrole as String
+            )
+        )
+    }
+
+    @Test func emacsLikeStandardSubroleIsAcceptedDuringTopLevelEnumeration() {
+        #expect(
+            AXWindowService.shouldTreatAsTopLevelWindow(
+                role: kAXTextFieldRole as String,
+                subrole: kAXStandardWindowSubrole as String
+            )
+        )
+    }
+
+    @Test func missingRoleWithStandardSubroleIsAcceptedDuringTopLevelEnumeration() {
+        #expect(
+            AXWindowService.shouldTreatAsTopLevelWindow(
+                role: nil,
+                subrole: kAXStandardWindowSubrole as String
+            )
+        )
+    }
+
+    @Test func nonStandardSubroleWithoutWindowRoleIsRejectedDuringTopLevelEnumeration() {
+        #expect(
+            !AXWindowService.shouldTreatAsTopLevelWindow(
+                role: kAXTextFieldRole as String,
+                subrole: "AXDialog"
+            )
+        )
+    }
+
     @Test func attributeFetchFailureProducesUndecidedDispositionAndFailureReason() {
         let decision = AXWindowService.heuristicDisposition(
             for: AXWindowFacts(

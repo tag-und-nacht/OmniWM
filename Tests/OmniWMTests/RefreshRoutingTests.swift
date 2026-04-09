@@ -35,6 +35,8 @@ private func makeRefreshTestWindow(windowId: Int = 101) -> AXWindowRef {
 private func makeRefreshTestWindowFacts(
     bundleId: String = "com.example.refresh",
     title: String? = nil,
+    role: String? = kAXWindowRole as String,
+    subrole: String? = kAXStandardWindowSubrole as String,
     attributeFetchSucceeded: Bool = true,
     sizeConstraints: WindowSizeConstraints? = nil,
     windowServer: WindowServerInfo? = nil,
@@ -44,8 +46,8 @@ private func makeRefreshTestWindowFacts(
     WindowRuleFacts(
         appName: "Refresh Test App",
         ax: AXWindowFacts(
-            role: kAXWindowRole as String,
-            subrole: kAXStandardWindowSubrole as String,
+            role: role,
+            subrole: subrole,
             title: title,
             hasCloseButton: true,
             hasFullscreenButton: hasFullscreenButton,
@@ -3105,6 +3107,40 @@ private func syncNiriWorkspaceStatesForRefreshTests(
         await waitForRefreshWork(on: controller)
 
         #expect(controller.workspaceManager.entry(forPid: pid, windowId: windowId) == nil)
+    }
+
+    @Test @MainActor func fullRescanPreservesTrackedEmacsLikeWindowOnActiveSpaceChange() async {
+        let controller = makeRefreshTestController()
+        guard let workspaceId = controller.activeWorkspace()?.id else {
+            Issue.record("Missing active workspace")
+            return
+        }
+
+        let pid = getpid()
+        let windowId = 6_104
+        let handle = addWindow(on: controller, workspaceId: workspaceId, pid: pid, windowId: windowId)
+
+        controller.axEventHandler.windowFactsProvider = { axRef, _ in
+            guard axRef.windowId == windowId else {
+                return makeRefreshTestWindowFacts()
+            }
+            return makeRefreshTestWindowFacts(
+                bundleId: "org.gnu.Emacs",
+                role: kAXTextFieldRole as String,
+                subrole: kAXStandardWindowSubrole as String
+            )
+        }
+        controller.axManager.fullRescanEnumerationOverrideForTests = {
+            AXManager.FullRescanEnumerationSnapshot(
+                windows: [(makeRefreshTestWindow(windowId: windowId), pid, windowId)],
+                failedPIDs: []
+            )
+        }
+
+        controller.layoutRefreshController.requestFullRescan(reason: .activeSpaceChanged)
+        await waitForRefreshWork(on: controller)
+
+        #expect(controller.workspaceManager.entry(for: handle) != nil)
     }
 
     @Test @MainActor func fullRescanPreservesTrackedWindowsForFailedEnumerationPIDs() async {
