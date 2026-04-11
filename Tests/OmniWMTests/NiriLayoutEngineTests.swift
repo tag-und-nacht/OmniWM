@@ -1899,6 +1899,69 @@ private func makeCenteredCrossMonitorFixture(
         #expect(columns[2].windowNodes.map(\.token) == [rightHandle.id])
     }
 
+    @Test func moveWindowHorizontalRightExpelAnimatesTrailingColumns() {
+        let engine = NiriLayoutEngine(maxWindowsPerColumn: 3)
+        let wsId = UUID()
+
+        let root = NiriRoot(workspaceId: wsId)
+        engine.roots[wsId] = root
+
+        let sourceColumn = NiriContainer()
+        let middleColumn = NiriContainer()
+        let trailingColumn = NiriContainer()
+        root.appendChild(sourceColumn)
+        root.appendChild(middleColumn)
+        root.appendChild(trailingColumn)
+        assignFixedWidths(root.columns)
+
+        let firstHandle = makeTestHandle(pid: 171)
+        let movedHandle = makeTestHandle(pid: 172)
+        let middleHandle = makeTestHandle(pid: 173)
+        let trailingHandle = makeTestHandle(pid: 174)
+        let firstWindow = NiriWindow(token: firstHandle.id)
+        let movedWindow = NiriWindow(token: movedHandle.id)
+        let middleWindow = NiriWindow(token: middleHandle.id)
+        let trailingWindow = NiriWindow(token: trailingHandle.id)
+
+        sourceColumn.appendChild(firstWindow)
+        sourceColumn.appendChild(movedWindow)
+        middleColumn.appendChild(middleWindow)
+        trailingColumn.appendChild(trailingWindow)
+
+        for window in [firstWindow, movedWindow, middleWindow, trailingWindow] {
+            engine.tokenToNode[window.token] = window
+        }
+
+        var state = ViewportState()
+        state.activeColumnIndex = 0
+
+        let moved = engine.moveWindow(
+            movedWindow,
+            direction: .right,
+            in: wsId,
+            state: &state,
+            workingFrame: CGRect(x: 0, y: 0, width: 1200, height: 900),
+            gaps: 8
+        )
+
+        let columns = engine.columns(in: wsId)
+        #expect(moved)
+        #expect(columns.count == 4)
+        #expect(columns[0].windowNodes.map(\.token) == [firstHandle.id])
+        #expect(columns[1].windowNodes.map(\.token) == [movedHandle.id])
+        #expect(columns[2] === middleColumn)
+        #expect(columns[3] === trailingColumn)
+        #expect(middleColumn.hasMoveAnimationRunning)
+        #expect(trailingColumn.hasMoveAnimationRunning)
+
+        let middleOffset = middleColumn.moveAnimation?.fromOffset
+        let trailingOffset = trailingColumn.moveAnimation?.fromOffset
+        #expect(middleOffset != nil)
+        #expect(trailingOffset != nil)
+        #expect(middleOffset! < -300)
+        #expect(trailingOffset! < -300)
+    }
+
     @Test func moveWindowHorizontalRightConsumesSingleWindowColumnIntoNeighbor() {
         let engine = NiriLayoutEngine(maxWindowsPerColumn: 3)
         let wsId = UUID()
@@ -2096,6 +2159,65 @@ private func makeCenteredCrossMonitorFixture(
         let windowOffset = rightWindow.moveXAnimation?.fromOffset
         #expect(windowOffset != nil)
         #expect(windowOffset! > 300)
+    }
+
+    @Test func moveWindowHorizontalRightConsumeAnimatesAllTrailingColumns() {
+        let engine = NiriLayoutEngine(maxWindowsPerColumn: 3)
+        let wsId = UUID()
+
+        let root = NiriRoot(workspaceId: wsId)
+        engine.roots[wsId] = root
+
+        let sourceColumn = NiriContainer()
+        let targetColumn = NiriContainer()
+        let trailingColumn = NiriContainer()
+        root.appendChild(sourceColumn)
+        root.appendChild(targetColumn)
+        root.appendChild(trailingColumn)
+        assignFixedWidths(root.columns)
+
+        let sourceHandle = makeTestHandle(pid: 281)
+        let targetHandle = makeTestHandle(pid: 282)
+        let trailingHandle = makeTestHandle(pid: 283)
+        let sourceWindow = NiriWindow(token: sourceHandle.id)
+        let targetWindow = NiriWindow(token: targetHandle.id)
+        let trailingWindow = NiriWindow(token: trailingHandle.id)
+
+        sourceColumn.appendChild(sourceWindow)
+        targetColumn.appendChild(targetWindow)
+        trailingColumn.appendChild(trailingWindow)
+
+        for window in [sourceWindow, targetWindow, trailingWindow] {
+            engine.tokenToNode[window.token] = window
+        }
+
+        var state = ViewportState()
+        state.activeColumnIndex = 0
+
+        let moved = engine.moveWindow(
+            sourceWindow,
+            direction: .right,
+            in: wsId,
+            state: &state,
+            workingFrame: CGRect(x: 0, y: 0, width: 1200, height: 900),
+            gaps: 8
+        )
+
+        let columns = engine.columns(in: wsId)
+        #expect(moved)
+        #expect(columns.count == 2)
+        #expect(columns[0] === targetColumn)
+        #expect(columns[1] === trailingColumn)
+        #expect(targetColumn.windowNodes.map(\.token) == [sourceHandle.id, targetHandle.id])
+        #expect(targetColumn.hasMoveAnimationRunning)
+        #expect(trailingColumn.hasMoveAnimationRunning)
+
+        let targetOffset = targetColumn.moveAnimation?.fromOffset
+        let trailingOffset = trailingColumn.moveAnimation?.fromOffset
+        #expect(targetOffset != nil)
+        #expect(trailingOffset != nil)
+        #expect(targetOffset! > 300)
+        #expect(trailingOffset! > 300)
     }
 
     @Test func ensureSelectionVisibleUsesExplicitPreviousActivePositionAfterColumnRemoval() {
@@ -4042,6 +4164,108 @@ private func makeCenteredCrossMonitorFixture(
 
         #expect(inserted)
         #expect(orderedWindowIds == [focusedWindow.token.windowId, targetWindow.token.windowId, trailingWindow.token.windowId])
+    }
+
+    @Test func moveColumnRightAnimatesMovedAndDisplacedColumns() {
+        let engine = NiriLayoutEngine(maxWindowsPerColumn: 3, maxVisibleColumns: 3)
+        let wsId = UUID()
+        let root = NiriRoot(workspaceId: wsId)
+        engine.roots[wsId] = root
+
+        let leftColumn = NiriContainer()
+        let movedColumn = NiriContainer()
+        let rightColumn = NiriContainer()
+        root.appendChild(leftColumn)
+        root.appendChild(movedColumn)
+        root.appendChild(rightColumn)
+        assignFixedWidths(root.columns)
+
+        let leftWindow = NiriWindow(token: makeTestHandle(pid: 151).id)
+        let movedWindow = NiriWindow(token: makeTestHandle(pid: 152).id)
+        let rightWindow = NiriWindow(token: makeTestHandle(pid: 153).id)
+        leftColumn.appendChild(leftWindow)
+        movedColumn.appendChild(movedWindow)
+        rightColumn.appendChild(rightWindow)
+        for window in [leftWindow, movedWindow, rightWindow] {
+            engine.tokenToNode[window.token] = window
+        }
+
+        var state = ViewportState()
+        state.activeColumnIndex = 1
+
+        let moved = engine.moveColumn(
+            movedColumn,
+            direction: .right,
+            in: wsId,
+            state: &state,
+            workingFrame: CGRect(x: 0, y: 0, width: 1200, height: 900),
+            gaps: 8
+        )
+
+        let orderedWindowIds = engine.columns(in: wsId).compactMap { $0.windowNodes.first?.token.windowId }
+        #expect(moved)
+        #expect(orderedWindowIds == [leftWindow.token.windowId, rightWindow.token.windowId, movedWindow.token.windowId])
+        #expect(movedColumn.hasMoveAnimationRunning)
+        #expect(rightColumn.hasMoveAnimationRunning)
+        #expect(!leftColumn.hasMoveAnimationRunning)
+
+        let movedOffset = movedColumn.moveAnimation?.fromOffset
+        let displacedOffset = rightColumn.moveAnimation?.fromOffset
+        #expect(movedOffset != nil)
+        #expect(displacedOffset != nil)
+        #expect(movedOffset! < -300)
+        #expect(displacedOffset! > 300)
+    }
+
+    @Test func moveColumnLeftAnimatesMovedAndDisplacedColumns() {
+        let engine = NiriLayoutEngine(maxWindowsPerColumn: 3, maxVisibleColumns: 3)
+        let wsId = UUID()
+        let root = NiriRoot(workspaceId: wsId)
+        engine.roots[wsId] = root
+
+        let leftColumn = NiriContainer()
+        let movedColumn = NiriContainer()
+        let rightColumn = NiriContainer()
+        root.appendChild(leftColumn)
+        root.appendChild(movedColumn)
+        root.appendChild(rightColumn)
+        assignFixedWidths(root.columns)
+
+        let leftWindow = NiriWindow(token: makeTestHandle(pid: 161).id)
+        let movedWindow = NiriWindow(token: makeTestHandle(pid: 162).id)
+        let rightWindow = NiriWindow(token: makeTestHandle(pid: 163).id)
+        leftColumn.appendChild(leftWindow)
+        movedColumn.appendChild(movedWindow)
+        rightColumn.appendChild(rightWindow)
+        for window in [leftWindow, movedWindow, rightWindow] {
+            engine.tokenToNode[window.token] = window
+        }
+
+        var state = ViewportState()
+        state.activeColumnIndex = 1
+
+        let moved = engine.moveColumn(
+            movedColumn,
+            direction: .left,
+            in: wsId,
+            state: &state,
+            workingFrame: CGRect(x: 0, y: 0, width: 1200, height: 900),
+            gaps: 8
+        )
+
+        let orderedWindowIds = engine.columns(in: wsId).compactMap { $0.windowNodes.first?.token.windowId }
+        #expect(moved)
+        #expect(orderedWindowIds == [movedWindow.token.windowId, leftWindow.token.windowId, rightWindow.token.windowId])
+        #expect(movedColumn.hasMoveAnimationRunning)
+        #expect(leftColumn.hasMoveAnimationRunning)
+        #expect(!rightColumn.hasMoveAnimationRunning)
+
+        let movedOffset = movedColumn.moveAnimation?.fromOffset
+        let displacedOffset = leftColumn.moveAnimation?.fromOffset
+        #expect(movedOffset != nil)
+        #expect(displacedOffset != nil)
+        #expect(movedOffset! > 300)
+        #expect(displacedOffset! < -300)
     }
 
     @Test func insertWindowByMoveReordersThroughTopologyKernel() {

@@ -118,6 +118,10 @@ struct NiriTopologyKernelPlan {
 }
 
 extension NiriLayoutEngine {
+    struct NiriTopologyAnimationPreparation {
+        var columnPositionSnapshot: [NodeId: CGFloat]?
+    }
+
     private func makeTopologyKernelSnapshot(
         in workspaceId: WorkspaceDescriptor.ID,
         extraTokens: [WindowToken]
@@ -492,6 +496,92 @@ extension NiriLayoutEngine {
     func findWindow(in plan: NiriTopologyKernelPlan, id: UInt64) -> NiriWindow? {
         guard let token = plan.snapshot.tokenByWindowId[id] else { return nil }
         return findNode(for: token)
+    }
+
+    func prepareAnimationsForTopologyPlan(
+        _ plan: NiriTopologyKernelPlan,
+        in workspaceId: WorkspaceDescriptor.ID,
+        state: ViewportState,
+        gaps: CGFloat,
+        motion: MotionSnapshot
+    ) -> NiriTopologyAnimationPreparation {
+        var preparation = NiriTopologyAnimationPreparation()
+
+        switch plan.effectKind {
+        case .moveColumn:
+            let cols = columns(in: workspaceId)
+            var positions: [NodeId: CGFloat] = [:]
+            positions.reserveCapacity(cols.count)
+            for (index, column) in cols.enumerated() {
+                positions[column.id] = state.columnX(at: index, columns: cols, gap: gaps)
+            }
+            preparation.columnPositionSnapshot = positions
+
+        case .consumeWindow, .removeColumn:
+            if plan.result.source_column_index >= 0 {
+                var animationState = state
+                _ = animateColumnsForRemoval(
+                    columnIndex: Int(plan.result.source_column_index),
+                    in: workspaceId,
+                    motion: motion,
+                    state: &animationState,
+                    gaps: gaps
+                )
+            }
+
+        case .none, .addColumn, .expelWindow, .reorderWindow:
+            break
+        }
+
+        return preparation
+    }
+
+    func finalizeAnimationsForTopologyPlan(
+        _ plan: NiriTopologyKernelPlan,
+        preparation: NiriTopologyAnimationPreparation,
+        in workspaceId: WorkspaceDescriptor.ID,
+        state: ViewportState,
+        workingFrame: CGRect,
+        gaps: CGFloat,
+        motion: MotionSnapshot
+    ) {
+        switch plan.effectKind {
+        case .moveColumn:
+            guard let positions = preparation.columnPositionSnapshot else { return }
+            let cols = columns(in: workspaceId)
+            for (index, column) in cols.enumerated() {
+                guard let oldPosition = positions[column.id] else { continue }
+                let newPosition = state.columnX(at: index, columns: cols, gap: gaps)
+                let displacement = oldPosition - newPosition
+                guard abs(displacement) > 0.5 else { continue }
+                if column.hasMoveAnimationRunning {
+                    column.offsetMoveAnimCurrent(displacement)
+                } else {
+                    column.animateMoveFrom(
+                        displacement: CGPoint(x: displacement, y: 0),
+                        clock: animationClock,
+                        config: windowMovementAnimationConfig,
+                        displayRefreshRate: displayRefreshRate,
+                        animated: motion.animationsEnabled
+                    )
+                }
+            }
+
+        case .addColumn, .expelWindow:
+            if plan.result.target_column_index >= 0 {
+                animateColumnsForAddition(
+                    columnIndex: Int(plan.result.target_column_index),
+                    in: workspaceId,
+                    motion: motion,
+                    state: state,
+                    gaps: gaps,
+                    workingAreaWidth: workingFrame.width
+                )
+            }
+
+        case .none, .removeColumn, .consumeWindow, .reorderWindow:
+            break
+        }
     }
 
     func topologyInsertIndex(for position: InsertPosition) -> Int {

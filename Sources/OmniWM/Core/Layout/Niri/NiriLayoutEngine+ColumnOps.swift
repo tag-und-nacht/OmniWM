@@ -47,18 +47,23 @@ extension NiriLayoutEngine {
             return false
         }
 
-        let targetColumnIndex = Int(plan.result.target_column_index)
+        let animationPreparation = prepareAnimationsForTopologyPlan(
+            plan,
+            in: workspaceId,
+            state: state,
+            gaps: gaps,
+            motion: motion
+        )
         _ = applyTopologyPlan(plan, in: workspaceId, state: &state, motion: motion)
-        if targetColumnIndex >= 0 {
-            animateColumnsForAddition(
-                columnIndex: targetColumnIndex,
-                in: workspaceId,
-                motion: motion,
-                state: state,
-                gaps: gaps,
-                workingAreaWidth: workingFrame.width
-            )
-        }
+        finalizeAnimationsForTopologyPlan(
+            plan,
+            preparation: animationPreparation,
+            in: workspaceId,
+            state: state,
+            workingFrame: workingFrame,
+            gaps: gaps,
+            motion: motion
+        )
         return true
     }
 
@@ -160,12 +165,28 @@ extension NiriLayoutEngine {
         else { return false }
         guard plan.effectKind != .none else { return false }
 
+        let animationPreparation = prepareAnimationsForTopologyPlan(
+            plan,
+            in: workspaceId,
+            state: state,
+            gaps: gaps,
+            motion: motion
+        )
         _ = applyTopologyPlan(
             plan,
             in: workspaceId,
             state: &state,
             motion: motion,
             animationConfig: windowMovementAnimationConfig
+        )
+        finalizeAnimationsForTopologyPlan(
+            plan,
+            preparation: animationPreparation,
+            in: workspaceId,
+            state: state,
+            workingFrame: workingFrame,
+            gaps: gaps,
+            motion: motion
         )
         return true
     }

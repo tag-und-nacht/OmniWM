@@ -91,6 +91,25 @@ extension NiriLayoutEngine {
         )
     }
 
+    func moveColumn(
+        _ column: NiriContainer,
+        direction: Direction,
+        in workspaceId: WorkspaceDescriptor.ID,
+        state: inout ViewportState,
+        workingFrame: CGRect,
+        gaps: CGFloat
+    ) -> Bool {
+        moveColumn(
+            column,
+            direction: direction,
+            in: workspaceId,
+            motion: .enabled,
+            state: &state,
+            workingFrame: workingFrame,
+            gaps: gaps
+        )
+    }
+
     func toggleColumnWidth(
         _ column: NiriContainer,
         forwards: Bool,

@@ -37,6 +37,13 @@ extension NiriLayoutEngine {
             return false
         }
 
+        let animationPreparation = prepareAnimationsForTopologyPlan(
+            plan,
+            in: workspaceId,
+            state: state,
+            gaps: gaps,
+            motion: motion
+        )
         let targetColumnIndex = Int(plan.result.target_column_index)
         let targetWindowIndex = Int(plan.result.target_window_index)
         _ = applyTopologyPlan(
@@ -45,6 +52,15 @@ extension NiriLayoutEngine {
             state: &state,
             motion: motion,
             animationConfig: windowMovementAnimationConfig
+        )
+        finalizeAnimationsForTopologyPlan(
+            plan,
+            preparation: animationPreparation,
+            in: workspaceId,
+            state: state,
+            workingFrame: workingFrame,
+            gaps: gaps,
+            motion: motion
         )
 
         if direction == .left || direction == .right,
@@ -72,19 +88,6 @@ extension NiriLayoutEngine {
             if displacement.x != 0 || displacement.y != 0 {
                 movedWindow.animateMoveFrom(
                     displacement: displacement,
-                    clock: animationClock,
-                    config: windowMovementAnimationConfig,
-                    displayRefreshRate: displayRefreshRate,
-                    animated: motion.animationsEnabled
-                )
-            }
-
-            if effect == .consumeWindow,
-               direction == .right,
-               targetColumn.hasMoveAnimationRunning == false
-            {
-                targetColumn.animateMoveFrom(
-                    displacement: CGPoint(x: columnDisplacement, y: 0),
                     clock: animationClock,
                     config: windowMovementAnimationConfig,
                     displayRefreshRate: displayRefreshRate,
