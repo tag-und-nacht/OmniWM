@@ -9,6 +9,7 @@ const restore_planner = @import("restore_planner.zig");
 const viewport_policy = @import("viewport_policy.zig");
 const window_decision = @import("window_decision.zig");
 const workspace_navigation = @import("workspace_navigation.zig");
+const workspace_session = @import("workspace_session.zig");
 
 comptime {
     _ = dwindle_layout;
@@ -20,6 +21,7 @@ comptime {
     _ = restore_planner;
     _ = window_decision;
     _ = workspace_navigation;
+    _ = workspace_session;
 }
 
 const kernel_ok: i32 = 0;

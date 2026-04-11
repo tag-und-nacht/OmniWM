@@ -564,7 +564,7 @@ private func makeReconcileKernelSnapshot(monitors: [Monitor]) -> ReconcileSnapsh
         let topologyTxn = try #require(traces.last)
 
         #expect(traces.count == traceCountBeforeTopology + 1)
-        #expect(topologyTxn.plan.topologyTransition?.visibleAssignments.count == 1)
+        #expect(topologyTxn.plan.topologyTransition?.monitorStates.filter { $0.visibleWorkspaceId != nil }.count == 1)
         #expect(topologyTxn.plan.topologyTransition?.disconnectedVisibleWorkspaceCache.count == 1)
         #expect(topologyTxn.plan.topologyTransition?.newMonitors == [primary])
         #expect(topologyTxn.snapshot.topologyProfile == TopologyProfile(monitors: [primary]))

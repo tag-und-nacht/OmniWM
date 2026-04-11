@@ -1,10 +1,24 @@
 import CoreGraphics
 import Foundation
 
+struct TopologyMonitorSessionState: Equatable {
+    var monitorId: Monitor.ID
+    var visibleWorkspaceId: WorkspaceDescriptor.ID?
+    var previousVisibleWorkspaceId: WorkspaceDescriptor.ID?
+}
+
+struct TopologyWorkspaceProjectionRecord: Equatable {
+    var workspaceId: WorkspaceDescriptor.ID
+    var projectedMonitorId: Monitor.ID?
+    var homeMonitorId: Monitor.ID?
+    var effectiveMonitorId: Monitor.ID?
+}
+
 struct TopologyTransitionPlan: Equatable {
     let previousMonitors: [Monitor]
     let newMonitors: [Monitor]
-    var visibleAssignments: [Monitor.ID: WorkspaceDescriptor.ID]
+    var monitorStates: [TopologyMonitorSessionState]
+    var workspaceProjections: [TopologyWorkspaceProjectionRecord]
     var disconnectedVisibleWorkspaceCache: [MonitorRestoreKey: WorkspaceDescriptor.ID]
     var interactionMonitorId: Monitor.ID?
     var previousInteractionMonitorId: Monitor.ID?
@@ -76,7 +90,9 @@ struct ActionPlan: Equatable {
             parts.append(
                 "topology=\(topologyTransition.previousMonitors.count)->\(topologyTransition.newMonitors.count)"
             )
-            parts.append("visible_assignments=\(topologyTransition.visibleAssignments.count)")
+            parts.append(
+                "visible_assignments=\(topologyTransition.monitorStates.filter { $0.visibleWorkspaceId != nil }.count)"
+            )
         }
         if let persistedHydration {
             parts.append(

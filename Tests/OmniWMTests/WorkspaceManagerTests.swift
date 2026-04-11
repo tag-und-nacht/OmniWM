@@ -1,9 +1,8 @@
 import ApplicationServices
 import CoreGraphics
 import Foundation
-import Testing
-
 @testable import OmniWM
+import Testing
 
 private func makeWorkspaceManagerTestDefaults() -> UserDefaults {
     let suiteName = "com.omniwm.workspace-manager.test.\(UUID().uuidString)"
@@ -84,8 +83,8 @@ private func workspaceConfigurations(
     }
 }
 
-@Suite @MainActor struct PersistedWindowRestoreCatalogWorkspaceManagerTests {
-    @Test func relaunchHydrationResolvesWorkspaceNameOntoFreshRuntimeWorkspaceId() throws {
+@MainActor struct PersistedWindowRestoreCatalogWorkspaceManagerTests {
+    @Test func `relaunch hydration resolves workspace name onto fresh runtime workspace id`() throws {
         let defaults = makeWorkspaceManagerTestDefaults()
 
         let initialSettings = SettingsStore(defaults: defaults)
@@ -140,7 +139,7 @@ private func workspaceConfigurations(
         #expect(relaunchedManager.consumedBootPersistedWindowRestoreKeysForTests() == Set(persistedEntries.map(\.key)))
     }
 
-    @Test func sameTopologyRelaunchRestoresFloatingGeometryAndRescueEligibility() throws {
+    @Test func `same topology relaunch restores floating geometry and rescue eligibility`() throws {
         let defaults = makeWorkspaceManagerTestDefaults()
 
         let initialSettings = SettingsStore(defaults: defaults)
@@ -203,7 +202,7 @@ private func workspaceConfigurations(
         #expect(restoreIntent.rescueEligible)
     }
 
-    @Test func persistedRestoreFallsBackToBestMonitorAcrossSingleToMultiRelaunch() throws {
+    @Test func `persisted restore falls back to best monitor across single to multi relaunch`() throws {
         let defaults = makeWorkspaceManagerTestDefaults()
 
         let initialSettings = SettingsStore(defaults: defaults)
@@ -285,7 +284,7 @@ private func workspaceConfigurations(
         #expect(newStudio.visibleFrame.contains(restoredFrame))
     }
 
-    @Test func persistedRestoreKeepsFloatingRecoveryWithinBoundsAcrossMultiToSingleRelaunch() throws {
+    @Test func `persisted restore keeps floating recovery within bounds across multi to single relaunch`() throws {
         let defaults = makeWorkspaceManagerTestDefaults()
 
         let initialSettings = SettingsStore(defaults: defaults)
@@ -356,7 +355,7 @@ private func workspaceConfigurations(
         #expect(initialWorkspace1 != relaunchedWorkspace1)
     }
 
-    @Test func ambiguousDuplicateSemanticKeysAreRejectedFromPersistence() throws {
+    @Test func `ambiguous duplicate semantic keys are rejected from persistence`() throws {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = workspaceConfigurations([
@@ -392,7 +391,7 @@ private func workspaceConfigurations(
         #expect(manager.persistedWindowRestoreCatalogForTests().entries.isEmpty)
     }
 
-    @Test func removingTrackedWindowRemovesPersistedEntryOnNextCatalogSave() throws {
+    @Test func `removing tracked window removes persisted entry on next catalog save`() throws {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = workspaceConfigurations([
@@ -428,8 +427,8 @@ private func workspaceConfigurations(
     }
 }
 
-@Suite struct WorkspaceManagerTests {
-    @Test @MainActor func equalDistanceRemapUsesDeterministicTieBreak() {
+struct WorkspaceManagerTests {
+    @Test @MainActor func `equal distance remap uses deterministic tie break`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = workspaceConfigurations([
@@ -444,7 +443,8 @@ private func workspaceConfigurations(
         manager.applyMonitorConfigurationChange([oldLeft, oldRight])
 
         guard let ws1 = manager.workspaceId(for: "1", createIfMissing: true),
-              let ws2 = manager.workspaceId(for: "2", createIfMissing: true) else {
+              let ws2 = manager.workspaceId(for: "2", createIfMissing: true)
+        else {
             Issue.record("Failed to create workspaces")
             return
         }
@@ -460,7 +460,7 @@ private func workspaceConfigurations(
         #expect(manager.activeWorkspace(on: newFar.id)?.id == ws2)
     }
 
-    @Test @MainActor func applyMonitorConfigurationChangeMatchesRestoreAssignmentsWhenMonitorIsInserted() {
+    @Test @MainActor func `apply monitor configuration change matches restore assignments when monitor is inserted`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = workspaceConfigurations([
@@ -511,7 +511,7 @@ private func workspaceConfigurations(
         #expect(manager.workspaces(on: newRight.id).map(\.id) == [ws2, ws3])
     }
 
-    @Test @MainActor func workspaceIdsOutsideConfiguredSetAreNotSynthesized() {
+    @Test @MainActor func `workspace ids outside configured set are not synthesized`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = [
@@ -527,7 +527,7 @@ private func workspaceConfigurations(
         #expect(manager.workspaceId(for: "10", createIfMissing: true) == nil)
     }
 
-    @Test @MainActor func specificDisplayWorkspaceMigratesToFallbackSessionAndReturnsWhenTargetReappears() {
+    @Test @MainActor func `specific display workspace migrates to fallback session and returns when target reappears`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = workspaceConfigurations([
@@ -573,7 +573,7 @@ private func workspaceConfigurations(
         #expect(manager.monitorId(for: ws2) == restoredDetached.id)
     }
 
-    @Test @MainActor func unassignedThirdMonitorStaysStableAcrossActiveWorkspaceReads() {
+    @Test @MainActor func `unassigned third monitor stays stable across active workspace reads`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = workspaceConfigurations([
@@ -593,7 +593,8 @@ private func workspaceConfigurations(
         manager.applyMonitorConfigurationChange([main, secondary, third])
 
         guard let ws1 = manager.workspaceId(for: "1", createIfMissing: true),
-              let ws2 = manager.workspaceId(for: "2", createIfMissing: true) else {
+              let ws2 = manager.workspaceId(for: "2", createIfMissing: true)
+        else {
             Issue.record("Failed to create expected workspaces")
             return
         }
@@ -611,7 +612,42 @@ private func workspaceConfigurations(
         #expect(sessionChangeCount == 0)
     }
 
-    @Test @MainActor func secondaryWorkspacesCollapseOntoRemainingMonitorAndReturnWhenSecondaryReappears() {
+    @Test @MainActor func `assigned monitor repairs missing visible session from kernel resolved active workspace`() {
+        let defaults = makeWorkspaceManagerTestDefaults()
+        let settings = SettingsStore(defaults: defaults)
+        settings.workspaceConfigurations = workspaceConfigurations([
+            ("1", .main)
+        ])
+        let manager = WorkspaceManager(settings: settings)
+
+        let main = makeWorkspaceManagerTestMonitor(displayId: 10, name: "Main", x: 0, y: 0)
+        manager.applyMonitorConfigurationChange([main])
+
+        settings.workspaceConfigurations = []
+        manager.applySettings()
+
+        settings.workspaceConfigurations = workspaceConfigurations([
+            ("1", .main)
+        ])
+
+        guard let ws1 = manager.workspaceId(for: "1", createIfMissing: true) else {
+            Issue.record("Failed to create expected workspace")
+            return
+        }
+
+        var sessionChangeCount = 0
+        manager.onSessionStateChanged = {
+            sessionChangeCount += 1
+        }
+
+        #expect(manager.activeWorkspace(on: main.id) == nil)
+        #expect(manager.activeWorkspaceOrFirst(on: main.id)?.id == ws1)
+        #expect(manager.activeWorkspace(on: main.id)?.id == ws1)
+        #expect(manager.monitorId(for: ws1) == main.id)
+        #expect(sessionChangeCount == 1)
+    }
+
+    @Test @MainActor func `secondary workspaces collapse onto remaining monitor and return when secondary reappears`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = workspaceConfigurations([
@@ -649,7 +685,7 @@ private func workspaceConfigurations(
         #expect(manager.monitorId(for: ws2) == restoredRight.id)
     }
 
-    @Test @MainActor func setActiveWorkspaceTracksInteractionMonitorOwnership() {
+    @Test @MainActor func `set active workspace tracks interaction monitor ownership`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = workspaceConfigurations([
@@ -663,7 +699,8 @@ private func workspaceConfigurations(
         manager.applyMonitorConfigurationChange([left, right])
 
         guard let ws1 = manager.workspaceId(for: "1", createIfMissing: true),
-              let ws2 = manager.workspaceId(for: "2", createIfMissing: true) else {
+              let ws2 = manager.workspaceId(for: "2", createIfMissing: true)
+        else {
             Issue.record("Failed to create workspaces")
             return
         }
@@ -678,7 +715,7 @@ private func workspaceConfigurations(
         #expect(manager.activeWorkspace(on: right.id)?.id == ws2)
     }
 
-    @Test @MainActor func moveWorkspaceToForeignMonitorIsRejectedWhenHomeMonitorDiffers() {
+    @Test @MainActor func `move workspace to foreign monitor is rejected when home monitor differs`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = workspaceConfigurations([
@@ -692,7 +729,8 @@ private func workspaceConfigurations(
         manager.applyMonitorConfigurationChange([left, right])
 
         guard let ws1 = manager.workspaceId(for: "1", createIfMissing: true),
-              let ws2 = manager.workspaceId(for: "2", createIfMissing: true) else {
+              let ws2 = manager.workspaceId(for: "2", createIfMissing: true)
+        else {
             Issue.record("Failed to create workspaces")
             return
         }
@@ -708,7 +746,7 @@ private func workspaceConfigurations(
         #expect(manager.previousWorkspace(on: right.id)?.id == nil)
     }
 
-    @Test @MainActor func beginManagedFocusRequestOnlyMutatesPendingState() {
+    @Test @MainActor func `begin managed focus request only mutates pending state`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = workspaceConfigurations([
@@ -722,7 +760,8 @@ private func workspaceConfigurations(
         manager.applyMonitorConfigurationChange([left, right])
 
         guard let ws1 = manager.workspaceId(for: "1", createIfMissing: true),
-              let ws2 = manager.workspaceId(for: "2", createIfMissing: true) else {
+              let ws2 = manager.workspaceId(for: "2", createIfMissing: true)
+        else {
             Issue.record("Failed to create workspaces")
             return
         }
@@ -745,7 +784,7 @@ private func workspaceConfigurations(
         #expect(manager.isAppFullscreenActive == true)
     }
 
-    @Test @MainActor func confirmManagedFocusAtomicallyCommitsOwnerState() {
+    @Test @MainActor func `confirm managed focus atomically commits owner state`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = workspaceConfigurations([
@@ -759,7 +798,8 @@ private func workspaceConfigurations(
         manager.applyMonitorConfigurationChange([left, right])
 
         guard let ws1 = manager.workspaceId(for: "1", createIfMissing: true),
-              let ws2 = manager.workspaceId(for: "2", createIfMissing: true) else {
+              let ws2 = manager.workspaceId(for: "2", createIfMissing: true)
+        else {
             Issue.record("Failed to create workspaces")
             return
         }
@@ -789,7 +829,7 @@ private func workspaceConfigurations(
         #expect(manager.isAppFullscreenActive == false)
     }
 
-    @Test @MainActor func confirmManagedFocusClearsStalePendingRequestForDifferentWindow() {
+    @Test @MainActor func `confirm managed focus clears stale pending request for different window`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = [
@@ -825,7 +865,7 @@ private func workspaceConfigurations(
         #expect(manager.preferredFocusHandle(in: workspaceId) == confirmedHandle)
     }
 
-    @Test @MainActor func stableTokenFocusBridgeReusesHandleAcrossReupsert() {
+    @Test @MainActor func `stable token focus bridge reuses handle across reupsert`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = [
@@ -841,14 +881,24 @@ private func workspaceConfigurations(
             return
         }
 
-        let token1 = manager.addWindow(makeWorkspaceManagerTestWindow(windowId: 2191), pid: getpid(), windowId: 2191, to: workspaceId)
+        let token1 = manager.addWindow(
+            makeWorkspaceManagerTestWindow(windowId: 2191),
+            pid: getpid(),
+            windowId: 2191,
+            to: workspaceId
+        )
         guard let handle1 = manager.handle(for: token1) else {
             Issue.record("Missing initial bridge handle")
             return
         }
         _ = manager.setManagedFocus(token1, in: workspaceId, onMonitor: monitor.id)
 
-        let token2 = manager.addWindow(makeWorkspaceManagerTestWindow(windowId: 2191), pid: getpid(), windowId: 2191, to: workspaceId)
+        let token2 = manager.addWindow(
+            makeWorkspaceManagerTestWindow(windowId: 2191),
+            pid: getpid(),
+            windowId: 2191,
+            to: workspaceId
+        )
         guard let handle2 = manager.handle(for: token2) else {
             Issue.record("Missing refreshed bridge handle")
             return
@@ -862,7 +912,7 @@ private func workspaceConfigurations(
         #expect(manager.lastFocusedHandle(in: workspaceId) === handle1)
     }
 
-    @Test @MainActor func rekeyWindowPreservesHandleAndFocusState() {
+    @Test @MainActor func `rekey window preserves handle and focus state`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = [
@@ -946,7 +996,7 @@ private func workspaceConfigurations(
         #expect(manager.cachedConstraints(for: newToken) == nil)
     }
 
-    @Test @MainActor func floatingFocusDoesNotPoisonTiledPreferredFocus() {
+    @Test @MainActor func `floating focus does not poison tiled preferred focus`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = [
@@ -985,7 +1035,7 @@ private func workspaceConfigurations(
         #expect(manager.resolveWorkspaceFocusToken(in: workspaceId) == tiledToken)
     }
 
-    @Test @MainActor func preferredFocusAllowsRememberedWorkspaceInactiveWindow() {
+    @Test @MainActor func `preferred focus allows remembered workspace inactive window`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = [
@@ -1027,7 +1077,7 @@ private func workspaceConfigurations(
         #expect(manager.resolveWorkspaceFocusToken(in: workspaceId) == rememberedToken)
     }
 
-    @Test @MainActor func preferredFocusFallsBackToWorkspaceInactiveTiledWindow() {
+    @Test @MainActor func `preferred focus falls back to workspace inactive tiled window`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = [
@@ -1061,7 +1111,7 @@ private func workspaceConfigurations(
         #expect(manager.preferredFocusToken(in: workspaceId) == token)
     }
 
-    @Test @MainActor func resolveWorkspaceFocusFallsBackToFloatingWhenNoTiledWindowExists() {
+    @Test @MainActor func `resolve workspace focus falls back to floating when no tiled window exists`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = [
@@ -1090,7 +1140,7 @@ private func workspaceConfigurations(
         #expect(manager.resolveWorkspaceFocusToken(in: workspaceId) == floatingToken)
     }
 
-    @Test @MainActor func resolveWorkspaceFocusFallsBackToWorkspaceInactiveFloatingWindow() {
+    @Test @MainActor func `resolve workspace focus falls back to workspace inactive floating window`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = [
@@ -1126,7 +1176,46 @@ private func workspaceConfigurations(
         #expect(manager.resolveWorkspaceFocusToken(in: workspaceId) == floatingToken)
     }
 
-    @Test @MainActor func resolvedFloatingFrameUsesNormalizedOriginOnMonitorChange() {
+    @Test @MainActor func `resolve and set workspace focus clears hidden confirmed focus without fallback`() {
+        let defaults = makeWorkspaceManagerTestDefaults()
+        let settings = SettingsStore(defaults: defaults)
+        settings.workspaceConfigurations = [
+            WorkspaceConfiguration(name: "1", monitorAssignment: .main)
+        ]
+
+        let manager = WorkspaceManager(settings: settings)
+        let monitor = makeWorkspaceManagerTestMonitor(displayId: 123, name: "Main", x: 0, y: 0)
+        manager.applyMonitorConfigurationChange([monitor])
+
+        guard let workspaceId = manager.workspaceId(for: "1", createIfMissing: true) else {
+            Issue.record("Failed to create workspace")
+            return
+        }
+
+        let handle = addWorkspaceManagerTestHandle(
+            manager: manager,
+            windowId: 2214,
+            pid: 2214,
+            workspaceId: workspaceId
+        )
+
+        _ = manager.setManagedFocus(handle, in: workspaceId, onMonitor: monitor.id)
+        manager.setHiddenState(
+            .init(
+                proportionalPosition: CGPoint(x: 0.4, y: 0.6),
+                referenceMonitorId: monitor.id,
+                reason: .layoutTransient(.left)
+            ),
+            for: handle
+        )
+
+        #expect(manager.resolveWorkspaceFocus(in: workspaceId) == nil)
+        #expect(manager.resolveAndSetWorkspaceFocus(in: workspaceId, onMonitor: monitor.id) == nil)
+        #expect(manager.focusedToken == nil)
+        #expect(manager.focusedHandle == nil)
+    }
+
+    @Test @MainActor func `resolved floating frame uses normalized origin on monitor change`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = [
@@ -1165,7 +1254,7 @@ private func workspaceConfigurations(
         #expect(resolved == CGRect(x: 3060, y: 390, width: 400, height: 300))
     }
 
-    @Test @MainActor func resolveWorkspaceFocusIgnoresDeadRememberedHandles() {
+    @Test @MainActor func `resolve workspace focus ignores dead remembered handles`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = [
@@ -1181,8 +1270,18 @@ private func workspaceConfigurations(
             return
         }
 
-        let survivor = addWorkspaceManagerTestHandle(manager: manager, windowId: 2201, pid: 2201, workspaceId: workspaceId)
-        let removed = addWorkspaceManagerTestHandle(manager: manager, windowId: 2202, pid: 2202, workspaceId: workspaceId)
+        let survivor = addWorkspaceManagerTestHandle(
+            manager: manager,
+            windowId: 2201,
+            pid: 2201,
+            workspaceId: workspaceId
+        )
+        let removed = addWorkspaceManagerTestHandle(
+            manager: manager,
+            windowId: 2202,
+            pid: 2202,
+            workspaceId: workspaceId
+        )
 
         _ = manager.setManagedFocus(removed, in: workspaceId, onMonitor: monitor.id)
         _ = manager.removeWindow(pid: 2202, windowId: 2202)
@@ -1194,7 +1293,8 @@ private func workspaceConfigurations(
         #expect(manager.lastFocusedHandle(in: workspaceId) == survivor)
     }
 
-    @Test @MainActor func removeMissingClearsDeadFocusMemoryAndRecoverySelectsSurvivorAfterConsecutiveMisses() {
+    @Test @MainActor func `remove missing clears dead focus memory and recovery selects survivor after consecutive misses`(
+    ) {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = [
@@ -1210,8 +1310,18 @@ private func workspaceConfigurations(
             return
         }
 
-        let survivor = addWorkspaceManagerTestHandle(manager: manager, windowId: 2301, pid: 2301, workspaceId: workspaceId)
-        let removed = addWorkspaceManagerTestHandle(manager: manager, windowId: 2302, pid: 2302, workspaceId: workspaceId)
+        let survivor = addWorkspaceManagerTestHandle(
+            manager: manager,
+            windowId: 2301,
+            pid: 2301,
+            workspaceId: workspaceId
+        )
+        let removed = addWorkspaceManagerTestHandle(
+            manager: manager,
+            windowId: 2302,
+            pid: 2302,
+            workspaceId: workspaceId
+        )
 
         _ = manager.setManagedFocus(removed, in: workspaceId, onMonitor: monitor.id)
         _ = manager.beginManagedFocusRequest(removed, in: workspaceId, onMonitor: monitor.id)
@@ -1239,7 +1349,7 @@ private func workspaceConfigurations(
         #expect(manager.lastFocusedHandle(in: workspaceId) == survivor)
     }
 
-    @Test @MainActor func removeMissingDoesNotEvictNativeFullscreenSuspendedWindow() {
+    @Test @MainActor func `remove missing does not evict native fullscreen suspended window`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = [
@@ -1255,7 +1365,12 @@ private func workspaceConfigurations(
             return
         }
 
-        let suspended = addWorkspaceManagerTestHandle(manager: manager, windowId: 2311, pid: 2311, workspaceId: workspaceId)
+        let suspended = addWorkspaceManagerTestHandle(
+            manager: manager,
+            windowId: 2311,
+            pid: 2311,
+            workspaceId: workspaceId
+        )
         manager.setLayoutReason(.nativeFullscreen, for: suspended)
 
         manager.removeMissing(keys: [], requiredConsecutiveMisses: 2)
@@ -1265,7 +1380,8 @@ private func workspaceConfigurations(
         #expect(manager.layoutReason(for: suspended) == .nativeFullscreen)
     }
 
-    @Test @MainActor func nativeFullscreenRestoreOnlyClearsTargetRecordWhenSamePidHasMultipleSuspendedWindows() {
+    @Test @MainActor func `native fullscreen restore only clears target record when same pid has multiple suspended windows`(
+    ) {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = workspaceConfigurations([
@@ -1286,8 +1402,18 @@ private func workspaceConfigurations(
         }
 
         let pid: pid_t = 4601
-        let token1 = manager.addWindow(makeWorkspaceManagerTestWindow(windowId: 2321), pid: pid, windowId: 2321, to: ws1)
-        let token2 = manager.addWindow(makeWorkspaceManagerTestWindow(windowId: 2322), pid: pid, windowId: 2322, to: ws2)
+        let token1 = manager.addWindow(
+            makeWorkspaceManagerTestWindow(windowId: 2321),
+            pid: pid,
+            windowId: 2321,
+            to: ws1
+        )
+        let token2 = manager.addWindow(
+            makeWorkspaceManagerTestWindow(windowId: 2322),
+            pid: pid,
+            windowId: 2322,
+            to: ws2
+        )
 
         _ = manager.requestNativeFullscreenEnter(token1, in: ws1)
         _ = manager.markNativeFullscreenSuspended(token1)
@@ -1302,7 +1428,8 @@ private func workspaceConfigurations(
         #expect(manager.nativeFullscreenCommandTarget(frontmostToken: token1) == token1)
     }
 
-    @Test @MainActor func nativeFullscreenUnavailableReplacementMatchesExactMetadataWhenSamePidSharesWorkspace() {
+    @Test @MainActor func `native fullscreen unavailable replacement matches exact metadata when same pid shares workspace`(
+    ) {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = workspaceConfigurations([
@@ -1448,7 +1575,8 @@ private func workspaceConfigurations(
         #expect(manager.nativeFullscreenRecord(for: firstToken)?.restoreSnapshot?.frame == firstFrame)
     }
 
-    @Test @MainActor func nativeFullscreenUnavailableReplacementMatchesExactMetadataAcrossWorkspaceMismatch() {
+    @Test @MainActor func `native fullscreen unavailable replacement matches exact metadata across workspace mismatch`(
+    ) {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = workspaceConfigurations([
@@ -1547,7 +1675,7 @@ private func workspaceConfigurations(
         #expect(matchedRecord.restoreSnapshot?.frame == secondFrame)
     }
 
-    @Test @MainActor func nativeFullscreenUnavailableSingleCandidateMatchesDespiteVolatileMetadata() {
+    @Test @MainActor func `native fullscreen unavailable single candidate matches despite volatile metadata`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = workspaceConfigurations([
@@ -1618,7 +1746,8 @@ private func workspaceConfigurations(
         #expect(matchedRecord.restoreSnapshot?.frame == originalFrame)
     }
 
-    @Test @MainActor func staleTemporarilyUnavailableNativeFullscreenCleanupWaitsForTimeoutAndAppTerminationStillClearsImmediately() {
+    @Test @MainActor func `stale temporarily unavailable native fullscreen cleanup waits for timeout and app termination still clears immediately`(
+    ) {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = workspaceConfigurations([
@@ -1683,7 +1812,7 @@ private func workspaceConfigurations(
         #expect(manager.nativeFullscreenRecord(for: secondToken) == nil)
     }
 
-    @Test @MainActor func monitorReconnectPrefersFocusedWorkspaceMonitorForInteractionState() {
+    @Test @MainActor func `monitor reconnect prefers focused workspace monitor for interaction state`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = workspaceConfigurations([
@@ -1697,7 +1826,8 @@ private func workspaceConfigurations(
         manager.applyMonitorConfigurationChange([left, right])
 
         guard let ws1 = manager.workspaceId(for: "1", createIfMissing: true),
-              let ws2 = manager.workspaceId(for: "2", createIfMissing: true) else {
+              let ws2 = manager.workspaceId(for: "2", createIfMissing: true)
+        else {
             Issue.record("Failed to create workspaces")
             return
         }
@@ -1716,7 +1846,7 @@ private func workspaceConfigurations(
         #expect(manager.focusedHandle == handle)
     }
 
-    @Test @MainActor func removeWindowsForAppClearsFocusedAndRememberedHandles() {
+    @Test @MainActor func `remove windows for app clears focused and remembered handles`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = workspaceConfigurations([
@@ -1730,7 +1860,8 @@ private func workspaceConfigurations(
         manager.applyMonitorConfigurationChange([left, right])
 
         guard let ws1 = manager.workspaceId(for: "1", createIfMissing: true),
-              let ws2 = manager.workspaceId(for: "2", createIfMissing: true) else {
+              let ws2 = manager.workspaceId(for: "2", createIfMissing: true)
+        else {
             Issue.record("Failed to create workspaces")
             return
         }
@@ -1753,7 +1884,7 @@ private func workspaceConfigurations(
         #expect(manager.resolveWorkspaceFocus(in: ws2) == nil)
     }
 
-    @Test @MainActor func swapWorkspacesAcrossHomeMonitorsIsRejected() {
+    @Test @MainActor func `swap workspaces across home monitors is rejected`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = workspaceConfigurations([
@@ -1767,7 +1898,8 @@ private func workspaceConfigurations(
         manager.applyMonitorConfigurationChange([left, right])
 
         guard let ws1 = manager.workspaceId(for: "1", createIfMissing: true),
-              let ws2 = manager.workspaceId(for: "2", createIfMissing: true) else {
+              let ws2 = manager.workspaceId(for: "2", createIfMissing: true)
+        else {
             Issue.record("Failed to create workspaces")
             return
         }
@@ -1783,7 +1915,7 @@ private func workspaceConfigurations(
         #expect(manager.monitorId(for: ws2) == right.id)
     }
 
-    @Test @MainActor func viewportStatePersistsAcrossWorkspaceTransitions() {
+    @Test @MainActor func `viewport state persists across workspace transitions`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = [
@@ -1796,7 +1928,8 @@ private func workspaceConfigurations(
         manager.applyMonitorConfigurationChange([monitor])
 
         guard let ws1 = manager.workspaceId(for: "1", createIfMissing: true),
-              let ws2 = manager.workspaceId(for: "2", createIfMissing: true) else {
+              let ws2 = manager.workspaceId(for: "2", createIfMissing: true)
+        else {
             Issue.record("Failed to create workspaces")
             return
         }
@@ -1811,7 +1944,7 @@ private func workspaceConfigurations(
         #expect(manager.niriViewportState(for: ws1).activeColumnIndex == 2)
     }
 
-    @Test @MainActor func applyMonitorConfigurationChangeKeepsForcedWorkspaceAuthoritativeAfterRestore() {
+    @Test @MainActor func `apply monitor configuration change keeps forced workspace authoritative after restore`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = workspaceConfigurations([
@@ -1825,7 +1958,8 @@ private func workspaceConfigurations(
         manager.applyMonitorConfigurationChange([oldLeft, oldRight])
 
         guard let ws1 = manager.workspaceId(for: "1", createIfMissing: true),
-              let ws3 = manager.workspaceId(for: "3", createIfMissing: true) else {
+              let ws3 = manager.workspaceId(for: "3", createIfMissing: true)
+        else {
             Issue.record("Failed to create expected workspaces")
             return
         }
@@ -1848,7 +1982,7 @@ private func workspaceConfigurations(
         #expect(manager.activeWorkspace(on: newLeft.id)?.id != ws3)
     }
 
-    @Test @MainActor func applyMonitorConfigurationChangePreservesViewportStateOnReconnect() {
+    @Test @MainActor func `apply monitor configuration change preserves viewport state on reconnect`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = workspaceConfigurations([
@@ -1862,7 +1996,8 @@ private func workspaceConfigurations(
         manager.applyMonitorConfigurationChange([oldLeft, oldRight])
 
         guard let ws1 = manager.workspaceId(for: "1", createIfMissing: true),
-              let ws2 = manager.workspaceId(for: "2", createIfMissing: true) else {
+              let ws2 = manager.workspaceId(for: "2", createIfMissing: true)
+        else {
             Issue.record("Failed to create expected workspaces")
             return
         }
@@ -1896,7 +2031,7 @@ private func workspaceConfigurations(
         #expect(manager.niriViewportState(for: ws2).selectedNodeId == selectedNodeId)
     }
 
-    @Test @MainActor func reconnectRestoresPreviouslyVisibleWorkspaceWhenMonitorOwnsMultipleWorkspaces() {
+    @Test @MainActor func `reconnect restores previously visible workspace when monitor owns multiple workspaces`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = workspaceConfigurations([
@@ -1949,7 +2084,7 @@ private func workspaceConfigurations(
         #expect(manager.niriViewportState(for: ws3).selectedNodeId == selectedNodeId)
     }
 
-    @Test @MainActor func applyMonitorConfigurationChangeClearsInvalidPreviousInteractionMonitor() {
+    @Test @MainActor func `apply monitor configuration change clears invalid previous interaction monitor`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = workspaceConfigurations([
@@ -1963,7 +2098,8 @@ private func workspaceConfigurations(
         manager.applyMonitorConfigurationChange([left, right])
 
         guard let ws1 = manager.workspaceId(for: "1", createIfMissing: true),
-              let ws2 = manager.workspaceId(for: "2", createIfMissing: true) else {
+              let ws2 = manager.workspaceId(for: "2", createIfMissing: true)
+        else {
             Issue.record("Failed to create expected workspaces")
             return
         }
@@ -1978,7 +2114,7 @@ private func workspaceConfigurations(
         #expect(manager.previousInteractionMonitorId == nil)
     }
 
-    @Test @MainActor func applyMonitorConfigurationChangeNormalizesInvalidInteractionMonitor() {
+    @Test @MainActor func `apply monitor configuration change normalizes invalid interaction monitor`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = workspaceConfigurations([
@@ -2001,7 +2137,7 @@ private func workspaceConfigurations(
         #expect(manager.previousInteractionMonitorId == nil)
     }
 
-    @Test @MainActor func removingVisibleWorkspaceFallsBackToLowestAssignedIdOnMonitor() {
+    @Test @MainActor func `removing visible workspace falls back to lowest assigned id on monitor`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = workspaceConfigurations([
@@ -2033,7 +2169,7 @@ private func workspaceConfigurations(
         #expect(manager.workspaceId(named: "3") == nil)
     }
 
-    @Test @MainActor func configuredWorkspace10CanBeCreatedSortedAndFocused() {
+    @Test @MainActor func `configured workspace10 can be created sorted and focused`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = workspaceConfigurations([
@@ -2060,7 +2196,7 @@ private func workspaceConfigurations(
         #expect(manager.activeWorkspace(on: monitor.id)?.name == "10")
     }
 
-    @Test @MainActor func applySessionPatchCommitsViewportAndRememberedFocusAtomically() {
+    @Test @MainActor func `apply session patch commits viewport and remembered focus atomically`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = [
@@ -2096,7 +2232,63 @@ private func workspaceConfigurations(
         #expect(manager.lastFocusedToken(in: workspaceId) == handle.id)
     }
 
-    @Test @MainActor func applySessionTransferMovesViewportAndFocusMemoryTogether() {
+    @Test @MainActor func `apply session patch preserves current spring against stale gesture viewport`() {
+        let defaults = makeWorkspaceManagerTestDefaults()
+        let settings = SettingsStore(defaults: defaults)
+        settings.workspaceConfigurations = [
+            WorkspaceConfiguration(name: "1", monitorAssignment: .main)
+        ]
+
+        let manager = WorkspaceManager(settings: settings)
+        let monitor = makeWorkspaceManagerTestMonitor(displayId: 301, name: "Main", x: 0, y: 0)
+        manager.applyMonitorConfigurationChange([monitor])
+
+        guard let workspaceId = manager.workspaceId(for: "1", createIfMissing: true) else {
+            Issue.record("Failed to create workspace")
+            return
+        }
+
+        var currentState = manager.niriViewportState(for: workspaceId)
+        currentState.activeColumnIndex = 4
+        currentState.selectedNodeId = NodeId()
+        currentState.viewOffsetPixels = .spring(
+            SpringAnimation(
+                from: 24,
+                to: 96,
+                startTime: 0,
+                config: .snappy
+            )
+        )
+        manager.updateNiriViewportState(currentState, for: workspaceId)
+
+        var staleGestureState = ViewportState()
+        staleGestureState.activeColumnIndex = 1
+        let patchedSelection = NodeId()
+        staleGestureState.selectedNodeId = patchedSelection
+        staleGestureState.beginGesture(isTrackpad: true)
+
+        #expect(
+            manager.applySessionPatch(
+                .init(
+                    workspaceId: workspaceId,
+                    viewportState: staleGestureState,
+                    rememberedFocusToken: nil
+                )
+            )
+        )
+
+        let mergedState = manager.niriViewportState(for: workspaceId)
+        #expect(mergedState.activeColumnIndex == 4)
+        #expect(mergedState.selectedNodeId == patchedSelection)
+        switch mergedState.viewOffsetPixels {
+        case .spring:
+            break
+        default:
+            Issue.record("Expected the current spring animation to survive a stale gesture patch")
+        }
+    }
+
+    @Test @MainActor func `apply session transfer moves viewport and focus memory together`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = [
@@ -2110,7 +2302,8 @@ private func workspaceConfigurations(
         manager.applyMonitorConfigurationChange([left, right])
 
         guard let sourceWorkspaceId = manager.workspaceId(for: "1", createIfMissing: true),
-              let targetWorkspaceId = manager.workspaceId(for: "2", createIfMissing: true) else {
+              let targetWorkspaceId = manager.workspaceId(for: "2", createIfMissing: true)
+        else {
             Issue.record("Failed to create workspaces")
             return
         }
@@ -2153,7 +2346,7 @@ private func workspaceConfigurations(
         #expect(manager.lastFocusedToken(in: targetWorkspaceId) == targetHandle.id)
     }
 
-    @Test @MainActor func commitWorkspaceSelectionUpdatesSelectedNodeAndRememberedFocusAtomically() {
+    @Test @MainActor func `commit workspace selection updates selected node and remembered focus atomically`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = [
@@ -2184,7 +2377,7 @@ private func workspaceConfigurations(
         #expect(manager.lastFocusedToken(in: workspaceId) == handle.id)
     }
 
-    @Test @MainActor func scratchpadTokenRekeysAndClearsOnWindowRemoval() {
+    @Test @MainActor func `scratchpad token rekeys and clears on window removal`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = [

@@ -1196,6 +1196,225 @@ int32_t omniwm_workspace_navigation_plan(
     omniwm_workspace_navigation_output *output
 );
 
+enum {
+    OMNIWM_WORKSPACE_SESSION_OPERATION_PROJECT = 0,
+    OMNIWM_WORKSPACE_SESSION_OPERATION_RECONCILE_VISIBLE = 1,
+    OMNIWM_WORKSPACE_SESSION_OPERATION_ACTIVATE_WORKSPACE = 2,
+    OMNIWM_WORKSPACE_SESSION_OPERATION_SET_INTERACTION_MONITOR = 3,
+    OMNIWM_WORKSPACE_SESSION_OPERATION_RESOLVE_PREFERRED_FOCUS = 4,
+    OMNIWM_WORKSPACE_SESSION_OPERATION_RESOLVE_WORKSPACE_FOCUS = 5,
+    OMNIWM_WORKSPACE_SESSION_OPERATION_APPLY_SESSION_PATCH = 6,
+    OMNIWM_WORKSPACE_SESSION_OPERATION_RECONCILE_TOPOLOGY = 7,
+};
+
+enum {
+    OMNIWM_WORKSPACE_SESSION_OUTCOME_NOOP = 0,
+    OMNIWM_WORKSPACE_SESSION_OUTCOME_APPLY = 1,
+    OMNIWM_WORKSPACE_SESSION_OUTCOME_INVALID_TARGET = 2,
+    OMNIWM_WORKSPACE_SESSION_OUTCOME_INVALID_PATCH = 3,
+};
+
+enum {
+    OMNIWM_WORKSPACE_SESSION_ASSIGNMENT_UNCONFIGURED = 0,
+    OMNIWM_WORKSPACE_SESSION_ASSIGNMENT_MAIN = 1,
+    OMNIWM_WORKSPACE_SESSION_ASSIGNMENT_SECONDARY = 2,
+    OMNIWM_WORKSPACE_SESSION_ASSIGNMENT_SPECIFIC_DISPLAY = 3,
+};
+
+enum {
+    OMNIWM_WORKSPACE_SESSION_VIEWPORT_NONE = 0,
+    OMNIWM_WORKSPACE_SESSION_VIEWPORT_STATIC = 1,
+    OMNIWM_WORKSPACE_SESSION_VIEWPORT_GESTURE = 2,
+    OMNIWM_WORKSPACE_SESSION_VIEWPORT_SPRING = 3,
+};
+
+enum {
+    OMNIWM_WORKSPACE_SESSION_PATCH_VIEWPORT_NONE = 0,
+    OMNIWM_WORKSPACE_SESSION_PATCH_VIEWPORT_APPLY = 1,
+    OMNIWM_WORKSPACE_SESSION_PATCH_VIEWPORT_PRESERVE_CURRENT = 2,
+};
+
+enum {
+    OMNIWM_WORKSPACE_SESSION_FOCUS_CLEAR_NONE = 0,
+    OMNIWM_WORKSPACE_SESSION_FOCUS_CLEAR_PENDING = 1,
+    OMNIWM_WORKSPACE_SESSION_FOCUS_CLEAR_PENDING_AND_CONFIRMED = 2,
+};
+
+enum {
+    OMNIWM_WORKSPACE_SESSION_WINDOW_MODE_TILING = 0,
+    OMNIWM_WORKSPACE_SESSION_WINDOW_MODE_FLOATING = 1,
+};
+
+typedef struct {
+    uint32_t operation;
+    omniwm_uuid workspace_id;
+    uint32_t monitor_id;
+    omniwm_uuid focused_workspace_id;
+    omniwm_uuid pending_tiled_workspace_id;
+    omniwm_uuid confirmed_tiled_workspace_id;
+    omniwm_uuid confirmed_floating_workspace_id;
+    omniwm_window_token pending_tiled_focus_token;
+    omniwm_window_token confirmed_tiled_focus_token;
+    omniwm_window_token confirmed_floating_focus_token;
+    omniwm_window_token remembered_focus_token;
+    uint32_t interaction_monitor_id;
+    uint32_t previous_interaction_monitor_id;
+    uint32_t current_viewport_kind;
+    int32_t current_viewport_active_column_index;
+    uint32_t patch_viewport_kind;
+    int32_t patch_viewport_active_column_index;
+    uint8_t has_workspace_id;
+    uint8_t has_monitor_id;
+    uint8_t has_focused_workspace_id;
+    uint8_t has_pending_tiled_workspace_id;
+    uint8_t has_confirmed_tiled_workspace_id;
+    uint8_t has_confirmed_floating_workspace_id;
+    uint8_t has_pending_tiled_focus_token;
+    uint8_t has_confirmed_tiled_focus_token;
+    uint8_t has_confirmed_floating_focus_token;
+    uint8_t has_remembered_focus_token;
+    uint8_t has_interaction_monitor_id;
+    uint8_t has_previous_interaction_monitor_id;
+    uint8_t has_current_viewport_state;
+    uint8_t has_patch_viewport_state;
+    uint8_t should_update_interaction_monitor;
+    uint8_t preserve_previous_interaction_monitor;
+} omniwm_workspace_session_input;
+
+typedef struct {
+    uint32_t monitor_id;
+    double frame_min_x;
+    double frame_max_y;
+    double frame_width;
+    double frame_height;
+    double anchor_x;
+    double anchor_y;
+    omniwm_uuid visible_workspace_id;
+    omniwm_uuid previous_visible_workspace_id;
+    omniwm_restore_string_ref name;
+    uint8_t is_main;
+    uint8_t has_visible_workspace_id;
+    uint8_t has_previous_visible_workspace_id;
+    uint8_t has_name;
+} omniwm_workspace_session_monitor;
+
+typedef struct {
+    uint32_t monitor_id;
+    double frame_min_x;
+    double frame_max_y;
+    double frame_width;
+    double frame_height;
+    double anchor_x;
+    double anchor_y;
+    omniwm_uuid visible_workspace_id;
+    omniwm_uuid previous_visible_workspace_id;
+    omniwm_restore_string_ref name;
+    uint8_t has_visible_workspace_id;
+    uint8_t has_previous_visible_workspace_id;
+    uint8_t has_name;
+} omniwm_workspace_session_previous_monitor;
+
+typedef struct {
+    omniwm_uuid workspace_id;
+    uint32_t display_id;
+    double anchor_x;
+    double anchor_y;
+    double frame_width;
+    double frame_height;
+    omniwm_restore_string_ref name;
+    uint8_t has_name;
+} omniwm_workspace_session_disconnected_cache_entry;
+
+typedef struct {
+    omniwm_uuid workspace_id;
+    omniwm_point assigned_anchor_point;
+    uint32_t assignment_kind;
+    uint32_t specific_display_id;
+    omniwm_restore_string_ref specific_display_name;
+    omniwm_window_token remembered_tiled_focus_token;
+    omniwm_window_token remembered_floating_focus_token;
+    uint8_t has_assigned_anchor_point;
+    uint8_t has_specific_display_id;
+    uint8_t has_specific_display_name;
+    uint8_t has_remembered_tiled_focus_token;
+    uint8_t has_remembered_floating_focus_token;
+} omniwm_workspace_session_workspace;
+
+typedef struct {
+    omniwm_uuid workspace_id;
+    omniwm_window_token token;
+    uint32_t mode;
+    uint32_t order_index;
+    uint8_t has_hidden_proportional_position;
+    uint8_t hidden_reason_is_workspace_inactive;
+} omniwm_workspace_session_window_candidate;
+
+typedef struct {
+    uint32_t monitor_id;
+    omniwm_uuid visible_workspace_id;
+    omniwm_uuid previous_visible_workspace_id;
+    omniwm_uuid resolved_active_workspace_id;
+    uint8_t has_visible_workspace_id;
+    uint8_t has_previous_visible_workspace_id;
+    uint8_t has_resolved_active_workspace_id;
+} omniwm_workspace_session_monitor_result;
+
+typedef struct {
+    omniwm_uuid workspace_id;
+    uint32_t projected_monitor_id;
+    uint32_t home_monitor_id;
+    uint32_t effective_monitor_id;
+    uint8_t has_projected_monitor_id;
+    uint8_t has_home_monitor_id;
+    uint8_t has_effective_monitor_id;
+} omniwm_workspace_session_workspace_projection;
+
+typedef struct {
+    uint32_t source_kind;
+    uint32_t source_index;
+    omniwm_uuid workspace_id;
+} omniwm_workspace_session_disconnected_cache_result;
+
+typedef struct {
+    uint32_t outcome;
+    uint32_t patch_viewport_action;
+    uint32_t focus_clear_action;
+    uint32_t interaction_monitor_id;
+    uint32_t previous_interaction_monitor_id;
+    omniwm_window_token resolved_focus_token;
+    omniwm_workspace_session_monitor_result *monitor_results;
+    size_t monitor_result_capacity;
+    size_t monitor_result_count;
+    omniwm_workspace_session_workspace_projection *workspace_projections;
+    size_t workspace_projection_capacity;
+    size_t workspace_projection_count;
+    omniwm_workspace_session_disconnected_cache_result *disconnected_cache_results;
+    size_t disconnected_cache_result_capacity;
+    size_t disconnected_cache_result_count;
+    uint8_t has_interaction_monitor_id;
+    uint8_t has_previous_interaction_monitor_id;
+    uint8_t has_resolved_focus_token;
+    uint8_t should_remember_focus;
+    uint8_t refresh_restore_intents;
+} omniwm_workspace_session_output;
+
+int32_t omniwm_workspace_session_plan(
+    const omniwm_workspace_session_input *input,
+    const omniwm_workspace_session_monitor *monitors,
+    size_t monitor_count,
+    const omniwm_workspace_session_previous_monitor *previous_monitors,
+    size_t previous_monitor_count,
+    const omniwm_workspace_session_workspace *workspaces,
+    size_t workspace_count,
+    const omniwm_workspace_session_window_candidate *window_candidates,
+    size_t window_candidate_count,
+    const omniwm_workspace_session_disconnected_cache_entry *disconnected_cache_entries,
+    size_t disconnected_cache_entry_count,
+    const uint8_t *string_bytes,
+    size_t string_byte_count,
+    omniwm_workspace_session_output *output
+);
+
 typedef struct {
     omniwm_rect frame;
     omniwm_uuid workspace_id;
