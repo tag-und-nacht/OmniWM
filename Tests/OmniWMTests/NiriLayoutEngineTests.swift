@@ -645,6 +645,83 @@ private func makeCenteredCrossMonitorFixture(
         )
     }
 
+    @MainActor
+    private func makeFullscreenRestoreHandlerFixture(
+        visibleCount: Int = 2,
+        extraColumns: Int = 2
+    ) async throws -> (
+        controller: WMController,
+        engine: NiriLayoutEngine,
+        workspaceId: WorkspaceDescriptor.ID,
+        monitor: Monitor,
+        windows: [NiriWindow],
+        gap: CGFloat,
+        workingFrame: CGRect
+    ) {
+        let controller = makeLayoutPlanTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            fatalError("Missing monitor or active workspace for fullscreen restore handler fixture")
+        }
+
+        controller.enableNiriLayout(
+            maxWindowsPerColumn: 1,
+            centerFocusedColumn: .never,
+            alwaysCenterSingleColumn: false
+        )
+        controller.updateNiriConfig(
+            maxVisibleColumns: visibleCount,
+            centerFocusedColumn: .never,
+            alwaysCenterSingleColumn: false
+        )
+        await waitForLayoutPlanRefreshWork(on: controller)
+        controller.syncMonitorsToNiriEngine()
+
+        guard let engine = controller.niriEngine else {
+            fatalError("Expected Niri engine for fullscreen restore handler fixture")
+        }
+
+        for windowId in 820 ..< 820 + visibleCount + extraColumns {
+            _ = addLayoutPlanTestWindow(
+                on: controller,
+                workspaceId: workspaceId,
+                windowId: windowId
+            )
+        }
+
+        let initialPlans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
+            activeWorkspaces: [workspaceId]
+        )
+        await executeAndSettleLayoutPlans(initialPlans, on: controller)
+
+        let gap = CGFloat(controller.workspaceManager.gaps)
+        let workingFrame = controller.insetWorkingFrame(for: monitor)
+        let fixedWidth = (
+            workingFrame.width - gap * CGFloat(visibleCount - 1)
+        ) / CGFloat(visibleCount)
+
+        for column in engine.columns(in: workspaceId) {
+            column.width = .fixed(fixedWidth)
+            column.cachedWidth = fixedWidth
+        }
+
+        let refreshedPlans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
+            activeWorkspaces: [workspaceId]
+        )
+        await executeAndSettleLayoutPlans(refreshedPlans, on: controller)
+
+        return (
+            controller,
+            engine,
+            workspaceId,
+            monitor,
+            engine.columns(in: workspaceId).compactMap(\.windowNodes.first),
+            gap,
+            workingFrame
+        )
+    }
+
     private func makeViewportStateForVisibleColumn(
         targetWindow: NiriWindow,
         engine: NiriLayoutEngine,
@@ -3491,6 +3568,8 @@ private func makeCenteredCrossMonitorFixture(
     }
 
     @Test func fullscreenWindowsStayMonitorAnchoredAcrossVisibleColumns() {
+        // Direct engine coverage for fullscreen sizing/restore. The
+        // handler-driven immediate-relayout path is covered separately.
         for visibleCount in 2 ... 5 {
             let fixture = makeVisibleColumnFixture(visibleCount: visibleCount)
             let expectedFullscreenFrame = fixture.monitor.visibleFrame.roundedToPhysicalPixels(scale: fixture.area.scale)
@@ -3552,6 +3631,77 @@ private func makeCenteredCrossMonitorFixture(
 
                 #expect(restoredLayout.frames[targetWindow.token] == tiledFrame)
             }
+        }
+    }
+
+    @Test @MainActor func handlerFullscreenTogglePreservesRestoreOffsetAcrossImmediateRelayouts() async throws {
+        struct Scenario {
+            let label: String
+            let expectsNonZeroRestoreOffset: Bool
+        }
+
+        for scenario in [
+            Scenario(label: "right edge", expectsNonZeroRestoreOffset: true),
+            Scenario(label: "left edge", expectsNonZeroRestoreOffset: false),
+        ] {
+            let fixture = try await makeFullscreenRestoreHandlerFixture()
+            let targetWindow = if scenario.expectsNonZeroRestoreOffset {
+                fixture.windows[fixture.windows.index(before: fixture.windows.endIndex)]
+            } else {
+                fixture.windows[fixture.windows.startIndex]
+            }
+
+            selectWindowAndSettleViewport(
+                targetWindow,
+                in: fixture.workspaceId,
+                on: fixture.monitor,
+                engine: fixture.engine,
+                controller: fixture.controller
+            )
+
+            let selectedPlans = try await fixture.controller.niriLayoutHandler.layoutWithNiriEngine(
+                activeWorkspaces: [fixture.workspaceId]
+            )
+            await executeAndSettleLayoutPlans(selectedPlans, on: fixture.controller)
+
+            let columns = fixture.engine.columns(in: fixture.workspaceId)
+            let preEnterState = fixture.controller.workspaceManager.niriViewportState(for: fixture.workspaceId)
+            let preEnterOffset = preEnterState.viewOffsetPixels.target()
+            let preEnterViewStart = viewportStart(for: preEnterState, columns: columns, gap: fixture.gap)
+            let comment = Comment(rawValue: scenario.label)
+
+            if scenario.expectsNonZeroRestoreOffset {
+                #expect(abs(preEnterOffset) > 0.1, comment)
+            } else {
+                #expect(abs(preEnterOffset) < 0.1, comment)
+            }
+
+            fixture.controller.niriLayoutHandler.toggleFullscreen()
+            await fixture.controller.layoutRefreshController.waitForRefreshWorkForTests()
+
+            let enteredState = fixture.controller.workspaceManager.niriViewportState(for: fixture.workspaceId)
+            #expect(enteredState.selectedNodeId == targetWindow.id, comment)
+            guard let savedRestoreOffset = enteredState.viewOffsetToRestore else {
+                Issue.record("Missing saved fullscreen restore offset after enter-side relayout for \(scenario.label)")
+                continue
+            }
+
+            #expect(abs(savedRestoreOffset - preEnterOffset) < 0.1, comment)
+
+            fixture.controller.layoutRefreshController.settleAllAnimationsForTests()
+            fixture.controller.niriLayoutHandler.toggleFullscreen()
+            await fixture.controller.layoutRefreshController.waitForRefreshWorkForTests()
+
+            let exitedState = fixture.controller.workspaceManager.niriViewportState(for: fixture.workspaceId)
+            let exitedViewStart = viewportStart(
+                for: exitedState,
+                columns: fixture.engine.columns(in: fixture.workspaceId),
+                gap: fixture.gap
+            )
+
+            #expect(!exitedState.viewOffsetPixels.isAnimating, comment)
+            #expect(abs(exitedViewStart - preEnterViewStart) < 0.1, comment)
+            #expect(exitedState.viewOffsetToRestore == nil, comment)
         }
     }
 

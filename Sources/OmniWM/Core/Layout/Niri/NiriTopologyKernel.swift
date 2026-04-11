@@ -480,7 +480,6 @@ extension NiriLayoutEngine {
         if result.has_activate_prev_column_on_removal != 0 {
             state.activatePrevColumnOnRemoval = CGFloat(result.activate_prev_column_on_removal)
         }
-        state.viewOffsetToRestore = nil
         state.selectionProgress = 0
     }
 

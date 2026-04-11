@@ -102,7 +102,7 @@ extension NiriLayoutEngine {
             }
 
             if let savedOffset = state.viewOffsetToRestore {
-                state.animateViewOffsetRestore(savedOffset, motion: motion)
+                state.restoreViewOffset(savedOffset)
             }
         }
 

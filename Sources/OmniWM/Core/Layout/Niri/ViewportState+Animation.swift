@@ -111,35 +111,12 @@ extension ViewportState {
     }
 
     mutating func restoreViewOffset(_ offset: CGFloat) {
-        viewOffsetPixels = .static(offset)
-        viewOffsetToRestore = nil
-    }
-
-    mutating func animateViewOffsetRestore(_ offset: CGFloat, motion: MotionSnapshot) {
         guard !viewOffsetPixels.isGesture else {
             viewOffsetToRestore = nil
             return
         }
 
-        guard motion.animationsEnabled else {
-            viewOffsetPixels = .static(offset)
-            viewOffsetToRestore = nil
-            return
-        }
-
-        let now = animationClock?.now() ?? CACurrentMediaTime()
-        let currentOffset = viewOffsetPixels.current()
-        let velocity = viewOffsetPixels.currentVelocity()
-
-        let animation = SpringAnimation(
-            from: Double(currentOffset),
-            to: Double(offset),
-            initialVelocity: velocity,
-            startTime: now,
-            config: springConfig,
-            displayRefreshRate: displayRefreshRate
-        )
-        viewOffsetPixels = .spring(animation)
+        viewOffsetPixels = .static(offset)
         viewOffsetToRestore = nil
     }
 
