@@ -2,20 +2,15 @@ import Foundation
 
 public enum WorkspaceIDPolicy {
     public static func normalizeRawID(_ candidate: String) -> String? {
-        guard let value = Int(candidate), value > 0 else { return nil }
-        let normalized = String(value)
-        guard normalized == candidate else { return nil }
-        return normalized
+        ZigIPCSupport.normalizedWorkspaceID(candidate)
     }
 
     public static func rawID(from workspaceNumber: Int) -> String? {
-        guard workspaceNumber > 0 else { return nil }
-        return String(workspaceNumber)
+        ZigIPCSupport.workspaceID(fromNumber: workspaceNumber)
     }
 
     public static func workspaceNumber(from rawID: String) -> Int? {
-        guard let normalized = normalizeRawID(rawID) else { return nil }
-        return Int(normalized)
+        ZigIPCSupport.workspaceNumber(fromRawID: rawID)
     }
 
     public static func lowestUnusedRawID<S: Sequence>(in rawIDs: S) -> String where S.Element == String {

@@ -95,9 +95,18 @@ let package = Package(
         ),
         .target(
             name: "OmniWMIPC",
+            dependencies: ["COmniWMKernels"],
             path: "Sources/OmniWMIPC",
             swiftSettings: [
                 .swiftLanguageMode(.v6)
+            ],
+            linkerSettings: [
+                .linkedLibrary("omniwm_kernels"),
+                .unsafeFlags(zigKernelDebugLibraryFlags, .when(configuration: .debug)),
+                .unsafeFlags(zigKernelReleaseLibraryFlags, .when(configuration: .release))
+            ],
+            plugins: [
+                .plugin(name: "OmniWMKernelsBuildPlugin")
             ]
         ),
         .target(
@@ -145,6 +154,14 @@ let package = Package(
             path: "Sources/OmniWMCtl",
             swiftSettings: [
                 .swiftLanguageMode(.v6)
+            ],
+            linkerSettings: [
+                .linkedLibrary("omniwm_kernels"),
+                .unsafeFlags(zigKernelDebugLibraryFlags, .when(configuration: .debug)),
+                .unsafeFlags(zigKernelReleaseLibraryFlags, .when(configuration: .release))
+            ],
+            plugins: [
+                .plugin(name: "OmniWMKernelsBuildPlugin")
             ]
         ),
         .testTarget(
@@ -153,6 +170,14 @@ let package = Package(
             path: "Tests/OmniWMTests",
             swiftSettings: [
                 .swiftLanguageMode(.v6)
+            ],
+            linkerSettings: [
+                .linkedLibrary("omniwm_kernels"),
+                .unsafeFlags(zigKernelDebugLibraryFlags, .when(configuration: .debug)),
+                .unsafeFlags(zigKernelReleaseLibraryFlags, .when(configuration: .release))
+            ],
+            plugins: [
+                .plugin(name: "OmniWMKernelsBuildPlugin")
             ]
         )
     ]

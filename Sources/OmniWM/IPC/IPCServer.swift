@@ -63,13 +63,12 @@ final class IPCServer: IPCServerLifecycle {
     @MainActor
     func start() throws {
         try ensureSocketDirectoryExists()
-        try Self.removeExistingSocketIfNeeded(at: socketPath)
-        try removeExistingSecretIfNeeded()
+        try ZigIPCSupport.removeExistingSocketIfNeeded(at: socketPath)
 
         var bindError: Error?
         queue.sync {
             do {
-                let fd = try Self.makeListeningSocket(at: socketPath)
+                let fd = try ZigIPCSupport.makeListeningSocket(at: socketPath)
                 listenFD = fd
 
                 let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
@@ -139,12 +138,15 @@ final class IPCServer: IPCServerLifecycle {
                 return
             }
 
-            guard Self.isCurrentUser(clientFD) else {
+            guard ZigIPCSupport.isCurrentUser(clientFD) else {
                 close(clientFD)
                 continue
             }
 
-            Self.configureSocket(clientFD, nonBlocking: false)
+            guard (try? ZigIPCSupport.configureSocket(clientFD, nonBlocking: false)) != nil else {
+                close(clientFD)
+                continue
+            }
             let connectionRegistry = self.connectionRegistry
             let bridge = self.bridge
             Task {
@@ -175,158 +177,9 @@ final class IPCServer: IPCServerLifecycle {
     }
 
     @MainActor
-    private func removeExistingSecretIfNeeded() throws {
-        guard fileManager.fileExists(atPath: secretPath) else { return }
-        try fileManager.removeItem(atPath: secretPath)
-    }
-
-    @MainActor
     private func writeAuthorizationToken() throws {
-        let data = Data((authorizationToken + "\n").utf8)
-        guard fileManager.createFile(atPath: secretPath, contents: data, attributes: [.posixPermissions: 0o600]) else {
-            throw POSIXError(.EIO)
-        }
-        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: secretPath)
-    }
-
-    private static func removeExistingSocketIfNeeded(at path: String) throws {
-        var fileStatus = stat()
-        if lstat(path, &fileStatus) != 0 {
-            if errno == ENOENT {
-                return
-            }
-            let error = POSIXErrorCode(rawValue: errno) ?? .EIO
-            throw POSIXError(error)
-        }
-
-        let fileType = fileStatus.st_mode & S_IFMT
-        guard fileType == S_IFSOCK else {
-            throw POSIXError(.EEXIST)
-        }
-
-        if try isActiveSocket(at: path) {
-            throw POSIXError(.EADDRINUSE)
-        }
-
-        guard unlink(path) == 0 else {
-            let error = POSIXErrorCode(rawValue: errno) ?? .EIO
-            throw POSIXError(error)
-        }
-    }
-
-    private static func isActiveSocket(at path: String) throws -> Bool {
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else {
-            throw POSIXError(.EIO)
-        }
-        defer { close(fd) }
-
-        var address = try socketAddress(for: path)
-        let result = withUnsafePointer(to: &address) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { pointer in
-                connect(fd, pointer, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
-        }
-
-        if result == 0 {
-            return true
-        }
-
-        let error = POSIXErrorCode(rawValue: errno) ?? .EIO
-        switch error {
-        case .ECONNREFUSED, .ENOENT:
-            return false
-        default:
-            throw POSIXError(error)
-        }
-    }
-
-    private static func makeListeningSocket(at path: String) throws -> Int32 {
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else {
-            throw POSIXError(.EIO)
-        }
-
-        configureSocket(fd, nonBlocking: true)
-
-        var address = try socketAddress(for: path)
-        let bindResult = withUnsafePointer(to: &address) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { pointer in
-                bind(fd, pointer, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
-        }
-        guard bindResult == 0 else {
-            let error = POSIXErrorCode(rawValue: errno) ?? .EADDRINUSE
-            close(fd)
-            throw POSIXError(error)
-        }
-
-        if chmod(path, 0o600) != 0 {
-            let error = POSIXErrorCode(rawValue: errno) ?? .EPERM
-            close(fd)
-            throw POSIXError(error)
-        }
-
-        guard listen(fd, SOMAXCONN) == 0 else {
-            let error = POSIXErrorCode(rawValue: errno) ?? .ECONNREFUSED
-            close(fd)
-            throw POSIXError(error)
-        }
-
-        return fd
-    }
-
-    private static func socketAddress(for path: String) throws -> sockaddr_un {
-        var address = sockaddr_un()
-        address.sun_family = sa_family_t(AF_UNIX)
-
-        let utf8Path = Array(path.utf8)
-        let pathCapacity = MemoryLayout.size(ofValue: address.sun_path)
-        guard utf8Path.count < pathCapacity else {
-            throw POSIXError(.ENAMETOOLONG)
-        }
-
-        withUnsafeMutableBytes(of: &address.sun_path) { buffer in
-            buffer.initializeMemory(as: UInt8.self, repeating: 0)
-            for (index, byte) in utf8Path.enumerated() {
-                buffer[index] = byte
-            }
-        }
-
-        return address
-    }
-
-    private static func configureSocket(_ fd: Int32, nonBlocking: Bool) {
-        let existingFlags = fcntl(fd, F_GETFL, 0)
-        if existingFlags >= 0 {
-            let updatedFlags = nonBlocking ? (existingFlags | O_NONBLOCK) : (existingFlags & ~O_NONBLOCK)
-            _ = fcntl(fd, F_SETFL, updatedFlags)
-        }
-
-        let descriptorFlags = fcntl(fd, F_GETFD, 0)
-        if descriptorFlags >= 0 {
-            _ = fcntl(fd, F_SETFD, descriptorFlags | FD_CLOEXEC)
-        }
-
-        var noSigPipe: Int32 = 1
-        _ = withUnsafePointer(to: &noSigPipe) { pointer in
-            setsockopt(
-                fd,
-                SOL_SOCKET,
-                SO_NOSIGPIPE,
-                pointer,
-                socklen_t(MemoryLayout<Int32>.size)
-            )
-        }
-    }
-
-    private static func isCurrentUser(_ fd: Int32) -> Bool {
-        var effectiveUserID: uid_t = 0
-        var groupID: gid_t = 0
-        guard getpeereid(fd, &effectiveUserID, &groupID) == 0 else {
-            return false
-        }
-        return effectiveUserID == geteuid()
+        _ = fileManager
+        try ZigIPCSupport.writeSecretToken(authorizationToken, forSocketPath: socketPath)
     }
 
     private var secretPath: String {

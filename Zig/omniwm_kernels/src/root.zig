@@ -1,5 +1,6 @@
 const std = @import("std");
 const dwindle_layout = @import("dwindle_layout.zig");
+const ipc_support = @import("ipc_support.zig");
 const niri_layout = @import("niri_layout.zig");
 const niri_topology = @import("niri_topology.zig");
 const orchestration = @import("orchestration.zig");
@@ -13,6 +14,7 @@ const workspace_session = @import("workspace_session.zig");
 
 comptime {
     _ = dwindle_layout;
+    _ = ipc_support;
     _ = niri_layout;
     _ = niri_topology;
     _ = orchestration;

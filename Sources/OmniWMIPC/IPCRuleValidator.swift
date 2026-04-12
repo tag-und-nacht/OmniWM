@@ -15,27 +15,17 @@ public struct IPCRuleValidationReport: Equatable, Sendable {
 }
 
 public enum IPCRuleValidator {
-    private static let appIdentifierPattern: NSRegularExpression = {
-        do {
-            return try NSRegularExpression(
-                pattern: "^[a-zA-Z0-9]+([.-][a-zA-Z0-9]+)*$"
-            )
-        } catch {
-            preconditionFailure("Invalid app identifier regex: \(error)")
-        }
-    }()
-
     public static func bundleIdError(for bundleId: String) -> String? {
-        let trimmed = bundleId.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
+        switch ZigIPCSupport.bundleIDValidationCode(for: bundleId) {
+        case ZigIPCSupport.bundleIDValidationNone:
+            return nil
+        case ZigIPCSupport.bundleIDValidationRequired:
             return "Bundle ID is required"
-        }
-
-        let range = NSRange(trimmed.startIndex..., in: trimmed)
-        guard appIdentifierPattern.firstMatch(in: trimmed, range: range) != nil else {
+        case ZigIPCSupport.bundleIDValidationInvalid:
+            return "Invalid bundle ID format"
+        default:
             return "Invalid bundle ID format"
         }
-        return nil
     }
 
     public static func invalidRegexMessage(for pattern: String?) -> String? {

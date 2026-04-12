@@ -175,16 +175,20 @@ actor IPCConnection {
 
     nonisolated private static func readNextLine(from fileDescriptor: Int32, buffer: inout Data) throws -> String? {
         while true {
-            if let newlineIndex = buffer.firstIndex(of: 0x0A) {
-                guard newlineIndex <= maxRequestLineBytes else {
-                    throw ReadLoopError.requestTooLarge
-                }
+            switch ZigIPCSupport.scanLine(in: buffer, maxLineBytes: maxRequestLineBytes) {
+            case let .line(newlineIndex):
                 let lineData = buffer.prefix(upTo: newlineIndex)
                 buffer.removeSubrange(...newlineIndex)
                 guard let line = String(data: lineData, encoding: .utf8) else {
                     throw POSIXError(.EINVAL)
                 }
                 return line
+            case .overflow:
+                throw ReadLoopError.requestTooLarge
+            case .invalidArgument:
+                throw POSIXError(.EINVAL)
+            case .noNewline:
+                break
             }
 
             guard let chunk = try readChunk(from: fileDescriptor), !chunk.isEmpty else {
@@ -198,17 +202,6 @@ actor IPCConnection {
             }
 
             buffer.append(chunk)
-
-            if let newlineIndex = buffer.firstIndex(of: 0x0A) {
-                guard newlineIndex <= maxRequestLineBytes else {
-                    throw ReadLoopError.requestTooLarge
-                }
-                continue
-            }
-
-            if buffer.count > maxRequestLineBytes {
-                throw ReadLoopError.requestTooLarge
-            }
         }
     }
 

@@ -1930,6 +1930,75 @@ int32_t omniwm_orchestration_get_abi_layout(
     omniwm_orchestration_abi_layout_info *out_layout
 );
 
+enum {
+    OMNIWM_IPC_BUNDLE_ID_ERROR_NONE = 0,
+    OMNIWM_IPC_BUNDLE_ID_ERROR_REQUIRED = 1,
+    OMNIWM_IPC_BUNDLE_ID_ERROR_INVALID = 2,
+};
+
+enum {
+    OMNIWM_IPC_LINE_SCAN_NO_NEWLINE = -1,
+    OMNIWM_IPC_LINE_SCAN_OVERFLOW = -2,
+    OMNIWM_IPC_LINE_SCAN_INVALID_ARGUMENT = -3,
+};
+
+int64_t omniwm_ipc_resolved_socket_path(
+    const char *override_path,
+    const char *home_path,
+    char *output,
+    size_t output_capacity
+);
+
+int64_t omniwm_ipc_secret_path(
+    const char *socket_path,
+    char *output,
+    size_t output_capacity
+);
+
+uint32_t omniwm_ipc_bundle_id_validation_code(const char *bundle_id);
+
+int64_t omniwm_ipc_automation_manifest_json(
+    char *output,
+    size_t output_capacity
+);
+
+int64_t omniwm_workspace_id_normalize(
+    const char *candidate,
+    char *output,
+    size_t output_capacity
+);
+
+int64_t omniwm_workspace_id_from_number(
+    uint64_t workspace_number,
+    char *output,
+    size_t output_capacity
+);
+
+uint8_t omniwm_workspace_number_from_raw_id(
+    const char *raw_id,
+    uint64_t *workspace_number
+);
+
+int64_t omniwm_ipc_find_newline(
+    const uint8_t *bytes,
+    size_t byte_count,
+    size_t max_line_bytes
+);
+
+int32_t omniwm_ipc_socket_connect(const char *path);
+int32_t omniwm_ipc_socket_make_listening(const char *path);
+int32_t omniwm_ipc_socket_remove_existing_if_needed(const char *path);
+int32_t omniwm_ipc_socket_is_active(const char *path);
+int32_t omniwm_ipc_socket_configure(int32_t fd, uint8_t non_blocking);
+int32_t omniwm_ipc_socket_is_current_user(int32_t fd);
+int32_t omniwm_ipc_write_secret_token(const char *socket_path, const char *token);
+
+int64_t omniwm_ipc_read_secret_token_for_socket(
+    const char *socket_path,
+    char *output,
+    size_t output_capacity
+);
+
 #ifdef __cplusplus
 }
 #endif

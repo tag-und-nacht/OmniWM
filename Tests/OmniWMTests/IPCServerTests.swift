@@ -545,7 +545,7 @@ private func makeTestFocusEvent(id: String, title: String) -> IPCEventEnvelope {
                 sessionToken: ipcServerTestSessionToken
             ))
             #expect(payload.windows.first?.workspace?.rawName == "1")
-            #expect(payload.windows.first?.display?.id == "display:1")
+            #expect(payload.windows.first?.display?.id == "display:\(layoutPlanTestMainDisplayId())")
             #expect(payload.windows.first?.app?.bundleId == "com.example.terminal")
         } else {
             Issue.record("Expected windows payload")

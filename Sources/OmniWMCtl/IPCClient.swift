@@ -18,59 +18,10 @@ struct IPCClient {
     }
 
     func openConnection() throws -> IPCClientConnection {
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else {
-            throw POSIXError(.EIO)
-        }
-        configureSocket(fd)
-
-        var address = sockaddr_un()
-        address.sun_family = sa_family_t(AF_UNIX)
-
-        let utf8Path = Array(socketPath.utf8)
-        let pathCapacity = MemoryLayout.size(ofValue: address.sun_path)
-        guard utf8Path.count < pathCapacity else {
-            close(fd)
-            throw POSIXError(.ENAMETOOLONG)
-        }
-
-        withUnsafeMutableBytes(of: &address.sun_path) { buffer in
-            buffer.initializeMemory(as: UInt8.self, repeating: 0)
-            for (index, byte) in utf8Path.enumerated() {
-                buffer[index] = byte
-            }
-        }
-
-        let addressLength = socklen_t(MemoryLayout<sockaddr_un>.size)
-        let result = withUnsafePointer(to: &address) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { pointer in
-                connect(fd, pointer, addressLength)
-            }
-        }
-
-        guard result == 0 else {
-            let error = POSIXErrorCode(rawValue: errno) ?? .ECONNREFUSED
-            close(fd)
-            throw POSIXError(error)
-        }
-
         return IPCClientConnection(
-            handle: FileHandle(fileDescriptor: fd, closeOnDealloc: true),
+            handle: FileHandle(fileDescriptor: try ZigIPCSupport.connectSocket(at: socketPath), closeOnDealloc: true),
             authorizationToken: resolvedAuthorizationToken()
         )
-    }
-
-    private func configureSocket(_ fd: Int32) {
-        var noSigPipe: Int32 = 1
-        _ = withUnsafePointer(to: &noSigPipe) { pointer in
-            setsockopt(
-                fd,
-                SOL_SOCKET,
-                SO_NOSIGPIPE,
-                pointer,
-                socklen_t(MemoryLayout<Int32>.size)
-            )
-        }
     }
 
     private func resolvedAuthorizationToken() -> String? {
@@ -78,15 +29,8 @@ struct IPCClient {
             return authorizationToken
         }
 
-        let secretPath = IPCSocketPath.secretPath(forSocketPath: socketPath)
-        guard let data = fileManager.contents(atPath: secretPath),
-              let token = String(data: data, encoding: .utf8)?
-              .trimmingCharacters(in: .whitespacesAndNewlines),
-              !token.isEmpty
-        else {
-            return nil
-        }
-        return token
+        _ = fileManager
+        return ZigIPCSupport.readSecretToken(forSocketPath: socketPath)
     }
 }
 
@@ -180,13 +124,18 @@ actor IPCClientConnection {
 
     private func readNextLine() throws -> String? {
         while true {
-            if let newlineIndex = readBuffer.firstIndex(of: 0x0A) {
+            switch ZigIPCSupport.scanLine(in: readBuffer, maxLineBytes: .max) {
+            case let .line(newlineIndex):
                 let lineData = readBuffer.prefix(upTo: newlineIndex)
                 readBuffer.removeSubrange(...newlineIndex)
                 guard let line = String(data: lineData, encoding: .utf8) else {
                     throw POSIXError(.EINVAL)
                 }
                 return line
+            case .overflow, .invalidArgument:
+                throw POSIXError(.EINVAL)
+            case .noNewline:
+                break
             }
 
             guard let chunk = try readChunk(), !chunk.isEmpty else {
