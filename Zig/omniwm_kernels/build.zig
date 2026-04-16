@@ -9,19 +9,18 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    module.linkSystemLibrary("c", .{});
 
     const lib = b.addLibrary(.{
         .name = "omniwm_kernels",
         .linkage = .static,
         .root_module = module,
     });
-    lib.linkLibC();
     b.installArtifact(lib);
 
     const tests = b.addTest(.{
         .root_module = module,
     });
-    tests.linkLibC();
 
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run OmniWM kernel Zig tests");

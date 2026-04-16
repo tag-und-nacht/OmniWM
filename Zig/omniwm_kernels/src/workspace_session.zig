@@ -1344,7 +1344,7 @@ fn reconcileTopologyPlan(
     string_bytes: []const u8,
     output: *Output,
 ) KernelError!u32 {
-    var cache_results = std.ArrayListUnmanaged(DisconnectedCacheResult){};
+    var cache_results = std.ArrayListUnmanaged(DisconnectedCacheResult).empty;
     defer cache_results.deinit(allocator);
 
     const topology_changed = !(try topologyEquivalent(previous_monitors, monitors, string_bytes));
@@ -1385,9 +1385,9 @@ fn reconcileTopologyPlan(
         new_contexts[index] = restoreMonitorContextFromMonitorInput(monitor.input);
     }
 
-    var visible_snapshots = std.ArrayListUnmanaged(RestoreVisibleWorkspaceSnapshot){};
+    var visible_snapshots = std.ArrayListUnmanaged(RestoreVisibleWorkspaceSnapshot).empty;
     defer visible_snapshots.deinit(allocator);
-    var visible_penalties = std.ArrayListUnmanaged(u8){};
+    var visible_penalties = std.ArrayListUnmanaged(u8).empty;
     defer visible_penalties.deinit(allocator);
     for (previous_monitors) |monitor| {
         if (monitor.has_visible_workspace_id == 0) {

@@ -937,16 +937,16 @@ fn planTopologyInternal(
         output.disconnected_cache_capacity,
     );
 
-    var visible_assignments = std.ArrayListUnmanaged(VisibleAssignmentRecord){};
+    var visible_assignments = std.ArrayListUnmanaged(VisibleAssignmentRecord).empty;
     defer visible_assignments.deinit(allocator);
 
-    var filtered_snapshots = std.ArrayListUnmanaged(RestoreSnapshot){};
+    var filtered_snapshots = std.ArrayListUnmanaged(RestoreSnapshot).empty;
     defer filtered_snapshots.deinit(allocator);
-    var filtered_workspace_ids = std.ArrayListUnmanaged(UUID){};
+    var filtered_workspace_ids = std.ArrayListUnmanaged(UUID).empty;
     defer filtered_workspace_ids.deinit(allocator);
-    var filtered_penalties = std.ArrayListUnmanaged(u8){};
+    var filtered_penalties = std.ArrayListUnmanaged(u8).empty;
     defer filtered_penalties.deinit(allocator);
-    var seen_workspace_ids = std.ArrayListUnmanaged(UUID){};
+    var seen_workspace_ids = std.ArrayListUnmanaged(UUID).empty;
     defer seen_workspace_ids.deinit(allocator);
 
     for (visible_workspaces, 0..) |visible, visible_index| {
@@ -985,7 +985,7 @@ fn planTopologyInternal(
     }
 
     if (filtered_snapshots.items.len > 0 and new_monitors.len > 0) {
-        var raw_monitors = std.ArrayListUnmanaged(RestoreMonitor){};
+        var raw_monitors = std.ArrayListUnmanaged(RestoreMonitor).empty;
         defer raw_monitors.deinit(allocator);
         raw_monitors.ensureTotalCapacity(allocator, new_monitors.len) catch {
             return error.AllocationFailed;
@@ -1044,7 +1044,7 @@ fn planTopologyInternal(
         }
     }
 
-    var disconnected_cache = std.ArrayListUnmanaged(CacheRecord){};
+    var disconnected_cache = std.ArrayListUnmanaged(CacheRecord).empty;
     defer disconnected_cache.deinit(allocator);
     disconnected_cache.ensureTotalCapacity(allocator, cache_entries.len) catch return error.AllocationFailed;
     for (cache_entries, 0..) |entry, index| {
@@ -1056,7 +1056,7 @@ fn planTopologyInternal(
         });
     }
 
-    var migrations = std.ArrayListUnmanaged(MigrationRecord){};
+    var migrations = std.ArrayListUnmanaged(MigrationRecord).empty;
     defer migrations.deinit(allocator);
     for (previous_monitors, 0..) |previous_monitor, previous_index| {
         var survives = false;
@@ -1167,7 +1167,7 @@ fn planTopologyInternal(
         }
     }
 
-    var filtered_cache = std.ArrayListUnmanaged(CacheRecord){};
+    var filtered_cache = std.ArrayListUnmanaged(CacheRecord).empty;
     defer filtered_cache.deinit(allocator);
     for (disconnected_cache.items) |entry| {
         if (!workspaceExists(entry.workspace_id, workspace_facts)) {
