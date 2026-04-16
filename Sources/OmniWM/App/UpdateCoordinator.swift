@@ -147,16 +147,11 @@ final class UpdateCoordinator: AppUpdateCoordinating {
         case manual
     }
 
-    private enum LocalKeys {
-        static let lastCheckedAt = "updater.lastCheckedAt"
-        static let skippedReleaseTag = "updater.skippedReleaseTag"
-    }
-
     static let homebrewUpdateCommand = "brew upgrade omniwm"
     static let releasesPageURL = URL(string: "https://github.com/BarutSRB/OmniWM/releases")!
 
     private let settings: SettingsStore
-    private let defaults: UserDefaults
+    private let runtimeState: RuntimeStateStore
     private let releaseService: any GitHubReleaseFetching
     private let currentVersionProvider: () -> ReleaseVersion?
     private let currentVersionStringProvider: () -> String
@@ -171,7 +166,7 @@ final class UpdateCoordinator: AppUpdateCoordinating {
 
     init(
         settings: SettingsStore,
-        defaults: UserDefaults = .standard,
+        runtimeState: RuntimeStateStore = RuntimeStateStore(),
         releaseService: any GitHubReleaseFetching = GitHubReleaseService(
             userAgent: "OmniWM/\(Bundle.main.appVersion ?? "unknown")"
         ),
@@ -198,7 +193,7 @@ final class UpdateCoordinator: AppUpdateCoordinating {
         }
     ) {
         self.settings = settings
-        self.defaults = defaults
+        self.runtimeState = runtimeState
         self.releaseService = releaseService
         self.currentVersionProvider = currentVersionProvider
         self.currentVersionStringProvider = currentVersionStringProvider
@@ -248,12 +243,12 @@ final class UpdateCoordinator: AppUpdateCoordinating {
         do {
             let release = try await releaseService.fetchLatestRelease()
             if source == .automatic {
-                defaults.set(checkStartedAt, forKey: LocalKeys.lastCheckedAt)
+                runtimeState.updaterLastCheckedAt = checkStartedAt
             }
             handleFetchedRelease(release, currentVersion: currentVersion, source: source)
         } catch {
             if source == .automatic {
-                defaults.set(checkStartedAt, forKey: LocalKeys.lastCheckedAt)
+                runtimeState.updaterLastCheckedAt = checkStartedAt
                 return
             }
 
@@ -345,7 +340,7 @@ final class UpdateCoordinator: AppUpdateCoordinating {
 
     private func handleSkipThisVersion(for release: GitHubRelease) {
         if let version = release.version {
-            defaults.set(version.normalizedString, forKey: LocalKeys.skippedReleaseTag)
+            runtimeState.updaterSkippedReleaseTag = version.normalizedString
         }
         windowController.close(markingActionHandled: true)
     }
@@ -363,11 +358,11 @@ final class UpdateCoordinator: AppUpdateCoordinating {
         source: AutomaticCheckSource
     ) {
         guard source == .automatic, let version = release.version else { return }
-        defaults.set(version.normalizedString, forKey: LocalKeys.skippedReleaseTag)
+        runtimeState.updaterSkippedReleaseTag = version.normalizedString
     }
 
     private func shouldPerformAutomaticCheck() -> Bool {
-        guard let lastCheckedAt = defaults.object(forKey: LocalKeys.lastCheckedAt) as? Date else {
+        guard let lastCheckedAt = runtimeState.updaterLastCheckedAt else {
             return true
         }
         return nowProvider().timeIntervalSince(lastCheckedAt) >= 86_400
@@ -386,7 +381,7 @@ final class UpdateCoordinator: AppUpdateCoordinating {
     }
 
     private var skippedReleaseTag: String? {
-        defaults.string(forKey: LocalKeys.skippedReleaseTag)
+        runtimeState.updaterSkippedReleaseTag
     }
 
     private func validatedReleasePageURL(for release: GitHubRelease) -> URL {

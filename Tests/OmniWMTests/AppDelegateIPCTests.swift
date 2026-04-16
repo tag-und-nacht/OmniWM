@@ -44,6 +44,7 @@ private final class TestUpdateCoordinator: AppUpdateCoordinating {
     @Test func finishBootstrapStartsIPCOnlyAfterStatusBarSetup() {
         let defaults = makeLayoutPlanTestDefaults()
         SettingsStore(defaults: defaults).ipcEnabled = true
+        let configurationDirectory = configurationDirectoryForTests(defaults: defaults)
         var bootstrappedController: WMController?
         var observedControllerStatusBar = false
         var observedImagePosition: NSControl.ImagePosition?
@@ -60,7 +61,7 @@ private final class TestUpdateCoordinator: AppUpdateCoordinating {
         }
 
         let appDelegate = AppDelegate()
-        appDelegate.finishBootstrap(defaults: defaults)
+        appDelegate.finishBootstrap(configurationDirectory: configurationDirectory)
 
         #expect(observedControllerStatusBar)
         #expect(observedImagePosition != nil)
@@ -68,6 +69,7 @@ private final class TestUpdateCoordinator: AppUpdateCoordinating {
 
     @Test func finishBootstrapLeavesIPCStoppedWhenDisabledByDefault() {
         let defaults = makeLayoutPlanTestDefaults()
+        let configurationDirectory = configurationDirectoryForTests(defaults: defaults)
         var observedStart = false
         AppDelegate.ipcServerFactoryForTests = { _ in
             TestIPCServer {
@@ -79,13 +81,14 @@ private final class TestUpdateCoordinator: AppUpdateCoordinating {
         }
 
         let appDelegate = AppDelegate()
-        appDelegate.finishBootstrap(defaults: defaults)
+        appDelegate.finishBootstrap(configurationDirectory: configurationDirectory)
 
         #expect(observedStart == false)
     }
 
     @Test func finishBootstrapStartsUpdateChecksOnlyAfterStatusBarSetup() {
         let defaults = makeLayoutPlanTestDefaults()
+        let configurationDirectory = configurationDirectoryForTests(defaults: defaults)
         var observedControllerStatusBar = false
         var bootstrappedController: WMController?
         AppDelegate.updateCoordinatorFactoryForTests = { _, controller, _ in
@@ -100,7 +103,7 @@ private final class TestUpdateCoordinator: AppUpdateCoordinating {
         }
 
         let appDelegate = AppDelegate()
-        appDelegate.finishBootstrap(defaults: defaults)
+        appDelegate.finishBootstrap(configurationDirectory: configurationDirectory)
 
         #expect(observedControllerStatusBar)
     }
@@ -108,6 +111,7 @@ private final class TestUpdateCoordinator: AppUpdateCoordinating {
     @Test func finishBootstrapMakesIPCReachableAndTerminateUnlinksSocket() async throws {
         let defaults = makeLayoutPlanTestDefaults()
         SettingsStore(defaults: defaults).ipcEnabled = true
+        let configurationDirectory = configurationDirectoryForTests(defaults: defaults)
         let socketPath = makeAppDelegateIPCTestSocketPath()
         var bootstrappedController: WMController?
         AppDelegate.ipcServerFactoryForTests = { controller in
@@ -127,7 +131,7 @@ private final class TestUpdateCoordinator: AppUpdateCoordinating {
         let appDelegate = AppDelegate()
         #expect(!FileManager.default.fileExists(atPath: socketPath))
 
-        appDelegate.finishBootstrap(defaults: defaults)
+        appDelegate.finishBootstrap(configurationDirectory: configurationDirectory)
 
         #expect(FileManager.default.fileExists(atPath: socketPath))
 

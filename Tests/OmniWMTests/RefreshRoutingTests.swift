@@ -76,7 +76,13 @@ private func makeRefreshTestController(
         focusSpecificWindow: { _, _, _ in },
         raiseWindow: { _ in }
     )
-    let settings = SettingsStore(defaults: makeRefreshTestDefaults())
+    let defaults = makeRefreshTestDefaults()
+    let directory = configurationDirectoryForTests(defaults: defaults)
+    let settings = SettingsStore(
+        persistence: SettingsFilePersistence(directory: directory, startWatching: false),
+        runtimeState: RuntimeStateStore(directory: directory),
+        autosaveEnabled: false
+    )
     settings.workspaceConfigurations = workspaceConfigurations
     let controller = WMController(
         settings: settings,

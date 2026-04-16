@@ -7,20 +7,6 @@ protocol MonitorSettingsType: Codable, Identifiable, Equatable {
 }
 
 enum MonitorSettingsStore {
-    static func load<T: MonitorSettingsType>(from defaults: UserDefaults, key: String) -> [T] {
-        guard let data = defaults.data(forKey: key),
-              let settings = try? JSONDecoder().decode([T].self, from: data)
-        else {
-            return []
-        }
-        return settings
-    }
-
-    static func save<T: MonitorSettingsType>(_ settings: [T], to defaults: UserDefaults, key: String) {
-        guard let data = try? JSONEncoder().encode(settings) else { return }
-        defaults.set(data, forKey: key)
-    }
-
     static func get<T: MonitorSettingsType>(for monitor: Monitor, in settings: [T]) -> T? {
         settings.first(where: { $0.monitorDisplayId == monitor.displayId })
     }

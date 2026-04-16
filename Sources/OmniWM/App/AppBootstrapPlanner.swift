@@ -2,7 +2,6 @@ import Foundation
 
 enum AppBootstrapDecision: Equatable {
     case boot
-    case requireSettingsReset(storedEpoch: Int?)
     case requireDisplaysHaveSeparateSpacesDisabled
 }
 
@@ -31,18 +30,11 @@ struct DisplaysHaveSeparateSpacesRequirement {
 
 enum AppBootstrapPlanner {
     static func decision(
-        appDefaults: UserDefaults = .standard,
         spacesRequirement: DisplaysHaveSeparateSpacesRequirement = .init()
     ) -> AppBootstrapDecision {
         guard spacesRequirement.isSatisfied() else {
             return .requireDisplaysHaveSeparateSpacesDisabled
         }
-
-        switch SettingsMigration.startupDecision(defaults: appDefaults) {
-        case .boot:
-            return .boot
-        case let .requireReset(storedEpoch):
-            return .requireSettingsReset(storedEpoch: storedEpoch)
-        }
+        return .boot
     }
 }

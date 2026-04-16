@@ -27,7 +27,6 @@ struct GeneralSettingsTab: View {
     @Bindable var settings: SettingsStore
     @Bindable var controller: WMController
     let updateCoordinator: (any AppUpdateCoordinating)?
-    @State private var exportStatus: ExportStatus?
 
     var body: some View {
         let animationsEnabled = Binding(
@@ -195,53 +194,25 @@ struct GeneralSettingsTab: View {
 
             Section("Config File") {
                 HStack {
-                    Button("Export Editable Config") {
-                        performConfigFileAction(.export(.full))
-                    }
-
-                    Button("Export Compact Backup") {
-                        performConfigFileAction(.export(.compact))
-                    }
-
-                    Button("Import Settings") {
-                        performConfigFileAction(.import)
-                    }
-                    .disabled(!settings.settingsFileExists)
-                }
-
-                HStack {
-                    if !settings.settingsFileExists {
-                        Button("Create Config File") {
-                            performConfigFileAction(.create)
-                        }
-                    }
-
                     Button("Reveal Settings File") {
-                        performConfigFileAction(.reveal)
+                        NSWorkspace.shared.activateFileViewerSelecting([settings.settingsFileURL])
                     }
 
                     Button("Open Settings File") {
-                        performConfigFileAction(.open)
+                        _ = NSWorkspace.shared.open(settings.settingsFileURL)
                     }
                 }
 
                 Text(
-                    "Editable Config writes the full canonical file. Compact Backup writes "
-                        + "only settings that differ from defaults. Import merges either "
-                        + "file back into the full settings model."
+                    "OmniWM stores editable settings in a single canonical JSON file that reloads live when you save it."
                 )
                     .font(.caption)
                     .foregroundColor(.secondary)
 
-                Text("~/.config/omniwm/settings.json")
+                Text(settings.settingsFileURL.path)
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .textSelection(.enabled)
-
-                if let status = exportStatus {
-                    Label(status.message, systemImage: status.icon)
-                        .foregroundColor(status.color)
-                }
             }
         }
         .formStyle(.grouped)
@@ -254,18 +225,6 @@ struct GeneralSettingsTab: View {
             top: settings.outerGapTop,
             bottom: settings.outerGapBottom
         )
-    }
-
-    private func performConfigFileAction(_ action: ConfigFileAction) {
-        do {
-            exportStatus = try ConfigFileWorkflow.perform(
-                action,
-                settings: settings,
-                controller: controller
-            )
-        } catch {
-            exportStatus = .error(error.localizedDescription)
-        }
     }
 }
 

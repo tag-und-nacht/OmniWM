@@ -4,382 +4,397 @@ import OmniWMIPC
 
 @MainActor @Observable
 final class SettingsStore {
-    private let defaults: UserDefaults
+    nonisolated private static let defaultExport = SettingsExport.defaults()
+
+    private let persistence: SettingsFilePersistence
+    private let runtimeState: RuntimeStateStore
+    private let autosaveEnabled: Bool
+    private var isApplyingExport = false
 
     var onIPCEnabledChanged: (@MainActor (Bool) -> Void)?
+    var onExternalSettingsReloaded: (@MainActor () -> Void)?
 
-    var hotkeysEnabled: Bool {
-        didSet { defaults.set(hotkeysEnabled, forKey: Keys.hotkeysEnabled) }
+    var hotkeysEnabled = SettingsStore.defaultExport.hotkeysEnabled {
+        didSet { scheduleSave() }
     }
 
-    var focusFollowsMouse: Bool {
-        didSet { defaults.set(focusFollowsMouse, forKey: Keys.focusFollowsMouse) }
+    var focusFollowsMouse = SettingsStore.defaultExport.focusFollowsMouse {
+        didSet { scheduleSave() }
     }
 
-    var moveMouseToFocusedWindow: Bool {
-        didSet { defaults.set(moveMouseToFocusedWindow, forKey: Keys.moveMouseToFocusedWindow) }
+    var moveMouseToFocusedWindow = SettingsStore.defaultExport.moveMouseToFocusedWindow {
+        didSet { scheduleSave() }
     }
 
-    var focusFollowsWindowToMonitor: Bool {
-        didSet { defaults.set(focusFollowsWindowToMonitor, forKey: Keys.focusFollowsWindowToMonitor) }
+    var focusFollowsWindowToMonitor = SettingsStore.defaultExport.focusFollowsWindowToMonitor {
+        didSet { scheduleSave() }
     }
 
-    var mouseWarpMonitorOrder: [String] {
-        didSet { saveMouseWarpMonitorOrder() }
+    var mouseWarpMonitorOrder = SettingsStore.defaultExport.mouseWarpMonitorOrder {
+        didSet { scheduleSave() }
     }
 
-    var mouseWarpAxis: MouseWarpAxis {
-        didSet { defaults.set(mouseWarpAxis.rawValue, forKey: Keys.mouseWarpAxis) }
+    var mouseWarpAxis = MouseWarpAxis(rawValue: SettingsStore.defaultExport.mouseWarpAxis ?? "") ?? .horizontal {
+        didSet { scheduleSave() }
     }
 
-    var niriColumnWidthPresets: [Double] {
-        didSet { saveNiriColumnWidthPresets() }
+    var niriColumnWidthPresets = SettingsStore.validatedPresets(
+        SettingsStore.defaultExport.niriColumnWidthPresets ?? BuiltInSettingsDefaults.niriColumnWidthPresets
+    ) {
+        didSet { scheduleSave() }
     }
 
-    var niriDefaultColumnWidth: Double? {
+    var niriDefaultColumnWidth = SettingsStore.validatedDefaultColumnWidth(SettingsStore.defaultExport.niriDefaultColumnWidth) {
         didSet {
-            let validated = Self.validatedDefaultColumnWidth(niriDefaultColumnWidth)
+            let validated = SettingsStore.validatedDefaultColumnWidth(niriDefaultColumnWidth)
             if validated != niriDefaultColumnWidth {
                 niriDefaultColumnWidth = validated
                 return
             }
-            saveNiriDefaultColumnWidth()
+            scheduleSave()
         }
     }
 
-    var mouseWarpMargin: Int {
-        didSet { defaults.set(mouseWarpMargin, forKey: Keys.mouseWarpMargin) }
+    var mouseWarpMargin = SettingsStore.defaultExport.mouseWarpMargin {
+        didSet { scheduleSave() }
     }
 
-    var gapSize: Double {
-        didSet { defaults.set(gapSize, forKey: Keys.gapSize) }
+    var gapSize = SettingsStore.defaultExport.gapSize {
+        didSet { scheduleSave() }
     }
 
-    var outerGapLeft: Double {
-        didSet { defaults.set(outerGapLeft, forKey: Keys.outerGapLeft) }
+    var outerGapLeft = SettingsStore.defaultExport.outerGapLeft {
+        didSet { scheduleSave() }
     }
 
-    var outerGapRight: Double {
-        didSet { defaults.set(outerGapRight, forKey: Keys.outerGapRight) }
+    var outerGapRight = SettingsStore.defaultExport.outerGapRight {
+        didSet { scheduleSave() }
     }
 
-    var outerGapTop: Double {
-        didSet { defaults.set(outerGapTop, forKey: Keys.outerGapTop) }
+    var outerGapTop = SettingsStore.defaultExport.outerGapTop {
+        didSet { scheduleSave() }
     }
 
-    var outerGapBottom: Double {
-        didSet { defaults.set(outerGapBottom, forKey: Keys.outerGapBottom) }
+    var outerGapBottom = SettingsStore.defaultExport.outerGapBottom {
+        didSet { scheduleSave() }
     }
 
-    var niriMaxWindowsPerColumn: Int {
-        didSet { defaults.set(niriMaxWindowsPerColumn, forKey: Keys.niriMaxWindowsPerColumn) }
+    var niriMaxWindowsPerColumn = SettingsStore.defaultExport.niriMaxWindowsPerColumn {
+        didSet { scheduleSave() }
     }
 
-    var niriMaxVisibleColumns: Int {
-        didSet { defaults.set(niriMaxVisibleColumns, forKey: Keys.niriMaxVisibleColumns) }
+    var niriMaxVisibleColumns = SettingsStore.defaultExport.niriMaxVisibleColumns {
+        didSet { scheduleSave() }
     }
 
-    var niriInfiniteLoop: Bool {
-        didSet { defaults.set(niriInfiniteLoop, forKey: Keys.niriInfiniteLoop) }
+    var niriInfiniteLoop = SettingsStore.defaultExport.niriInfiniteLoop {
+        didSet { scheduleSave() }
     }
 
-    var niriCenterFocusedColumn: CenterFocusedColumn {
-        didSet { defaults.set(niriCenterFocusedColumn.rawValue, forKey: Keys.niriCenterFocusedColumn) }
+    var niriCenterFocusedColumn = CenterFocusedColumn(rawValue: SettingsStore.defaultExport.niriCenterFocusedColumn) ?? .never {
+        didSet { scheduleSave() }
     }
 
-    var niriAlwaysCenterSingleColumn: Bool {
-        didSet { defaults.set(niriAlwaysCenterSingleColumn, forKey: Keys.niriAlwaysCenterSingleColumn) }
+    var niriAlwaysCenterSingleColumn = SettingsStore.defaultExport.niriAlwaysCenterSingleColumn {
+        didSet { scheduleSave() }
     }
 
-    var niriSingleWindowAspectRatio: SingleWindowAspectRatio {
-        didSet { defaults.set(niriSingleWindowAspectRatio.rawValue, forKey: Keys.niriSingleWindowAspectRatio) }
+    var niriSingleWindowAspectRatio = SingleWindowAspectRatio(
+        rawValue: SettingsStore.defaultExport.niriSingleWindowAspectRatio
+    ) ?? .ratio4x3 {
+        didSet { scheduleSave() }
     }
 
-    var workspaceConfigurations: [WorkspaceConfiguration] {
-        didSet { saveWorkspaceConfigurations() }
+    var workspaceConfigurations = SettingsStore.normalizedWorkspaceConfigurations(SettingsStore.defaultExport.workspaceConfigurations) {
+        didSet { scheduleSave() }
     }
 
-    var defaultLayoutType: LayoutType {
-        didSet { defaults.set(defaultLayoutType.rawValue, forKey: Keys.defaultLayoutType) }
+    var defaultLayoutType = LayoutType(rawValue: SettingsStore.defaultExport.defaultLayoutType) ?? .niri {
+        didSet { scheduleSave() }
     }
 
-    var bordersEnabled: Bool {
-        didSet { defaults.set(bordersEnabled, forKey: Keys.bordersEnabled) }
+    var bordersEnabled = SettingsStore.defaultExport.bordersEnabled {
+        didSet { scheduleSave() }
     }
 
-    var borderWidth: Double {
-        didSet { defaults.set(borderWidth, forKey: Keys.borderWidth) }
+    var borderWidth = SettingsStore.defaultExport.borderWidth {
+        didSet { scheduleSave() }
     }
 
-    var borderColorRed: Double {
-        didSet { defaults.set(borderColorRed, forKey: Keys.borderColorRed) }
+    var borderColorRed = SettingsStore.defaultExport.borderColorRed {
+        didSet { scheduleSave() }
     }
 
-    var borderColorGreen: Double {
-        didSet { defaults.set(borderColorGreen, forKey: Keys.borderColorGreen) }
+    var borderColorGreen = SettingsStore.defaultExport.borderColorGreen {
+        didSet { scheduleSave() }
     }
 
-    var borderColorBlue: Double {
-        didSet { defaults.set(borderColorBlue, forKey: Keys.borderColorBlue) }
+    var borderColorBlue = SettingsStore.defaultExport.borderColorBlue {
+        didSet { scheduleSave() }
     }
 
-    var borderColorAlpha: Double {
-        didSet { defaults.set(borderColorAlpha, forKey: Keys.borderColorAlpha) }
+    var borderColorAlpha = SettingsStore.defaultExport.borderColorAlpha {
+        didSet { scheduleSave() }
     }
 
-    var hotkeyBindings: [HotkeyBinding] {
-        didSet { saveBindings() }
+    var hotkeyBindings = SettingsStore.defaultExport.hotkeyBindings {
+        didSet { scheduleSave() }
     }
 
-    var workspaceBarEnabled: Bool {
-        didSet { defaults.set(workspaceBarEnabled, forKey: Keys.workspaceBarEnabled) }
+    var workspaceBarEnabled = SettingsStore.defaultExport.workspaceBarEnabled {
+        didSet { scheduleSave() }
     }
 
-    var workspaceBarShowLabels: Bool {
-        didSet { defaults.set(workspaceBarShowLabels, forKey: Keys.workspaceBarShowLabels) }
+    var workspaceBarShowLabels = SettingsStore.defaultExport.workspaceBarShowLabels {
+        didSet { scheduleSave() }
     }
 
-    var workspaceBarShowFloatingWindows: Bool {
-        didSet { defaults.set(workspaceBarShowFloatingWindows, forKey: Keys.workspaceBarShowFloatingWindows) }
+    var workspaceBarShowFloatingWindows = SettingsStore.defaultExport.workspaceBarShowFloatingWindows {
+        didSet { scheduleSave() }
     }
 
-    var workspaceBarWindowLevel: WorkspaceBarWindowLevel {
-        didSet { defaults.set(workspaceBarWindowLevel.rawValue, forKey: Keys.workspaceBarWindowLevel) }
+    var workspaceBarWindowLevel = WorkspaceBarWindowLevel(rawValue: SettingsStore.defaultExport.workspaceBarWindowLevel) ?? .popup {
+        didSet { scheduleSave() }
     }
 
-    var workspaceBarPosition: WorkspaceBarPosition {
-        didSet { defaults.set(workspaceBarPosition.rawValue, forKey: Keys.workspaceBarPosition) }
+    var workspaceBarPosition = WorkspaceBarPosition(rawValue: SettingsStore.defaultExport.workspaceBarPosition)
+        ?? .overlappingMenuBar {
+        didSet { scheduleSave() }
     }
 
-    var workspaceBarNotchAware: Bool {
-        didSet { defaults.set(workspaceBarNotchAware, forKey: Keys.workspaceBarNotchAware) }
+    var workspaceBarNotchAware = SettingsStore.defaultExport.workspaceBarNotchAware {
+        didSet { scheduleSave() }
     }
 
-    var workspaceBarDeduplicateAppIcons: Bool {
-        didSet { defaults.set(workspaceBarDeduplicateAppIcons, forKey: Keys.workspaceBarDeduplicateAppIcons) }
+    var workspaceBarDeduplicateAppIcons = SettingsStore.defaultExport.workspaceBarDeduplicateAppIcons {
+        didSet { scheduleSave() }
     }
 
-    var workspaceBarHideEmptyWorkspaces: Bool {
-        didSet { defaults.set(workspaceBarHideEmptyWorkspaces, forKey: Keys.workspaceBarHideEmptyWorkspaces) }
+    var workspaceBarHideEmptyWorkspaces = SettingsStore.defaultExport.workspaceBarHideEmptyWorkspaces {
+        didSet { scheduleSave() }
     }
 
-    var workspaceBarReserveLayoutSpace: Bool {
-        didSet { defaults.set(workspaceBarReserveLayoutSpace, forKey: Keys.workspaceBarReserveLayoutSpace) }
+    var workspaceBarReserveLayoutSpace = SettingsStore.defaultExport.workspaceBarReserveLayoutSpace {
+        didSet { scheduleSave() }
     }
 
-    var workspaceBarHeight: Double {
-        didSet { defaults.set(workspaceBarHeight, forKey: Keys.workspaceBarHeight) }
+    var workspaceBarHeight = SettingsStore.defaultExport.workspaceBarHeight {
+        didSet { scheduleSave() }
     }
 
-    var workspaceBarBackgroundOpacity: Double {
-        didSet { defaults.set(workspaceBarBackgroundOpacity, forKey: Keys.workspaceBarBackgroundOpacity) }
+    var workspaceBarBackgroundOpacity = SettingsStore.defaultExport.workspaceBarBackgroundOpacity {
+        didSet { scheduleSave() }
     }
 
-    var workspaceBarXOffset: Double {
-        didSet { defaults.set(workspaceBarXOffset, forKey: Keys.workspaceBarXOffset) }
+    var workspaceBarXOffset = SettingsStore.defaultExport.workspaceBarXOffset {
+        didSet { scheduleSave() }
     }
 
-    var workspaceBarYOffset: Double {
-        didSet { defaults.set(workspaceBarYOffset, forKey: Keys.workspaceBarYOffset) }
+    var workspaceBarYOffset = SettingsStore.defaultExport.workspaceBarYOffset {
+        didSet { scheduleSave() }
     }
 
-    var workspaceBarAccentColorRed: Double {
-        didSet { defaults.set(workspaceBarAccentColorRed, forKey: Keys.workspaceBarAccentColorRed) }
+    var workspaceBarAccentColorRed = SettingsStore.defaultExport.workspaceBarAccentColorRed {
+        didSet { scheduleSave() }
     }
 
-    var workspaceBarAccentColorGreen: Double {
-        didSet { defaults.set(workspaceBarAccentColorGreen, forKey: Keys.workspaceBarAccentColorGreen) }
+    var workspaceBarAccentColorGreen = SettingsStore.defaultExport.workspaceBarAccentColorGreen {
+        didSet { scheduleSave() }
     }
 
-    var workspaceBarAccentColorBlue: Double {
-        didSet { defaults.set(workspaceBarAccentColorBlue, forKey: Keys.workspaceBarAccentColorBlue) }
+    var workspaceBarAccentColorBlue = SettingsStore.defaultExport.workspaceBarAccentColorBlue {
+        didSet { scheduleSave() }
     }
 
-    var workspaceBarAccentColorAlpha: Double {
-        didSet { defaults.set(workspaceBarAccentColorAlpha, forKey: Keys.workspaceBarAccentColorAlpha) }
+    var workspaceBarAccentColorAlpha = SettingsStore.defaultExport.workspaceBarAccentColorAlpha {
+        didSet { scheduleSave() }
     }
 
-    var workspaceBarTextColorRed: Double {
-        didSet { defaults.set(workspaceBarTextColorRed, forKey: Keys.workspaceBarTextColorRed) }
+    var workspaceBarTextColorRed = SettingsStore.defaultExport.workspaceBarTextColorRed {
+        didSet { scheduleSave() }
     }
 
-    var workspaceBarTextColorGreen: Double {
-        didSet { defaults.set(workspaceBarTextColorGreen, forKey: Keys.workspaceBarTextColorGreen) }
+    var workspaceBarTextColorGreen = SettingsStore.defaultExport.workspaceBarTextColorGreen {
+        didSet { scheduleSave() }
     }
 
-    var workspaceBarTextColorBlue: Double {
-        didSet { defaults.set(workspaceBarTextColorBlue, forKey: Keys.workspaceBarTextColorBlue) }
+    var workspaceBarTextColorBlue = SettingsStore.defaultExport.workspaceBarTextColorBlue {
+        didSet { scheduleSave() }
     }
 
-    var workspaceBarTextColorAlpha: Double {
-        didSet { defaults.set(workspaceBarTextColorAlpha, forKey: Keys.workspaceBarTextColorAlpha) }
+    var workspaceBarTextColorAlpha = SettingsStore.defaultExport.workspaceBarTextColorAlpha {
+        didSet { scheduleSave() }
     }
 
-    var workspaceBarLabelFontSize: Double {
+    var workspaceBarLabelFontSize = SettingsStore.normalizedWorkspaceBarLabelFontSize(SettingsStore.defaultExport.workspaceBarLabelFontSize) {
         didSet {
-            let normalized = Self.normalizedWorkspaceBarLabelFontSize(workspaceBarLabelFontSize)
+            let normalized = SettingsStore.normalizedWorkspaceBarLabelFontSize(workspaceBarLabelFontSize)
             if normalized != workspaceBarLabelFontSize {
                 workspaceBarLabelFontSize = normalized
                 return
             }
-            defaults.set(workspaceBarLabelFontSize, forKey: Keys.workspaceBarLabelFontSize)
+            scheduleSave()
         }
     }
 
-    var monitorBarSettings: [MonitorBarSettings] {
-        didSet { MonitorSettingsStore.save(monitorBarSettings, to: defaults, key: Keys.monitorBarSettings) }
+    var monitorBarSettings = SettingsStore.defaultExport.monitorBarSettings {
+        didSet { scheduleSave() }
     }
 
-    var appRules: [AppRule] {
-        didSet { saveAppRules() }
+    var appRules = SettingsStore.defaultExport.appRules {
+        didSet { scheduleSave() }
     }
 
-    var monitorOrientationSettings: [MonitorOrientationSettings] {
-        didSet { MonitorSettingsStore.save(monitorOrientationSettings, to: defaults, key: Keys.monitorOrientationSettings) }
+    var monitorOrientationSettings = SettingsStore.defaultExport.monitorOrientationSettings {
+        didSet { scheduleSave() }
     }
 
-    var monitorNiriSettings: [MonitorNiriSettings] {
-        didSet { MonitorSettingsStore.save(monitorNiriSettings, to: defaults, key: Keys.monitorNiriSettings) }
+    var monitorNiriSettings = SettingsStore.defaultExport.monitorNiriSettings {
+        didSet { scheduleSave() }
     }
 
-    var dwindleSmartSplit: Bool {
-        didSet { defaults.set(dwindleSmartSplit, forKey: Keys.dwindleSmartSplit) }
+    var dwindleSmartSplit = SettingsStore.defaultExport.dwindleSmartSplit {
+        didSet { scheduleSave() }
     }
 
-    var dwindleDefaultSplitRatio: Double {
-        didSet { defaults.set(dwindleDefaultSplitRatio, forKey: Keys.dwindleDefaultSplitRatio) }
+    var dwindleDefaultSplitRatio = SettingsStore.defaultExport.dwindleDefaultSplitRatio {
+        didSet { scheduleSave() }
     }
 
-    var dwindleSplitWidthMultiplier: Double {
-        didSet { defaults.set(dwindleSplitWidthMultiplier, forKey: Keys.dwindleSplitWidthMultiplier) }
+    var dwindleSplitWidthMultiplier = SettingsStore.defaultExport.dwindleSplitWidthMultiplier {
+        didSet { scheduleSave() }
     }
 
-    var dwindleSingleWindowAspectRatio: DwindleSingleWindowAspectRatio {
-        didSet { defaults.set(dwindleSingleWindowAspectRatio.rawValue, forKey: Keys.dwindleSingleWindowAspectRatio) }
+    var dwindleSingleWindowAspectRatio = DwindleSingleWindowAspectRatio(
+        rawValue: SettingsStore.defaultExport.dwindleSingleWindowAspectRatio
+    ) ?? .ratio4x3 {
+        didSet { scheduleSave() }
     }
 
-    var dwindleUseGlobalGaps: Bool {
-        didSet { defaults.set(dwindleUseGlobalGaps, forKey: Keys.dwindleUseGlobalGaps) }
+    var dwindleUseGlobalGaps = SettingsStore.defaultExport.dwindleUseGlobalGaps {
+        didSet { scheduleSave() }
     }
 
-    var dwindleMoveToRootStable: Bool {
-        didSet { defaults.set(dwindleMoveToRootStable, forKey: Keys.dwindleMoveToRootStable) }
+    var dwindleMoveToRootStable = SettingsStore.defaultExport.dwindleMoveToRootStable {
+        didSet { scheduleSave() }
     }
 
-    var monitorDwindleSettings: [MonitorDwindleSettings] {
-        didSet { MonitorSettingsStore.save(monitorDwindleSettings, to: defaults, key: Keys.monitorDwindleSettings) }
+    var monitorDwindleSettings = SettingsStore.defaultExport.monitorDwindleSettings {
+        didSet { scheduleSave() }
     }
 
-    var preventSleepEnabled: Bool {
-        didSet { defaults.set(preventSleepEnabled, forKey: Keys.preventSleepEnabled) }
+    var preventSleepEnabled = SettingsStore.defaultExport.preventSleepEnabled {
+        didSet { scheduleSave() }
     }
 
-    var updateChecksEnabled: Bool {
-        didSet { defaults.set(updateChecksEnabled, forKey: Keys.updateChecksEnabled) }
+    var updateChecksEnabled = SettingsStore.defaultExport.updateChecksEnabled {
+        didSet { scheduleSave() }
     }
 
-    var ipcEnabled: Bool {
+    var ipcEnabled = SettingsStore.defaultExport.ipcEnabled {
         didSet {
-            defaults.set(ipcEnabled, forKey: Keys.ipcEnabled)
+            scheduleSave()
             guard oldValue != ipcEnabled else { return }
             onIPCEnabledChanged?(ipcEnabled)
         }
     }
 
-    var scrollGestureEnabled: Bool {
-        didSet { defaults.set(scrollGestureEnabled, forKey: Keys.scrollGestureEnabled) }
+    var scrollGestureEnabled = SettingsStore.defaultExport.scrollGestureEnabled {
+        didSet { scheduleSave() }
     }
 
-    var scrollSensitivity: Double {
-        didSet { defaults.set(scrollSensitivity, forKey: Keys.scrollSensitivity) }
+    var scrollSensitivity = SettingsStore.defaultExport.scrollSensitivity {
+        didSet { scheduleSave() }
     }
 
-    var scrollModifierKey: ScrollModifierKey {
-        didSet { defaults.set(scrollModifierKey.rawValue, forKey: Keys.scrollModifierKey) }
+    var scrollModifierKey = ScrollModifierKey(rawValue: SettingsStore.defaultExport.scrollModifierKey) ?? .optionShift {
+        didSet { scheduleSave() }
     }
 
-    var gestureFingerCount: GestureFingerCount {
-        didSet { defaults.set(gestureFingerCount.rawValue, forKey: Keys.gestureFingerCount) }
+    var gestureFingerCount = GestureFingerCount(rawValue: SettingsStore.defaultExport.gestureFingerCount) ?? .three {
+        didSet { scheduleSave() }
     }
 
-    var gestureInvertDirection: Bool {
-        didSet { defaults.set(gestureInvertDirection, forKey: Keys.gestureInvertDirection) }
+    var gestureInvertDirection = SettingsStore.defaultExport.gestureInvertDirection {
+        didSet { scheduleSave() }
     }
 
-    var statusBarShowWorkspaceName: Bool {
-        didSet { defaults.set(statusBarShowWorkspaceName, forKey: Keys.statusBarShowWorkspaceName) }
+    var statusBarShowWorkspaceName = SettingsStore.defaultExport.statusBarShowWorkspaceName {
+        didSet { scheduleSave() }
     }
 
-    var statusBarShowAppNames: Bool {
-        didSet { defaults.set(statusBarShowAppNames, forKey: Keys.statusBarShowAppNames) }
+    var statusBarShowAppNames = SettingsStore.defaultExport.statusBarShowAppNames {
+        didSet { scheduleSave() }
     }
 
-    var statusBarUseWorkspaceId: Bool {
-        didSet { defaults.set(statusBarUseWorkspaceId, forKey: Keys.statusBarUseWorkspaceId) }
+    var statusBarUseWorkspaceId = SettingsStore.defaultExport.statusBarUseWorkspaceId {
+        didSet { scheduleSave() }
     }
 
-    var commandPaletteLastMode: CommandPaletteMode {
-        didSet { defaults.set(commandPaletteLastMode.rawValue, forKey: Keys.commandPaletteLastMode) }
+    var commandPaletteLastMode = CommandPaletteMode(rawValue: SettingsStore.defaultExport.commandPaletteLastMode) ?? .windows {
+        didSet { scheduleSave() }
     }
 
-    var animationsEnabled: Bool {
-        didSet { defaults.set(animationsEnabled, forKey: Keys.animationsEnabled) }
+    var animationsEnabled = SettingsStore.defaultExport.animationsEnabled {
+        didSet { scheduleSave() }
     }
 
-    var hiddenBarIsCollapsed: Bool {
-        didSet { defaults.set(hiddenBarIsCollapsed, forKey: Keys.hiddenBarIsCollapsed) }
+    var hiddenBarIsCollapsed = SettingsStore.defaultExport.hiddenBarIsCollapsed {
+        didSet { scheduleSave() }
     }
 
-    var quakeTerminalEnabled: Bool {
-        didSet { defaults.set(quakeTerminalEnabled, forKey: Keys.quakeTerminalEnabled) }
+    var quakeTerminalEnabled = SettingsStore.defaultExport.quakeTerminalEnabled {
+        didSet { scheduleSave() }
     }
 
-    var quakeTerminalPosition: QuakeTerminalPosition {
-        didSet { defaults.set(quakeTerminalPosition.rawValue, forKey: Keys.quakeTerminalPosition) }
+    var quakeTerminalPosition = QuakeTerminalPosition(rawValue: SettingsStore.defaultExport.quakeTerminalPosition) ?? .center {
+        didSet { scheduleSave() }
     }
 
-    var quakeTerminalWidthPercent: Double {
-        didSet { defaults.set(quakeTerminalWidthPercent, forKey: Keys.quakeTerminalWidthPercent) }
+    var quakeTerminalWidthPercent = SettingsStore.defaultExport.quakeTerminalWidthPercent {
+        didSet { scheduleSave() }
     }
 
-    var quakeTerminalHeightPercent: Double {
-        didSet { defaults.set(quakeTerminalHeightPercent, forKey: Keys.quakeTerminalHeightPercent) }
+    var quakeTerminalHeightPercent = SettingsStore.defaultExport.quakeTerminalHeightPercent {
+        didSet { scheduleSave() }
     }
 
-    var quakeTerminalAnimationDuration: Double {
-        didSet { defaults.set(quakeTerminalAnimationDuration, forKey: Keys.quakeTerminalAnimationDuration) }
+    var quakeTerminalAnimationDuration = SettingsStore.defaultExport.quakeTerminalAnimationDuration {
+        didSet { scheduleSave() }
     }
 
-    var quakeTerminalAutoHide: Bool {
-        didSet { defaults.set(quakeTerminalAutoHide, forKey: Keys.quakeTerminalAutoHide) }
+    var quakeTerminalAutoHide = SettingsStore.defaultExport.quakeTerminalAutoHide {
+        didSet { scheduleSave() }
     }
 
-    var quakeTerminalOpacity: Double {
-        didSet { defaults.set(quakeTerminalOpacity, forKey: Keys.quakeTerminalOpacity) }
+    var quakeTerminalOpacity = SettingsStore.defaultExport.quakeTerminalOpacity ?? 1.0 {
+        didSet { scheduleSave() }
     }
 
-    var quakeTerminalMonitorMode: QuakeTerminalMonitorMode {
-        didSet { defaults.set(quakeTerminalMonitorMode.rawValue, forKey: Keys.quakeTerminalMonitorMode) }
+    var quakeTerminalMonitorMode = QuakeTerminalMonitorMode(
+        rawValue: SettingsStore.defaultExport.quakeTerminalMonitorMode ?? ""
+    ) ?? .focusedWindow {
+        didSet { scheduleSave() }
     }
 
-    var quakeTerminalUseCustomFrame: Bool {
-        didSet { defaults.set(quakeTerminalUseCustomFrame, forKey: Keys.quakeTerminalUseCustomFrame) }
+    var quakeTerminalUseCustomFrame = SettingsStore.defaultExport.quakeTerminalUseCustomFrame {
+        didSet { scheduleSave() }
     }
 
     private var quakeTerminalCustomFrameX: Double? {
-        didSet { defaults.set(quakeTerminalCustomFrameX, forKey: Keys.quakeTerminalCustomFrameX) }
+        didSet { scheduleSave() }
     }
 
     private var quakeTerminalCustomFrameY: Double? {
-        didSet { defaults.set(quakeTerminalCustomFrameY, forKey: Keys.quakeTerminalCustomFrameY) }
+        didSet { scheduleSave() }
     }
 
     private var quakeTerminalCustomFrameWidth: Double? {
-        didSet { defaults.set(quakeTerminalCustomFrameWidth, forKey: Keys.quakeTerminalCustomFrameWidth) }
+        didSet { scheduleSave() }
     }
 
     private var quakeTerminalCustomFrameHeight: Double? {
-        didSet { defaults.set(quakeTerminalCustomFrameHeight, forKey: Keys.quakeTerminalCustomFrameHeight) }
+        didSet { scheduleSave() }
     }
 
     var quakeTerminalCustomFrame: NSRect? {
@@ -407,228 +422,51 @@ final class SettingsStore {
         }
     }
 
-    func resetQuakeTerminalCustomFrame() {
-        quakeTerminalUseCustomFrame = false
-        quakeTerminalCustomFrame = nil
+    var appearanceMode = AppearanceMode(rawValue: SettingsStore.defaultExport.appearanceMode) ?? .dark {
+        didSet { scheduleSave() }
     }
 
-    var appearanceMode: AppearanceMode {
-        didSet { defaults.set(appearanceMode.rawValue, forKey: Keys.appearanceMode) }
+    var settingsFileURL: URL {
+        persistence.fileURL
+    }
+
+    init(
+        persistence: SettingsFilePersistence = SettingsFilePersistence(),
+        runtimeState: RuntimeStateStore = RuntimeStateStore(),
+        autosaveEnabled: Bool = true
+    ) {
+        self.persistence = persistence
+        self.runtimeState = runtimeState
+        self.autosaveEnabled = autosaveEnabled
+
+        applyExport(
+            persistence.load(),
+            monitors: Monitor.current()
+        )
+        persistence.setExternalChangeHandler { [weak self] export in
+            self?.handleExternalReload(export)
+        }
+    }
+
+    func flushNow() {
+        if autosaveEnabled {
+            persistence.flushNow()
+        } else {
+            persistence.save(toExport())
+        }
     }
 
     func loadPersistedWindowRestoreCatalog() -> PersistedWindowRestoreCatalog {
-        guard let data = defaults.data(forKey: Keys.persistedWindowRestoreCatalog),
-              let catalog = try? JSONDecoder().decode(PersistedWindowRestoreCatalog.self, from: data)
-        else {
-            return .empty
-        }
-
-        return catalog
+        runtimeState.windowRestoreCatalog ?? .empty
     }
 
     func savePersistedWindowRestoreCatalog(_ catalog: PersistedWindowRestoreCatalog) {
-        if catalog.entries.isEmpty {
-            defaults.removeObject(forKey: Keys.persistedWindowRestoreCatalog)
-            return
-        }
-
-        guard let data = try? JSONEncoder().encode(catalog) else { return }
-        defaults.set(data, forKey: Keys.persistedWindowRestoreCatalog)
+        runtimeState.windowRestoreCatalog = catalog.entries.isEmpty ? nil : catalog
     }
 
-    init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
-        let baseline = SettingsExport.defaults()
-
-        hotkeysEnabled = defaults.object(forKey: Keys.hotkeysEnabled) as? Bool ?? baseline.hotkeysEnabled
-        focusFollowsMouse = defaults.object(forKey: Keys.focusFollowsMouse) as? Bool ?? baseline.focusFollowsMouse
-        moveMouseToFocusedWindow = defaults.object(forKey: Keys.moveMouseToFocusedWindow) as? Bool ??
-            baseline.moveMouseToFocusedWindow
-        focusFollowsWindowToMonitor = defaults.object(forKey: Keys.focusFollowsWindowToMonitor) as? Bool ??
-            baseline.focusFollowsWindowToMonitor
-        mouseWarpMonitorOrder = Self.loadMouseWarpMonitorOrder(from: defaults)
-        mouseWarpAxis = MouseWarpAxis(rawValue: defaults.string(forKey: Keys.mouseWarpAxis) ?? "") ??
-            MouseWarpAxis(rawValue: baseline.mouseWarpAxis ?? "") ?? .horizontal
-        niriColumnWidthPresets = Self.loadNiriColumnWidthPresets(from: defaults)
-        niriDefaultColumnWidth = Self.loadNiriDefaultColumnWidth(from: defaults)
-        mouseWarpMargin = defaults.object(forKey: Keys.mouseWarpMargin) as? Int ?? baseline.mouseWarpMargin
-        gapSize = defaults.object(forKey: Keys.gapSize) as? Double ?? baseline.gapSize
-
-        outerGapLeft = defaults.object(forKey: Keys.outerGapLeft) as? Double ?? baseline.outerGapLeft
-        outerGapRight = defaults.object(forKey: Keys.outerGapRight) as? Double ?? baseline.outerGapRight
-        outerGapTop = defaults.object(forKey: Keys.outerGapTop) as? Double ?? baseline.outerGapTop
-        outerGapBottom = defaults.object(forKey: Keys.outerGapBottom) as? Double ?? baseline.outerGapBottom
-
-        niriMaxWindowsPerColumn = defaults.object(forKey: Keys.niriMaxWindowsPerColumn) as? Int ??
-            baseline.niriMaxWindowsPerColumn
-        niriMaxVisibleColumns = defaults.object(forKey: Keys.niriMaxVisibleColumns) as? Int ??
-            baseline.niriMaxVisibleColumns
-        niriInfiniteLoop = defaults.object(forKey: Keys.niriInfiniteLoop) as? Bool ?? baseline.niriInfiniteLoop
-        niriCenterFocusedColumn = CenterFocusedColumn(rawValue: defaults
-            .string(forKey: Keys.niriCenterFocusedColumn) ?? "") ??
-            CenterFocusedColumn(rawValue: baseline.niriCenterFocusedColumn) ?? .never
-        niriAlwaysCenterSingleColumn = defaults.object(forKey: Keys.niriAlwaysCenterSingleColumn) as? Bool ??
-            baseline.niriAlwaysCenterSingleColumn
-        niriSingleWindowAspectRatio = SingleWindowAspectRatio(rawValue: defaults
-            .string(forKey: Keys.niriSingleWindowAspectRatio) ?? "") ??
-            SingleWindowAspectRatio(rawValue: baseline.niriSingleWindowAspectRatio) ?? .ratio4x3
-
-        workspaceConfigurations = Self.loadWorkspaceConfigurations(from: defaults)
-        defaultLayoutType = LayoutType(rawValue: defaults.string(forKey: Keys.defaultLayoutType) ?? "") ??
-            LayoutType(rawValue: baseline.defaultLayoutType) ?? .niri
-
-        bordersEnabled = defaults.object(forKey: Keys.bordersEnabled) as? Bool ?? baseline.bordersEnabled
-        borderWidth = defaults.object(forKey: Keys.borderWidth) as? Double ?? baseline.borderWidth
-        borderColorRed = defaults.object(forKey: Keys.borderColorRed) as? Double ?? baseline.borderColorRed
-        borderColorGreen = defaults.object(forKey: Keys.borderColorGreen) as? Double ?? baseline.borderColorGreen
-        borderColorBlue = defaults.object(forKey: Keys.borderColorBlue) as? Double ?? baseline.borderColorBlue
-        borderColorAlpha = defaults.object(forKey: Keys.borderColorAlpha) as? Double ?? baseline.borderColorAlpha
-
-        hotkeyBindings = Self.loadBindings(from: defaults)
-
-        workspaceBarEnabled = defaults.object(forKey: Keys.workspaceBarEnabled) as? Bool ?? baseline.workspaceBarEnabled
-        workspaceBarShowLabels = defaults.object(forKey: Keys.workspaceBarShowLabels) as? Bool ??
-            baseline.workspaceBarShowLabels
-        workspaceBarShowFloatingWindows = defaults.object(forKey: Keys.workspaceBarShowFloatingWindows) as? Bool ??
-            baseline.workspaceBarShowFloatingWindows
-        workspaceBarWindowLevel = WorkspaceBarWindowLevel(
-            rawValue: defaults.string(forKey: Keys.workspaceBarWindowLevel) ?? ""
-        ) ?? WorkspaceBarWindowLevel(rawValue: baseline.workspaceBarWindowLevel) ?? .popup
-        workspaceBarPosition = WorkspaceBarPosition(
-            rawValue: defaults.string(forKey: Keys.workspaceBarPosition) ?? ""
-        ) ?? WorkspaceBarPosition(rawValue: baseline.workspaceBarPosition) ?? .overlappingMenuBar
-        workspaceBarNotchAware = defaults.object(forKey: Keys.workspaceBarNotchAware) as? Bool ??
-            baseline.workspaceBarNotchAware
-        workspaceBarDeduplicateAppIcons = defaults
-            .object(forKey: Keys.workspaceBarDeduplicateAppIcons) as? Bool ?? baseline.workspaceBarDeduplicateAppIcons
-        workspaceBarHideEmptyWorkspaces = defaults
-            .object(forKey: Keys.workspaceBarHideEmptyWorkspaces) as? Bool ?? baseline.workspaceBarHideEmptyWorkspaces
-        workspaceBarReserveLayoutSpace = defaults
-            .object(forKey: Keys.workspaceBarReserveLayoutSpace) as? Bool ?? baseline.workspaceBarReserveLayoutSpace
-        workspaceBarHeight = defaults.object(forKey: Keys.workspaceBarHeight) as? Double ?? baseline.workspaceBarHeight
-        workspaceBarBackgroundOpacity = defaults.object(forKey: Keys.workspaceBarBackgroundOpacity) as? Double ??
-            baseline.workspaceBarBackgroundOpacity
-        workspaceBarXOffset = defaults.object(forKey: Keys.workspaceBarXOffset) as? Double ?? baseline.workspaceBarXOffset
-        workspaceBarYOffset = defaults.object(forKey: Keys.workspaceBarYOffset) as? Double ?? baseline.workspaceBarYOffset
-        workspaceBarAccentColorRed = defaults.object(forKey: Keys.workspaceBarAccentColorRed) as? Double ??
-            baseline.workspaceBarAccentColorRed
-        workspaceBarAccentColorGreen = defaults.object(forKey: Keys.workspaceBarAccentColorGreen) as? Double ??
-            baseline.workspaceBarAccentColorGreen
-        workspaceBarAccentColorBlue = defaults.object(forKey: Keys.workspaceBarAccentColorBlue) as? Double ??
-            baseline.workspaceBarAccentColorBlue
-        workspaceBarAccentColorAlpha = defaults.object(forKey: Keys.workspaceBarAccentColorAlpha) as? Double ??
-            baseline.workspaceBarAccentColorAlpha
-        workspaceBarTextColorRed = defaults.object(forKey: Keys.workspaceBarTextColorRed) as? Double ??
-            baseline.workspaceBarTextColorRed
-        workspaceBarTextColorGreen = defaults.object(forKey: Keys.workspaceBarTextColorGreen) as? Double ??
-            baseline.workspaceBarTextColorGreen
-        workspaceBarTextColorBlue = defaults.object(forKey: Keys.workspaceBarTextColorBlue) as? Double ??
-            baseline.workspaceBarTextColorBlue
-        workspaceBarTextColorAlpha = defaults.object(forKey: Keys.workspaceBarTextColorAlpha) as? Double ??
-            baseline.workspaceBarTextColorAlpha
-        let storedWorkspaceBarLabelFontSize = defaults.object(forKey: Keys.workspaceBarLabelFontSize) as? Double ??
-            baseline.workspaceBarLabelFontSize
-        let normalizedWorkspaceBarLabelFontSize = Self.normalizedWorkspaceBarLabelFontSize(storedWorkspaceBarLabelFontSize)
-        workspaceBarLabelFontSize = normalizedWorkspaceBarLabelFontSize
-        if normalizedWorkspaceBarLabelFontSize != storedWorkspaceBarLabelFontSize {
-            defaults.set(normalizedWorkspaceBarLabelFontSize, forKey: Keys.workspaceBarLabelFontSize)
-        }
-        monitorBarSettings = MonitorSettingsStore.load(from: defaults, key: Keys.monitorBarSettings)
-        let loadedAppRules = Self.loadAppRules(from: defaults)
-        appRules = loadedAppRules
-        if defaults.data(forKey: Keys.appRules) != nil,
-           let normalizedRulesData = try? JSONEncoder().encode(loadedAppRules),
-           normalizedRulesData != defaults.data(forKey: Keys.appRules)
-        {
-            defaults.set(normalizedRulesData, forKey: Keys.appRules)
-        }
-        monitorOrientationSettings = MonitorSettingsStore.load(from: defaults, key: Keys.monitorOrientationSettings)
-        monitorNiriSettings = MonitorSettingsStore.load(from: defaults, key: Keys.monitorNiriSettings)
-
-        dwindleSmartSplit = defaults.object(forKey: Keys.dwindleSmartSplit) as? Bool ?? baseline.dwindleSmartSplit
-        dwindleDefaultSplitRatio = defaults.object(forKey: Keys.dwindleDefaultSplitRatio) as? Double ??
-            baseline.dwindleDefaultSplitRatio
-        dwindleSplitWidthMultiplier = defaults.object(forKey: Keys.dwindleSplitWidthMultiplier) as? Double ??
-            baseline.dwindleSplitWidthMultiplier
-        dwindleSingleWindowAspectRatio = DwindleSingleWindowAspectRatio(
-            rawValue: defaults.string(forKey: Keys.dwindleSingleWindowAspectRatio) ?? ""
-        ) ?? DwindleSingleWindowAspectRatio(rawValue: baseline.dwindleSingleWindowAspectRatio) ?? .ratio4x3
-        dwindleUseGlobalGaps = defaults.object(forKey: Keys.dwindleUseGlobalGaps) as? Bool ??
-            baseline.dwindleUseGlobalGaps
-        dwindleMoveToRootStable = defaults.object(forKey: Keys.dwindleMoveToRootStable) as? Bool ??
-            baseline.dwindleMoveToRootStable
-        monitorDwindleSettings = MonitorSettingsStore.load(from: defaults, key: Keys.monitorDwindleSettings)
-
-        preventSleepEnabled = defaults.object(forKey: Keys.preventSleepEnabled) as? Bool ?? baseline.preventSleepEnabled
-        updateChecksEnabled = defaults.object(forKey: Keys.updateChecksEnabled) as? Bool ?? baseline.updateChecksEnabled
-        ipcEnabled = defaults.object(forKey: Keys.ipcEnabled) as? Bool ?? baseline.ipcEnabled
-        scrollGestureEnabled = defaults.object(forKey: Keys.scrollGestureEnabled) as? Bool ??
-            baseline.scrollGestureEnabled
-        scrollSensitivity = defaults.object(forKey: Keys.scrollSensitivity) as? Double ?? baseline.scrollSensitivity
-        scrollModifierKey = ScrollModifierKey(rawValue: defaults.string(forKey: Keys.scrollModifierKey) ?? "") ??
-            ScrollModifierKey(rawValue: baseline.scrollModifierKey) ?? .optionShift
-        gestureFingerCount = GestureFingerCount(
-            rawValue: defaults.object(forKey: Keys.gestureFingerCount) as? Int ?? baseline.gestureFingerCount
-        ) ?? .three
-        gestureInvertDirection = defaults.object(forKey: Keys.gestureInvertDirection) as? Bool ??
-            baseline.gestureInvertDirection
-        statusBarShowWorkspaceName = defaults.object(forKey: Keys.statusBarShowWorkspaceName) as? Bool ?? false
-        statusBarShowAppNames = defaults.object(forKey: Keys.statusBarShowAppNames) as? Bool ?? false
-        statusBarUseWorkspaceId = defaults.object(forKey: Keys.statusBarUseWorkspaceId) as? Bool ?? false
-
-        commandPaletteLastMode = CommandPaletteMode(
-            rawValue: defaults.string(forKey: Keys.commandPaletteLastMode) ?? ""
-        ) ?? CommandPaletteMode(rawValue: baseline.commandPaletteLastMode) ?? .windows
-
-        animationsEnabled = defaults.object(forKey: Keys.animationsEnabled) as? Bool ?? baseline.animationsEnabled
-
-        hiddenBarIsCollapsed = defaults.object(forKey: Keys.hiddenBarIsCollapsed) as? Bool ??
-            baseline.hiddenBarIsCollapsed
-
-        quakeTerminalEnabled = defaults.object(forKey: Keys.quakeTerminalEnabled) as? Bool ?? baseline.quakeTerminalEnabled
-        quakeTerminalPosition = QuakeTerminalPosition(
-            rawValue: defaults.string(forKey: Keys.quakeTerminalPosition) ?? ""
-        ) ?? QuakeTerminalPosition(rawValue: baseline.quakeTerminalPosition) ?? .center
-        quakeTerminalWidthPercent = defaults.object(forKey: Keys.quakeTerminalWidthPercent) as? Double ??
-            baseline.quakeTerminalWidthPercent
-        quakeTerminalHeightPercent = defaults.object(forKey: Keys.quakeTerminalHeightPercent) as? Double ??
-            baseline.quakeTerminalHeightPercent
-        quakeTerminalAnimationDuration = defaults.object(forKey: Keys.quakeTerminalAnimationDuration) as? Double ??
-            baseline.quakeTerminalAnimationDuration
-        quakeTerminalAutoHide = defaults.object(forKey: Keys.quakeTerminalAutoHide) as? Bool ??
-            baseline.quakeTerminalAutoHide
-        quakeTerminalOpacity = defaults.object(forKey: Keys.quakeTerminalOpacity) as? Double ??
-            (baseline.quakeTerminalOpacity ?? 1.0)
-        quakeTerminalMonitorMode = QuakeTerminalMonitorMode(
-            rawValue: defaults.string(forKey: Keys.quakeTerminalMonitorMode) ?? ""
-        ) ?? QuakeTerminalMonitorMode(rawValue: baseline.quakeTerminalMonitorMode ?? "") ?? .focusedWindow
-        quakeTerminalUseCustomFrame = defaults.object(forKey: Keys.quakeTerminalUseCustomFrame) as? Bool ??
-            baseline.quakeTerminalUseCustomFrame
-        quakeTerminalCustomFrameX = defaults.object(forKey: Keys.quakeTerminalCustomFrameX) as? Double
-        quakeTerminalCustomFrameY = defaults.object(forKey: Keys.quakeTerminalCustomFrameY) as? Double
-        quakeTerminalCustomFrameWidth = defaults.object(forKey: Keys.quakeTerminalCustomFrameWidth) as? Double
-        quakeTerminalCustomFrameHeight = defaults.object(forKey: Keys.quakeTerminalCustomFrameHeight) as? Double
-        appearanceMode = AppearanceMode(rawValue: defaults.string(forKey: Keys.appearanceMode) ?? "") ??
-            AppearanceMode(rawValue: baseline.appearanceMode) ?? .dark
-    }
-
-    private static func loadBindings(from defaults: UserDefaults) -> [HotkeyBinding] {
-        guard let data = defaults.data(forKey: Keys.hotkeyBindings),
-              let bindings = HotkeyBindingRegistry.decodePersistedBindings(from: data)
-        else {
-            return HotkeyBindingRegistry.defaults()
-        }
-
-        if let cleanedData = try? JSONEncoder().encode(bindings) {
-            defaults.set(cleanedData, forKey: Keys.hotkeyBindings)
-        }
-
-        return bindings
-    }
-
-    private func saveBindings() {
-        guard let data = try? JSONEncoder().encode(hotkeyBindings) else { return }
-        defaults.set(data, forKey: Keys.hotkeyBindings)
+    func resetQuakeTerminalCustomFrame() {
+        quakeTerminalUseCustomFrame = false
+        quakeTerminalCustomFrame = nil
     }
 
     func resetHotkeysToDefaults() {
@@ -709,31 +547,6 @@ final class SettingsStore {
         workspaceConfigurations.first(where: { $0.name == workspaceName })?.effectiveDisplayName ?? workspaceName
     }
 
-    private func rebindMonitorSettings<T: MonitorSettingsType>(
-        _ keyPath: ReferenceWritableKeyPath<SettingsStore, [T]>,
-        to monitors: [Monitor]
-    ) {
-        let currentSettings = self[keyPath: keyPath]
-        let reboundSettings = MonitorSettingsStore.rebound(currentSettings, to: monitors)
-        if reboundSettings != currentSettings {
-            self[keyPath: keyPath] = reboundSettings
-        }
-    }
-
-    private static func loadWorkspaceConfigurations(from defaults: UserDefaults) -> [WorkspaceConfiguration] {
-        if let data = defaults.data(forKey: Keys.workspaceConfigurations),
-           let configs = try? JSONDecoder().decode([WorkspaceConfiguration].self, from: data)
-        {
-            return normalizedWorkspaceConfigurations(configs)
-        }
-        return normalizedWorkspaceConfigurations([])
-    }
-
-    private func saveWorkspaceConfigurations() {
-        guard let data = try? JSONEncoder().encode(workspaceConfigurations) else { return }
-        defaults.set(data, forKey: Keys.workspaceConfigurations)
-    }
-
     func effectiveMouseWarpMonitorOrder(for monitors: [Monitor], axis: MouseWarpAxis? = nil) -> [String] {
         let sortedNames = (axis ?? mouseWarpAxis).sortedMonitors(monitors).map(\.name)
         guard !sortedNames.isEmpty else { return [] }
@@ -789,20 +602,6 @@ final class SettingsStore {
         return effectiveMouseWarpMonitorOrder(for: monitors, axis: warpAxis)
     }
 
-    private static func normalizedWorkspaceConfigurations(_ configs: [WorkspaceConfiguration]) -> [WorkspaceConfiguration] {
-        var seen: Set<String> = []
-        let normalized = configs
-            .filter { WorkspaceIDPolicy.normalizeRawID($0.name) != nil }
-            .filter { seen.insert($0.name).inserted }
-            .sorted { WorkspaceIDPolicy.sortsBefore($0.name, $1.name) }
-
-        if normalized.isEmpty {
-            return BuiltInSettingsDefaults.workspaceConfigurations
-        }
-
-        return normalized
-    }
-
     func barSettings(for monitor: Monitor) -> MonitorBarSettings? {
         MonitorSettingsStore.get(for: monitor, in: monitorBarSettings)
     }
@@ -831,47 +630,6 @@ final class SettingsStore {
         resolvedBarSettings(override: barSettings(for: monitorName))
     }
 
-    private func resolvedBarSettings(override: MonitorBarSettings?) -> ResolvedBarSettings {
-        return ResolvedBarSettings(
-            enabled: override?.enabled ?? workspaceBarEnabled,
-            showLabels: override?.showLabels ?? workspaceBarShowLabels,
-            showFloatingWindows: override?.showFloatingWindows ?? workspaceBarShowFloatingWindows,
-            deduplicateAppIcons: override?.deduplicateAppIcons ?? workspaceBarDeduplicateAppIcons,
-            hideEmptyWorkspaces: override?.hideEmptyWorkspaces ?? workspaceBarHideEmptyWorkspaces,
-            reserveLayoutSpace: override?.reserveLayoutSpace ?? workspaceBarReserveLayoutSpace,
-            notchAware: override?.notchAware ?? workspaceBarNotchAware,
-            position: override?.position ?? workspaceBarPosition,
-            windowLevel: override?.windowLevel ?? workspaceBarWindowLevel,
-            height: override?.height ?? workspaceBarHeight,
-            backgroundOpacity: override?.backgroundOpacity ?? workspaceBarBackgroundOpacity,
-            xOffset: override?.xOffset ?? workspaceBarXOffset,
-            yOffset: override?.yOffset ?? workspaceBarYOffset,
-            accentColorRed: workspaceBarAccentColorRed,
-            accentColorGreen: workspaceBarAccentColorGreen,
-            accentColorBlue: workspaceBarAccentColorBlue,
-            accentColorAlpha: workspaceBarAccentColorAlpha,
-            textColorRed: workspaceBarTextColorRed,
-            textColorGreen: workspaceBarTextColorGreen,
-            textColorBlue: workspaceBarTextColorBlue,
-            textColorAlpha: workspaceBarTextColorAlpha,
-            labelFontSize: workspaceBarLabelFontSize
-        )
-    }
-
-    private static func loadAppRules(from defaults: UserDefaults) -> [AppRule] {
-        guard let data = defaults.data(forKey: Keys.appRules),
-              let rules = try? JSONDecoder().decode([AppRule].self, from: data)
-        else {
-            return BuiltInSettingsDefaults.appRules
-        }
-        return rules
-    }
-
-    private func saveAppRules() {
-        guard let data = try? JSONEncoder().encode(appRules) else { return }
-        defaults.set(data, forKey: Keys.appRules)
-    }
-
     func appRule(for bundleId: String) -> AppRule? {
         appRules.first { $0.bundleId == bundleId }
     }
@@ -886,8 +644,7 @@ final class SettingsStore {
 
     func effectiveOrientation(for monitor: Monitor) -> Monitor.Orientation {
         if let override = orientationSettings(for: monitor),
-           let orientation = override.orientation
-        {
+           let orientation = override.orientation {
             return orientation
         }
         return monitor.autoOrientation
@@ -933,17 +690,6 @@ final class SettingsStore {
         resolvedNiriSettings(override: niriSettings(for: monitorName))
     }
 
-    private func resolvedNiriSettings(override: MonitorNiriSettings?) -> ResolvedNiriSettings {
-        return ResolvedNiriSettings(
-            maxVisibleColumns: override?.maxVisibleColumns ?? niriMaxVisibleColumns,
-            maxWindowsPerColumn: override?.maxWindowsPerColumn ?? niriMaxWindowsPerColumn,
-            centerFocusedColumn: override?.centerFocusedColumn ?? niriCenterFocusedColumn,
-            alwaysCenterSingleColumn: override?.alwaysCenterSingleColumn ?? niriAlwaysCenterSingleColumn,
-            singleWindowAspectRatio: override?.singleWindowAspectRatio ?? niriSingleWindowAspectRatio,
-            infiniteLoop: override?.infiniteLoop ?? niriInfiniteLoop
-        )
-    }
-
     func dwindleSettings(for monitor: Monitor) -> MonitorDwindleSettings? {
         MonitorSettingsStore.get(for: monitor, in: monitorDwindleSettings)
     }
@@ -972,6 +718,310 @@ final class SettingsStore {
         resolvedDwindleSettings(override: dwindleSettings(for: monitorName))
     }
 
+    nonisolated static let defaultColumnWidthPresets: [Double] = BuiltInSettingsDefaults.niriColumnWidthPresets
+    nonisolated static let workspaceBarLabelFontSizeRange: ClosedRange<Double> = 10 ... 16
+
+    nonisolated static func validatedPresets(_ presets: [Double]) -> [Double] {
+        let result = presets.map { min(1.0, max(0.05, $0)) }
+        if result.count < 2 {
+            return defaultColumnWidthPresets
+        }
+        return result
+    }
+
+    nonisolated static func validatedDefaultColumnWidth(_ width: Double?) -> Double? {
+        guard let width else { return nil }
+        return min(1.0, max(0.05, width))
+    }
+
+    nonisolated static func normalizedWorkspaceBarLabelFontSize(_ size: Double) -> Double {
+        min(workspaceBarLabelFontSizeRange.upperBound, max(workspaceBarLabelFontSizeRange.lowerBound, size))
+    }
+
+    func toExport() -> SettingsExport {
+        SettingsExport(
+            version: SettingsFilePersistence.configVersion,
+            hotkeysEnabled: hotkeysEnabled,
+            focusFollowsMouse: focusFollowsMouse,
+            moveMouseToFocusedWindow: moveMouseToFocusedWindow,
+            focusFollowsWindowToMonitor: focusFollowsWindowToMonitor,
+            mouseWarpMonitorOrder: mouseWarpMonitorOrder,
+            mouseWarpAxis: mouseWarpAxis.rawValue,
+            mouseWarpMargin: mouseWarpMargin,
+            gapSize: gapSize,
+            outerGapLeft: outerGapLeft,
+            outerGapRight: outerGapRight,
+            outerGapTop: outerGapTop,
+            outerGapBottom: outerGapBottom,
+            niriMaxWindowsPerColumn: niriMaxWindowsPerColumn,
+            niriMaxVisibleColumns: niriMaxVisibleColumns,
+            niriInfiniteLoop: niriInfiniteLoop,
+            niriCenterFocusedColumn: niriCenterFocusedColumn.rawValue,
+            niriAlwaysCenterSingleColumn: niriAlwaysCenterSingleColumn,
+            niriSingleWindowAspectRatio: niriSingleWindowAspectRatio.rawValue,
+            niriColumnWidthPresets: niriColumnWidthPresets,
+            niriDefaultColumnWidth: niriDefaultColumnWidth,
+            workspaceConfigurations: workspaceConfigurations,
+            defaultLayoutType: defaultLayoutType.rawValue,
+            bordersEnabled: bordersEnabled,
+            borderWidth: borderWidth,
+            borderColorRed: borderColorRed,
+            borderColorGreen: borderColorGreen,
+            borderColorBlue: borderColorBlue,
+            borderColorAlpha: borderColorAlpha,
+            hotkeyBindings: hotkeyBindings,
+            workspaceBarEnabled: workspaceBarEnabled,
+            workspaceBarShowLabels: workspaceBarShowLabels,
+            workspaceBarShowFloatingWindows: workspaceBarShowFloatingWindows,
+            workspaceBarWindowLevel: workspaceBarWindowLevel.rawValue,
+            workspaceBarPosition: workspaceBarPosition.rawValue,
+            workspaceBarNotchAware: workspaceBarNotchAware,
+            workspaceBarDeduplicateAppIcons: workspaceBarDeduplicateAppIcons,
+            workspaceBarHideEmptyWorkspaces: workspaceBarHideEmptyWorkspaces,
+            workspaceBarReserveLayoutSpace: workspaceBarReserveLayoutSpace,
+            workspaceBarHeight: workspaceBarHeight,
+            workspaceBarBackgroundOpacity: workspaceBarBackgroundOpacity,
+            workspaceBarXOffset: workspaceBarXOffset,
+            workspaceBarYOffset: workspaceBarYOffset,
+            workspaceBarAccentColorRed: workspaceBarAccentColorRed,
+            workspaceBarAccentColorGreen: workspaceBarAccentColorGreen,
+            workspaceBarAccentColorBlue: workspaceBarAccentColorBlue,
+            workspaceBarAccentColorAlpha: workspaceBarAccentColorAlpha,
+            workspaceBarTextColorRed: workspaceBarTextColorRed,
+            workspaceBarTextColorGreen: workspaceBarTextColorGreen,
+            workspaceBarTextColorBlue: workspaceBarTextColorBlue,
+            workspaceBarTextColorAlpha: workspaceBarTextColorAlpha,
+            workspaceBarLabelFontSize: workspaceBarLabelFontSize,
+            monitorBarSettings: monitorBarSettings,
+            appRules: appRules,
+            monitorOrientationSettings: monitorOrientationSettings,
+            monitorNiriSettings: monitorNiriSettings,
+            dwindleSmartSplit: dwindleSmartSplit,
+            dwindleDefaultSplitRatio: dwindleDefaultSplitRatio,
+            dwindleSplitWidthMultiplier: dwindleSplitWidthMultiplier,
+            dwindleSingleWindowAspectRatio: dwindleSingleWindowAspectRatio.rawValue,
+            dwindleUseGlobalGaps: dwindleUseGlobalGaps,
+            dwindleMoveToRootStable: dwindleMoveToRootStable,
+            monitorDwindleSettings: monitorDwindleSettings,
+            preventSleepEnabled: preventSleepEnabled,
+            updateChecksEnabled: updateChecksEnabled,
+            ipcEnabled: ipcEnabled,
+            scrollGestureEnabled: scrollGestureEnabled,
+            scrollSensitivity: scrollSensitivity,
+            scrollModifierKey: scrollModifierKey.rawValue,
+            gestureFingerCount: gestureFingerCount.rawValue,
+            gestureInvertDirection: gestureInvertDirection,
+            statusBarShowWorkspaceName: statusBarShowWorkspaceName,
+            statusBarShowAppNames: statusBarShowAppNames,
+            statusBarUseWorkspaceId: statusBarUseWorkspaceId,
+            commandPaletteLastMode: commandPaletteLastMode.rawValue,
+            animationsEnabled: animationsEnabled,
+            hiddenBarIsCollapsed: hiddenBarIsCollapsed,
+            quakeTerminalEnabled: quakeTerminalEnabled,
+            quakeTerminalPosition: quakeTerminalPosition.rawValue,
+            quakeTerminalWidthPercent: quakeTerminalWidthPercent,
+            quakeTerminalHeightPercent: quakeTerminalHeightPercent,
+            quakeTerminalAnimationDuration: quakeTerminalAnimationDuration,
+            quakeTerminalAutoHide: quakeTerminalAutoHide,
+            quakeTerminalOpacity: quakeTerminalOpacity,
+            quakeTerminalMonitorMode: quakeTerminalMonitorMode.rawValue,
+            quakeTerminalUseCustomFrame: quakeTerminalUseCustomFrame,
+            quakeTerminalCustomFrame: quakeTerminalCustomFrame.map(QuakeTerminalFrameExport.init(frame:)),
+            appearanceMode: appearanceMode.rawValue
+        )
+    }
+
+    func applyExport(_ export: SettingsExport, monitors: [Monitor]) {
+        let baseline = SettingsStore.defaultExport
+
+        isApplyingExport = true
+        defer { isApplyingExport = false }
+
+        hotkeysEnabled = export.hotkeysEnabled
+        focusFollowsMouse = export.focusFollowsMouse
+        moveMouseToFocusedWindow = export.moveMouseToFocusedWindow
+        focusFollowsWindowToMonitor = export.focusFollowsWindowToMonitor
+        mouseWarpMonitorOrder = export.mouseWarpMonitorOrder
+        mouseWarpAxis = MouseWarpAxis(rawValue: export.mouseWarpAxis ?? baseline.mouseWarpAxis ?? "") ?? .horizontal
+        mouseWarpMargin = export.mouseWarpMargin
+        gapSize = export.gapSize
+        outerGapLeft = export.outerGapLeft
+        outerGapRight = export.outerGapRight
+        outerGapTop = export.outerGapTop
+        outerGapBottom = export.outerGapBottom
+
+        niriMaxWindowsPerColumn = export.niriMaxWindowsPerColumn
+        niriMaxVisibleColumns = export.niriMaxVisibleColumns
+        niriInfiniteLoop = export.niriInfiniteLoop
+        niriCenterFocusedColumn = CenterFocusedColumn(rawValue: export.niriCenterFocusedColumn) ?? .never
+        niriAlwaysCenterSingleColumn = export.niriAlwaysCenterSingleColumn
+        niriSingleWindowAspectRatio = SingleWindowAspectRatio(rawValue: export.niriSingleWindowAspectRatio) ?? .ratio4x3
+        niriColumnWidthPresets = SettingsStore.validatedPresets(
+            export.niriColumnWidthPresets ?? baseline.niriColumnWidthPresets ?? SettingsStore.defaultColumnWidthPresets
+        )
+        niriDefaultColumnWidth = SettingsStore.validatedDefaultColumnWidth(export.niriDefaultColumnWidth)
+
+        workspaceConfigurations = Self.normalizedImportedWorkspaceConfigurations(
+            export.workspaceConfigurations,
+            monitors: monitors
+        )
+        defaultLayoutType = LayoutType(rawValue: export.defaultLayoutType) ?? .niri
+
+        bordersEnabled = export.bordersEnabled
+        borderWidth = export.borderWidth
+        borderColorRed = export.borderColorRed
+        borderColorGreen = export.borderColorGreen
+        borderColorBlue = export.borderColorBlue
+        borderColorAlpha = export.borderColorAlpha
+
+        hotkeyBindings = export.hotkeyBindings
+
+        workspaceBarEnabled = export.workspaceBarEnabled
+        workspaceBarShowLabels = export.workspaceBarShowLabels
+        workspaceBarShowFloatingWindows = export.workspaceBarShowFloatingWindows
+        workspaceBarWindowLevel = WorkspaceBarWindowLevel(rawValue: export.workspaceBarWindowLevel) ?? .popup
+        workspaceBarPosition = WorkspaceBarPosition(rawValue: export.workspaceBarPosition) ?? .overlappingMenuBar
+        workspaceBarNotchAware = export.workspaceBarNotchAware
+        workspaceBarDeduplicateAppIcons = export.workspaceBarDeduplicateAppIcons
+        workspaceBarHideEmptyWorkspaces = export.workspaceBarHideEmptyWorkspaces
+        workspaceBarReserveLayoutSpace = export.workspaceBarReserveLayoutSpace
+        workspaceBarHeight = export.workspaceBarHeight
+        workspaceBarBackgroundOpacity = export.workspaceBarBackgroundOpacity
+        workspaceBarXOffset = export.workspaceBarXOffset
+        workspaceBarYOffset = export.workspaceBarYOffset
+        workspaceBarAccentColorRed = export.workspaceBarAccentColorRed
+        workspaceBarAccentColorGreen = export.workspaceBarAccentColorGreen
+        workspaceBarAccentColorBlue = export.workspaceBarAccentColorBlue
+        workspaceBarAccentColorAlpha = export.workspaceBarAccentColorAlpha
+        workspaceBarTextColorRed = export.workspaceBarTextColorRed
+        workspaceBarTextColorGreen = export.workspaceBarTextColorGreen
+        workspaceBarTextColorBlue = export.workspaceBarTextColorBlue
+        workspaceBarTextColorAlpha = export.workspaceBarTextColorAlpha
+        workspaceBarLabelFontSize = SettingsStore.normalizedWorkspaceBarLabelFontSize(export.workspaceBarLabelFontSize)
+        monitorBarSettings = Self.reboundMonitorBarSettings(export.monitorBarSettings, monitors: monitors)
+
+        appRules = export.appRules
+        monitorOrientationSettings = Self.reboundMonitorOrientationSettings(
+            export.monitorOrientationSettings,
+            monitors: monitors
+        )
+        monitorNiriSettings = Self.reboundMonitorNiriSettings(export.monitorNiriSettings, monitors: monitors)
+
+        dwindleSmartSplit = export.dwindleSmartSplit
+        dwindleDefaultSplitRatio = export.dwindleDefaultSplitRatio
+        dwindleSplitWidthMultiplier = export.dwindleSplitWidthMultiplier
+        dwindleSingleWindowAspectRatio = DwindleSingleWindowAspectRatio(
+            rawValue: export.dwindleSingleWindowAspectRatio
+        ) ?? .ratio4x3
+        dwindleUseGlobalGaps = export.dwindleUseGlobalGaps
+        dwindleMoveToRootStable = export.dwindleMoveToRootStable
+        monitorDwindleSettings = Self.reboundMonitorDwindleSettings(export.monitorDwindleSettings, monitors: monitors)
+
+        preventSleepEnabled = export.preventSleepEnabled
+        updateChecksEnabled = export.updateChecksEnabled
+        ipcEnabled = export.ipcEnabled
+        scrollGestureEnabled = export.scrollGestureEnabled
+        scrollSensitivity = export.scrollSensitivity
+        scrollModifierKey = ScrollModifierKey(rawValue: export.scrollModifierKey) ?? .optionShift
+        gestureFingerCount = GestureFingerCount(rawValue: export.gestureFingerCount) ?? .three
+        gestureInvertDirection = export.gestureInvertDirection
+        statusBarShowWorkspaceName = export.statusBarShowWorkspaceName
+        statusBarShowAppNames = export.statusBarShowAppNames
+        statusBarUseWorkspaceId = export.statusBarUseWorkspaceId
+        commandPaletteLastMode = CommandPaletteMode(rawValue: export.commandPaletteLastMode) ?? .windows
+        animationsEnabled = export.animationsEnabled
+
+        hiddenBarIsCollapsed = export.hiddenBarIsCollapsed
+
+        quakeTerminalEnabled = export.quakeTerminalEnabled
+        quakeTerminalPosition = QuakeTerminalPosition(rawValue: export.quakeTerminalPosition) ?? .center
+        quakeTerminalWidthPercent = export.quakeTerminalWidthPercent
+        quakeTerminalHeightPercent = export.quakeTerminalHeightPercent
+        quakeTerminalAnimationDuration = export.quakeTerminalAnimationDuration
+        quakeTerminalAutoHide = export.quakeTerminalAutoHide
+        quakeTerminalOpacity = export.quakeTerminalOpacity ?? baseline.quakeTerminalOpacity ?? 1.0
+        quakeTerminalMonitorMode = QuakeTerminalMonitorMode(
+            rawValue: export.quakeTerminalMonitorMode ?? baseline.quakeTerminalMonitorMode ?? ""
+        ) ?? .focusedWindow
+        quakeTerminalUseCustomFrame = export.quakeTerminalUseCustomFrame
+        quakeTerminalCustomFrame = export.quakeTerminalCustomFrame?.frame
+
+        appearanceMode = AppearanceMode(rawValue: export.appearanceMode) ?? .automatic
+    }
+
+    private func handleExternalReload(_ export: SettingsExport) {
+        applyExport(export, monitors: Monitor.current())
+        onExternalSettingsReloaded?()
+    }
+
+    private func scheduleSave() {
+        guard autosaveEnabled, !isApplyingExport else { return }
+        persistence.scheduleSave(toExport())
+    }
+
+    private func rebindMonitorSettings<T: MonitorSettingsType>(
+        _ keyPath: ReferenceWritableKeyPath<SettingsStore, [T]>,
+        to monitors: [Monitor]
+    ) {
+        let currentSettings = self[keyPath: keyPath]
+        let reboundSettings = MonitorSettingsStore.rebound(currentSettings, to: monitors)
+        if reboundSettings != currentSettings {
+            self[keyPath: keyPath] = reboundSettings
+        }
+    }
+
+    nonisolated private static func normalizedWorkspaceConfigurations(_ configs: [WorkspaceConfiguration]) -> [WorkspaceConfiguration] {
+        var seen: Set<String> = []
+        let normalized = configs
+            .filter { WorkspaceIDPolicy.normalizeRawID($0.name) != nil }
+            .filter { seen.insert($0.name).inserted }
+            .sorted { WorkspaceIDPolicy.sortsBefore($0.name, $1.name) }
+
+        if normalized.isEmpty {
+            return BuiltInSettingsDefaults.workspaceConfigurations
+        }
+
+        return normalized
+    }
+
+    private func resolvedBarSettings(override: MonitorBarSettings?) -> ResolvedBarSettings {
+        ResolvedBarSettings(
+            enabled: override?.enabled ?? workspaceBarEnabled,
+            showLabels: override?.showLabels ?? workspaceBarShowLabels,
+            showFloatingWindows: override?.showFloatingWindows ?? workspaceBarShowFloatingWindows,
+            deduplicateAppIcons: override?.deduplicateAppIcons ?? workspaceBarDeduplicateAppIcons,
+            hideEmptyWorkspaces: override?.hideEmptyWorkspaces ?? workspaceBarHideEmptyWorkspaces,
+            reserveLayoutSpace: override?.reserveLayoutSpace ?? workspaceBarReserveLayoutSpace,
+            notchAware: override?.notchAware ?? workspaceBarNotchAware,
+            position: override?.position ?? workspaceBarPosition,
+            windowLevel: override?.windowLevel ?? workspaceBarWindowLevel,
+            height: override?.height ?? workspaceBarHeight,
+            backgroundOpacity: override?.backgroundOpacity ?? workspaceBarBackgroundOpacity,
+            xOffset: override?.xOffset ?? workspaceBarXOffset,
+            yOffset: override?.yOffset ?? workspaceBarYOffset,
+            accentColorRed: workspaceBarAccentColorRed,
+            accentColorGreen: workspaceBarAccentColorGreen,
+            accentColorBlue: workspaceBarAccentColorBlue,
+            accentColorAlpha: workspaceBarAccentColorAlpha,
+            textColorRed: workspaceBarTextColorRed,
+            textColorGreen: workspaceBarTextColorGreen,
+            textColorBlue: workspaceBarTextColorBlue,
+            textColorAlpha: workspaceBarTextColorAlpha,
+            labelFontSize: workspaceBarLabelFontSize
+        )
+    }
+
+    private func resolvedNiriSettings(override: MonitorNiriSettings?) -> ResolvedNiriSettings {
+        ResolvedNiriSettings(
+            maxVisibleColumns: override?.maxVisibleColumns ?? niriMaxVisibleColumns,
+            maxWindowsPerColumn: override?.maxWindowsPerColumn ?? niriMaxWindowsPerColumn,
+            centerFocusedColumn: override?.centerFocusedColumn ?? niriCenterFocusedColumn,
+            alwaysCenterSingleColumn: override?.alwaysCenterSingleColumn ?? niriAlwaysCenterSingleColumn,
+            singleWindowAspectRatio: override?.singleWindowAspectRatio ?? niriSingleWindowAspectRatio,
+            infiniteLoop: override?.infiniteLoop ?? niriInfiniteLoop
+        )
+    }
+
     private func resolvedDwindleSettings(override: MonitorDwindleSettings?) -> ResolvedDwindleSettings {
         let useGlobalGaps = override?.useGlobalGaps ?? dwindleUseGlobalGaps
         return ResolvedDwindleSettings(
@@ -988,172 +1038,107 @@ final class SettingsStore {
         )
     }
 
-    private static func loadMouseWarpMonitorOrder(from defaults: UserDefaults) -> [String] {
-        guard let data = defaults.data(forKey: Keys.mouseWarpMonitorOrder),
-              let order = try? JSONDecoder().decode([String].self, from: data)
-        else {
-            return []
+    private static func normalizedImportedWorkspaceConfigurations(
+        _ configs: [WorkspaceConfiguration],
+        monitors: [Monitor]
+    ) -> [WorkspaceConfiguration] {
+        var seen: Set<String> = []
+        let rebound = configs.map { config in
+            guard case let .specificDisplay(output) = config.monitorAssignment,
+                  let reboundOutput = output.rebound(in: monitors)
+            else {
+                return config
+            }
+
+            var updated = config
+            updated.monitorAssignment = .specificDisplay(reboundOutput)
+            return updated
         }
-        return order
-    }
 
-    private func saveMouseWarpMonitorOrder() {
-        guard let data = try? JSONEncoder().encode(mouseWarpMonitorOrder) else { return }
-        defaults.set(data, forKey: Keys.mouseWarpMonitorOrder)
-    }
+        let normalized = rebound
+            .filter { WorkspaceIDPolicy.normalizeRawID($0.name) != nil }
+            .filter { seen.insert($0.name).inserted }
+            .sorted { WorkspaceIDPolicy.sortsBefore($0.name, $1.name) }
 
-    nonisolated static let defaultColumnWidthPresets: [Double] = BuiltInSettingsDefaults.niriColumnWidthPresets
-    nonisolated static let workspaceBarLabelFontSizeRange: ClosedRange<Double> = 10 ... 16
-
-    static func validatedPresets(_ presets: [Double]) -> [Double] {
-        let result = presets.map { min(1.0, max(0.05, $0)) }
-        if result.count < 2 {
-            return defaultColumnWidthPresets
+        if normalized.isEmpty {
+            return BuiltInSettingsDefaults.workspaceConfigurations
         }
-        return result
+
+        return normalized
     }
 
-    private static func loadNiriColumnWidthPresets(from defaults: UserDefaults) -> [Double] {
-        guard let data = defaults.data(forKey: Keys.niriColumnWidthPresets),
-              let presets = try? JSONDecoder().decode([Double].self, from: data)
-        else {
-            return defaultColumnWidthPresets
+    private static func reboundMonitorBarSettings(
+        _ settings: [MonitorBarSettings],
+        monitors: [Monitor]
+    ) -> [MonitorBarSettings] {
+        settings.map { setting in
+            var rebound = setting
+            rebound.monitorDisplayId = reboundMonitorDisplayId(
+                rebound.monitorDisplayId,
+                monitorName: rebound.monitorName,
+                monitors: monitors
+            )
+            return rebound
         }
-        return validatedPresets(presets)
     }
 
-    static func validatedDefaultColumnWidth(_ width: Double?) -> Double? {
-        guard let width else { return nil }
-        return min(1.0, max(0.05, width))
-    }
-
-    static func normalizedWorkspaceBarLabelFontSize(_ size: Double) -> Double {
-        min(workspaceBarLabelFontSizeRange.upperBound, max(workspaceBarLabelFontSizeRange.lowerBound, size))
-    }
-
-    private static func loadNiriDefaultColumnWidth(from defaults: UserDefaults) -> Double? {
-        guard let width = defaults.object(forKey: Keys.niriDefaultColumnWidth) as? NSNumber else {
-            return nil
+    private static func reboundMonitorOrientationSettings(
+        _ settings: [MonitorOrientationSettings],
+        monitors: [Monitor]
+    ) -> [MonitorOrientationSettings] {
+        settings.map { setting in
+            var rebound = setting
+            rebound.monitorDisplayId = reboundMonitorDisplayId(
+                rebound.monitorDisplayId,
+                monitorName: rebound.monitorName,
+                monitors: monitors
+            )
+            return rebound
         }
-        return validatedDefaultColumnWidth(width.doubleValue)
     }
 
-    private func saveNiriColumnWidthPresets() {
-        guard let data = try? JSONEncoder().encode(niriColumnWidthPresets) else { return }
-        defaults.set(data, forKey: Keys.niriColumnWidthPresets)
-    }
-
-    private func saveNiriDefaultColumnWidth() {
-        guard let width = niriDefaultColumnWidth else {
-            defaults.removeObject(forKey: Keys.niriDefaultColumnWidth)
-            return
+    private static func reboundMonitorNiriSettings(
+        _ settings: [MonitorNiriSettings],
+        monitors: [Monitor]
+    ) -> [MonitorNiriSettings] {
+        settings.map { setting in
+            var rebound = setting
+            rebound.monitorDisplayId = reboundMonitorDisplayId(
+                rebound.monitorDisplayId,
+                monitorName: rebound.monitorName,
+                monitors: monitors
+            )
+            return rebound
         }
-        defaults.set(width, forKey: Keys.niriDefaultColumnWidth)
     }
-}
 
-private enum Keys {
-    static let hotkeysEnabled = "settings.hotkeysEnabled"
-    static let focusFollowsMouse = "settings.focusFollowsMouse"
-    static let moveMouseToFocusedWindow = "settings.moveMouseToFocusedWindow"
-    static let focusFollowsWindowToMonitor = "settings.focusFollowsWindowToMonitor"
-    static let mouseWarpMonitorOrder = "settings.mouseWarp.monitorOrder"
-    static let mouseWarpAxis = "settings.mouseWarp.axis"
-    static let niriColumnWidthPresets = "settings.niriColumnWidthPresets"
-    static let niriDefaultColumnWidth = "settings.niriDefaultColumnWidth"
-    static let mouseWarpMargin = "settings.mouseWarp.margin"
-    static let gapSize = "settings.gapSize"
+    private static func reboundMonitorDwindleSettings(
+        _ settings: [MonitorDwindleSettings],
+        monitors: [Monitor]
+    ) -> [MonitorDwindleSettings] {
+        settings.map { setting in
+            var rebound = setting
+            rebound.monitorDisplayId = reboundMonitorDisplayId(
+                rebound.monitorDisplayId,
+                monitorName: rebound.monitorName,
+                monitors: monitors
+            )
+            return rebound
+        }
+    }
 
-    static let outerGapLeft = "settings.outerGapLeft"
-    static let outerGapRight = "settings.outerGapRight"
-    static let outerGapTop = "settings.outerGapTop"
-    static let outerGapBottom = "settings.outerGapBottom"
+    private static func reboundMonitorDisplayId(
+        _ displayId: CGDirectDisplayID?,
+        monitorName: String,
+        monitors: [Monitor]
+    ) -> CGDirectDisplayID? {
+        if let displayId,
+           monitors.contains(where: { $0.displayId == displayId }) {
+            return displayId
+        }
 
-    static let niriMaxWindowsPerColumn = "settings.niriMaxWindowsPerColumn"
-    static let niriMaxVisibleColumns = "settings.niriMaxVisibleColumns"
-    static let niriInfiniteLoop = "settings.niriInfiniteLoop"
-    static let niriCenterFocusedColumn = "settings.niriCenterFocusedColumn"
-    static let niriAlwaysCenterSingleColumn = "settings.niriAlwaysCenterSingleColumn"
-    static let niriSingleWindowAspectRatio = "settings.niriSingleWindowAspectRatio"
-    static let monitorNiriSettings = "settings.monitorNiriSettings"
-
-    static let dwindleSmartSplit = "settings.dwindleSmartSplit"
-    static let dwindleDefaultSplitRatio = "settings.dwindleDefaultSplitRatio"
-    static let dwindleSplitWidthMultiplier = "settings.dwindleSplitWidthMultiplier"
-    static let dwindleSingleWindowAspectRatio = "settings.dwindleSingleWindowAspectRatio"
-    static let dwindleUseGlobalGaps = "settings.dwindleUseGlobalGaps"
-    static let dwindleMoveToRootStable = "settings.dwindleMoveToRootStable"
-    static let monitorDwindleSettings = "settings.monitorDwindleSettings"
-
-    static let workspaceConfigurations = "settings.workspaceConfigurations"
-    static let defaultLayoutType = "settings.defaultLayoutType"
-
-    static let bordersEnabled = "settings.bordersEnabled"
-    static let borderWidth = "settings.borderWidth"
-    static let borderColorRed = "settings.borderColorRed"
-    static let borderColorGreen = "settings.borderColorGreen"
-    static let borderColorBlue = "settings.borderColorBlue"
-    static let borderColorAlpha = "settings.borderColorAlpha"
-
-    static let hotkeyBindings = "settings.hotkeyBindings"
-
-    static let workspaceBarEnabled = "settings.workspaceBar.enabled"
-    static let workspaceBarShowLabels = "settings.workspaceBar.showLabels"
-    static let workspaceBarShowFloatingWindows = "settings.workspaceBar.showFloatingWindows"
-    static let workspaceBarWindowLevel = "settings.workspaceBar.windowLevel"
-    static let workspaceBarPosition = "settings.workspaceBar.position"
-    static let workspaceBarNotchAware = "settings.workspaceBar.notchAware"
-    static let workspaceBarDeduplicateAppIcons = "settings.workspaceBar.deduplicateAppIcons"
-    static let workspaceBarHideEmptyWorkspaces = "settings.workspaceBar.hideEmptyWorkspaces"
-    static let workspaceBarReserveLayoutSpace = "settings.workspaceBar.reserveLayoutSpace"
-    static let workspaceBarHeight = "settings.workspaceBar.height"
-    static let workspaceBarBackgroundOpacity = "settings.workspaceBar.backgroundOpacity"
-    static let workspaceBarXOffset = "settings.workspaceBar.xOffset"
-    static let workspaceBarYOffset = "settings.workspaceBar.yOffset"
-    static let workspaceBarAccentColorRed = "settings.workspaceBar.accentColorRed"
-    static let workspaceBarAccentColorGreen = "settings.workspaceBar.accentColorGreen"
-    static let workspaceBarAccentColorBlue = "settings.workspaceBar.accentColorBlue"
-    static let workspaceBarAccentColorAlpha = "settings.workspaceBar.accentColorAlpha"
-    static let workspaceBarTextColorRed = "settings.workspaceBar.textColorRed"
-    static let workspaceBarTextColorGreen = "settings.workspaceBar.textColorGreen"
-    static let workspaceBarTextColorBlue = "settings.workspaceBar.textColorBlue"
-    static let workspaceBarTextColorAlpha = "settings.workspaceBar.textColorAlpha"
-    static let workspaceBarLabelFontSize = "settings.workspaceBar.labelFontSize"
-    static let monitorBarSettings = "settings.workspaceBar.monitorSettings"
-
-    static let appRules = "settings.appRules"
-    static let monitorOrientationSettings = "settings.monitorOrientationSettings"
-    static let preventSleepEnabled = "settings.preventSleepEnabled"
-    static let updateChecksEnabled = "settings.updateChecksEnabled"
-    static let ipcEnabled = "settings.ipcEnabled"
-    static let scrollGestureEnabled = "settings.scrollGestureEnabled"
-    static let scrollSensitivity = "settings.scrollSensitivity"
-    static let scrollModifierKey = "settings.scrollModifierKey"
-    static let gestureFingerCount = "settings.gestureFingerCount"
-    static let gestureInvertDirection = "settings.gestureInvertDirection"
-    static let statusBarShowWorkspaceName = "settings.statusBarShowWorkspaceName"
-    static let statusBarShowAppNames = "settings.statusBarShowAppNames"
-    static let statusBarUseWorkspaceId = "settings.statusBarUseWorkspaceId"
-
-    static let commandPaletteLastMode = "settings.commandPalette.lastMode"
-    static let animationsEnabled = "settings.animationsEnabled"
-
-    static let hiddenBarIsCollapsed = "settings.hiddenBar.isCollapsed"
-
-    static let quakeTerminalEnabled = "settings.quakeTerminal.enabled"
-    static let quakeTerminalPosition = "settings.quakeTerminal.position"
-    static let quakeTerminalWidthPercent = "settings.quakeTerminal.widthPercent"
-    static let quakeTerminalHeightPercent = "settings.quakeTerminal.heightPercent"
-    static let quakeTerminalAnimationDuration = "settings.quakeTerminal.animationDuration"
-    static let quakeTerminalAutoHide = "settings.quakeTerminal.autoHide"
-    static let quakeTerminalOpacity = "settings.quakeTerminal.opacity"
-    static let quakeTerminalMonitorMode = "settings.quakeTerminal.monitorMode"
-    static let quakeTerminalUseCustomFrame = "settings.quakeTerminal.useCustomFrame"
-    static let quakeTerminalCustomFrameX = "settings.quakeTerminal.customFrameX"
-    static let quakeTerminalCustomFrameY = "settings.quakeTerminal.customFrameY"
-    static let quakeTerminalCustomFrameWidth = "settings.quakeTerminal.customFrameWidth"
-    static let quakeTerminalCustomFrameHeight = "settings.quakeTerminal.customFrameHeight"
-
-    static let appearanceMode = "settings.appearanceMode"
-    static let persistedWindowRestoreCatalog = "settings.restoreCatalog"
+        let matches = monitors.filter { $0.name.caseInsensitiveCompare(monitorName) == .orderedSame }
+        guard matches.count == 1 else { return nil }
+        return matches[0].displayId
+    }
 }

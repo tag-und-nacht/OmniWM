@@ -3,19 +3,12 @@ import Testing
 
 @testable import OmniWM
 
-private func makeBootstrapTestDefaults() -> UserDefaults {
-    let suiteName = "com.omniwm.bootstrap.test.\(UUID().uuidString)"
-    return UserDefaults(suiteName: suiteName)!
-}
-
 @Suite struct AppBootstrapPlannerTests {
     @Test func bootstrapBlocksWhenDisplaysHaveSeparateSpacesIsEnabled() {
-        let appDefaults = makeBootstrapTestDefaults()
-        let spacesDefaults = makeBootstrapTestDefaults()
+        let spacesDefaults = UserDefaults(suiteName: "com.omniwm.bootstrap.test.\(UUID().uuidString)")!
         spacesDefaults.set(false, forKey: DisplaysHaveSeparateSpacesRequirement.spansDisplaysKey)
 
         let decision = AppBootstrapPlanner.decision(
-            appDefaults: appDefaults,
             spacesRequirement: DisplaysHaveSeparateSpacesRequirement {
                 spacesDefaults
             }
@@ -25,11 +18,9 @@ private func makeBootstrapTestDefaults() -> UserDefaults {
     }
 
     @Test func bootstrapBlocksWhenSpacesPreferenceIsMissing() {
-        let appDefaults = makeBootstrapTestDefaults()
-        let spacesDefaults = makeBootstrapTestDefaults()
+        let spacesDefaults = UserDefaults(suiteName: "com.omniwm.bootstrap.test.\(UUID().uuidString)")!
 
         let decision = AppBootstrapPlanner.decision(
-            appDefaults: appDefaults,
             spacesRequirement: DisplaysHaveSeparateSpacesRequirement {
                 spacesDefaults
             }
@@ -39,33 +30,15 @@ private func makeBootstrapTestDefaults() -> UserDefaults {
     }
 
     @Test func bootstrapContinuesWhenDisplaysSpanAllScreens() {
-        let appDefaults = makeBootstrapTestDefaults()
-        let spacesDefaults = makeBootstrapTestDefaults()
+        let spacesDefaults = UserDefaults(suiteName: "com.omniwm.bootstrap.test.\(UUID().uuidString)")!
         spacesDefaults.set(true, forKey: DisplaysHaveSeparateSpacesRequirement.spansDisplaysKey)
 
         let decision = AppBootstrapPlanner.decision(
-            appDefaults: appDefaults,
             spacesRequirement: DisplaysHaveSeparateSpacesRequirement {
                 spacesDefaults
             }
         )
 
         #expect(decision == .boot)
-    }
-
-    @Test func bootstrapStillRunsSettingsResetGateWhenSpacesRequirementPasses() {
-        let appDefaults = makeBootstrapTestDefaults()
-        let spacesDefaults = makeBootstrapTestDefaults()
-        spacesDefaults.set(true, forKey: DisplaysHaveSeparateSpacesRequirement.spansDisplaysKey)
-        appDefaults.set(true, forKey: "settings.workspaceBarEnabled")
-
-        let decision = AppBootstrapPlanner.decision(
-            appDefaults: appDefaults,
-            spacesRequirement: DisplaysHaveSeparateSpacesRequirement {
-                spacesDefaults
-            }
-        )
-
-        #expect(decision == .requireSettingsReset(storedEpoch: nil))
     }
 }

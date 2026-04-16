@@ -2,6 +2,29 @@ import AppKit
 
 private let menuWidth: CGFloat = 280
 
+enum SettingsFileAction {
+    case reveal
+    case open
+
+    var failureAlertTitle: String {
+        switch self {
+        case .reveal:
+            "Could Not Reveal Settings File"
+        case .open:
+            "Could Not Open Settings File"
+        }
+    }
+
+    var successAlertTitle: String {
+        switch self {
+        case .reveal:
+            "Settings File Revealed"
+        case .open:
+            "Settings File Opened"
+        }
+    }
+}
+
 @MainActor
 private func applyCurrentAppAppearance(to view: NSView) {
     view.appearance = NSApplication.shared.appearance
@@ -14,8 +37,9 @@ final class StatusBarMenuBuilder {
     private weak var controller: WMController?
     var infoAlertPresenter: (String, String) -> Void
     var confirmationAlertPresenter: (String, String, String, String) -> Bool
-    var configFileURL = SettingsStore.exportURL
-    var configFileActionPerformer: (ConfigFileAction, URL, SettingsStore, WMController) throws -> ExportStatus
+    var configFileURL: URL
+    var openSettingsFile: (URL) -> Bool
+    var revealSettingsFile: ([URL]) -> Void
     var ipcMenuEnabled = false
     var cliManager: AppCLIManager?
     var checkForUpdatesAction: (() -> Void)?
@@ -46,14 +70,9 @@ final class StatusBarMenuBuilder {
             NSApplication.shared.activate(ignoringOtherApps: true)
             return alert.runModal() == .alertFirstButtonReturn
         }
-        configFileActionPerformer = { action, targetURL, settings, controller in
-            try ConfigFileWorkflow.perform(
-                action,
-                targetURL: targetURL,
-                settings: settings,
-                controller: controller
-            )
-        }
+        configFileURL = settings.settingsFileURL
+        openSettingsFile = { NSWorkspace.shared.open($0) }
+        revealSettingsFile = { NSWorkspace.shared.activateFileViewerSelecting($0) }
     }
 
     func buildMenu() -> NSMenu {
@@ -304,45 +323,12 @@ final class StatusBarMenuBuilder {
 
         menu.addItem(createSectionLabel("CONFIG FILE"))
 
-        let exportEditableRow = MenuActionRowView(
-            icon: "square.and.arrow.up",
-            label: "Export Editable Config",
-            motionPolicy: motionPolicy
-        ) { [weak self] in
-            self?.performConfigFileAction(.export(.full))
-        }
-        let exportEditableItem = NSMenuItem()
-        exportEditableItem.view = exportEditableRow
-        menu.addItem(exportEditableItem)
-
-        let exportCompactRow = MenuActionRowView(
-            icon: "archivebox",
-            label: "Export Compact Backup",
-            motionPolicy: motionPolicy
-        ) { [weak self] in
-            self?.performConfigFileAction(.export(.compact))
-        }
-        let exportCompactItem = NSMenuItem()
-        exportCompactItem.view = exportCompactRow
-        menu.addItem(exportCompactItem)
-
-        let importSettingsRow = MenuActionRowView(
-            icon: "square.and.arrow.down",
-            label: "Import Settings",
-            motionPolicy: motionPolicy
-        ) { [weak self] in
-            self?.performConfigFileAction(.import)
-        }
-        let importSettingsItem = NSMenuItem()
-        importSettingsItem.view = importSettingsRow
-        menu.addItem(importSettingsItem)
-
         let revealSettingsFileRow = MenuActionRowView(
             icon: "folder",
             label: "Reveal Settings File",
             motionPolicy: motionPolicy
         ) { [weak self] in
-            self?.performConfigFileAction(.reveal)
+            self?.performSettingsFileAction(.reveal)
         }
         let revealSettingsFileItem = NSMenuItem()
         revealSettingsFileItem.view = revealSettingsFileRow
@@ -353,7 +339,7 @@ final class StatusBarMenuBuilder {
             label: "Open Settings File",
             motionPolicy: motionPolicy
         ) { [weak self] in
-            self?.performConfigFileAction(.open)
+            self?.performSettingsFileAction(.open)
         }
         let openSettingsFileItem = NSMenuItem()
         openSettingsFileItem.view = openSettingsFileRow
@@ -364,20 +350,17 @@ final class StatusBarMenuBuilder {
         checkForUpdatesAction?()
     }
 
-    func performConfigFileAction(_ action: ConfigFileAction) {
+    func performSettingsFileAction(_ action: SettingsFileAction) {
         do {
-            guard let controller else {
-                throw CocoaError(.coderInvalidValue)
+            switch action {
+            case .reveal:
+                revealSettingsFile([configFileURL])
+            case .open:
+                guard openSettingsFile(configFileURL) else {
+                    throw CocoaError(.fileNoSuchFile)
+                }
             }
-            let status = try configFileActionPerformer(
-                action,
-                configFileURL,
-                settings,
-                controller
-            )
-            if let title = status.successAlertTitle {
-                presentInfoAlert(title: title, message: configFileURL.path)
-            }
+            presentInfoAlert(title: action.successAlertTitle, message: configFileURL.path)
         } catch {
             presentInfoAlert(
                 title: action.failureAlertTitle,
