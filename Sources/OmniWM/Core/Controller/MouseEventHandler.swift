@@ -397,7 +397,7 @@ final class MouseEventHandler {
 
     private var isInputSuppressed: Bool {
         guard let controller else { return true }
-        return controller.isLockScreenActive || controller.isFrontmostAppLockScreen()
+        return controller.isCursorAutomationSuppressed
     }
 
     private func dropPendingTapEvents() {

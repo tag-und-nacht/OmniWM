@@ -2101,6 +2101,7 @@ final class WMController {
     }
 
     func moveMouseToWindow(_ token: WindowToken) {
+        guard !isCursorAutomationSuppressed else { return }
         guard let entry = workspaceManager.entry(for: token) else { return }
         guard let frame = AXWindowService.framePreferFast(entry.axRef) else { return }
 
@@ -2117,6 +2118,10 @@ final class WMController {
 }
 
 extension WMController {
+    var isCursorAutomationSuppressed: Bool {
+        isLockScreenActive || isFrontmostAppLockScreen()
+    }
+
     func isFrontmostAppLockScreen() -> Bool {
         lockScreenObserver.isFrontmostAppLockScreen()
     }

@@ -786,6 +786,111 @@ private func prepareMouseResizeFixture(
         #expect(controller.workspaceManager.pendingFocusedHandle == nil)
     }
 
+    @Test @MainActor func focusFollowsMouseReevaluatesAfterCrossMonitorWarp() async {
+        let primaryMonitor = makeLayoutPlanPrimaryTestMonitor(name: "Primary")
+        let secondaryMonitor = makeLayoutPlanSecondaryTestMonitor(name: "Secondary", x: 1920)
+        let controller = makeLayoutPlanTestController(
+            monitors: [primaryMonitor, secondaryMonitor],
+            workspaceConfigurations: [
+                WorkspaceConfiguration(name: "1", monitorAssignment: .main, layoutType: .niri),
+                WorkspaceConfiguration(name: "2", monitorAssignment: .secondary, layoutType: .niri)
+            ]
+        )
+        controller.enableNiriLayout(maxWindowsPerColumn: 1)
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+        controller.syncMonitorsToNiriEngine()
+        controller.setFocusFollowsMouse(true)
+        controller.settings.mouseWarpMonitorOrder = ["Primary", "Secondary"]
+        controller.settings.mouseWarpAxis = .horizontal
+        controller.settings.mouseWarpMargin = 2
+
+        guard let primaryWorkspaceId = controller.workspaceManager.workspaceId(for: "1", createIfMissing: false),
+              let secondaryWorkspaceId = controller.workspaceManager.workspaceId(for: "2", createIfMissing: false),
+              let engine = controller.niriEngine
+        else {
+            Issue.record("Missing two-monitor Niri context for cross-monitor focus-follow test")
+            return
+        }
+
+        guard controller.workspaceManager.setActiveWorkspace(primaryWorkspaceId, on: primaryMonitor.id),
+              controller.workspaceManager.setActiveWorkspace(secondaryWorkspaceId, on: secondaryMonitor.id)
+        else {
+            Issue.record("Failed to activate workspaces for cross-monitor focus-follow test")
+            return
+        }
+        _ = controller.workspaceManager.setInteractionMonitor(secondaryMonitor.id)
+
+        let firstToken = controller.workspaceManager.addWindow(
+            makeMouseEventTestWindow(windowId: 961),
+            pid: getpid(),
+            windowId: 961,
+            to: secondaryWorkspaceId
+        )
+        let secondToken = controller.workspaceManager.addWindow(
+            makeMouseEventTestWindow(windowId: 962),
+            pid: getpid(),
+            windowId: 962,
+            to: secondaryWorkspaceId
+        )
+        guard let firstHandle = controller.workspaceManager.handle(for: firstToken),
+              let secondHandle = controller.workspaceManager.handle(for: secondToken)
+        else {
+            Issue.record("Missing handles for cross-monitor focus-follow test")
+            return
+        }
+
+        let handles = controller.workspaceManager.entries(in: secondaryWorkspaceId).map(\.handle)
+        _ = engine.syncWindows(
+            handles,
+            in: secondaryWorkspaceId,
+            selectedNodeId: nil,
+            focusedHandle: secondHandle
+        )
+        _ = controller.workspaceManager.setManagedFocus(secondHandle, in: secondaryWorkspaceId, onMonitor: secondaryMonitor.id)
+        controller.layoutRefreshController.requestImmediateRelayout(reason: .workspaceTransition)
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+
+        guard let targetFrame = engine.findNode(for: firstHandle)?.frame else {
+            Issue.record("Missing seam-adjacent frame for cross-monitor focus-follow test")
+            return
+        }
+
+        var warpedPoints: [CGPoint] = []
+        controller.mouseWarpHandler.warpCursor = { point in
+            warpedPoints.append(point)
+        }
+        controller.mouseWarpHandler.postMouseMovedEvent = { point in
+            controller.mouseEventHandler.dispatchMouseMoved(
+                at: ScreenCoordinateSpace.toAppKit(point: point)
+            )
+        }
+
+        let warpLocation = CGPoint(
+            x: primaryMonitor.frame.maxX - CGFloat(controller.settings.mouseWarpMargin) + 1,
+            y: targetFrame.midY
+        )
+        controller.mouseWarpHandler.resetDebugStateForTests()
+        controller.mouseWarpHandler.receiveTapMouseWarpMoved(at: warpLocation)
+        controller.mouseWarpHandler.flushPendingWarpEventsForTests()
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+
+        let expectedWarpPoint = ScreenCoordinateSpace.toWindowServer(point: CGPoint(
+            x: secondaryMonitor.frame.minX + CGFloat(controller.settings.mouseWarpMargin) + 1,
+            y: targetFrame.midY
+        ))
+        #expect(targetFrame.contains(CGPoint(
+            x: secondaryMonitor.frame.minX + CGFloat(controller.settings.mouseWarpMargin) + 1,
+            y: targetFrame.midY
+        )))
+        #expect(warpedPoints == [expectedWarpPoint])
+        #expect(controller.workspaceManager.focusedHandle == secondHandle)
+        #expect(controller.workspaceManager.pendingFocusedHandle == firstHandle)
+        #expect(
+            controller.workspaceManager.niriViewportState(for: secondaryWorkspaceId).selectedNodeId
+                == engine.findNode(for: firstHandle)?.id
+        )
+    }
+
     @Test @MainActor func focusFollowsMouseActivatesHoveredDwindleWindow() async {
         let controller = makeMouseEventTestController(
             workspaceConfigurations: [
