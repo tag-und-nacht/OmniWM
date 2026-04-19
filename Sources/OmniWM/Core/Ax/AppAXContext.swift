@@ -95,6 +95,7 @@ final class AppAXContext {
     private let subscribedWindowIds: ThreadGuardedValue<Set<Int>>
 
     @MainActor static var onWindowDestroyed: ((pid_t, Int) -> Void)?
+    @MainActor static var onWindowMinimizedChanged: ((pid_t, Int, Bool) -> Void)?
     @MainActor static var onFocusedWindowChanged: ((pid_t) -> Void)?
 
     @MainActor static var contexts: [pid_t: AppAXContext] = [:]
@@ -167,7 +168,7 @@ final class AppAXContext {
                     let axApp = AXUIElementCreateApplication(pid)
 
                     var observer: AXObserver?
-                    AXObserverCreate(pid, axWindowDestroyedCallback, &observer)
+                    AXObserverCreate(pid, axWindowNotificationCallback, &observer)
 
                     if let obs = observer {
                         CFRunLoopAddSource(CFRunLoopGetCurrent(), AXObserverGetRunLoopSource(obs), .defaultMode)
@@ -254,6 +255,55 @@ final class AppAXContext {
         }
     }
 
+    nonisolated static func handleWindowMinimizedChangedCallback(
+        pid: pid_t,
+        refcon: UnsafeMutableRawPointer?,
+        isMinimized: Bool,
+        handler: (@MainActor @Sendable (pid_t, Int, Bool) -> Void)? = nil
+    ) {
+        guard let windowId = destroyNotificationWindowId(from: refcon) else {
+            assertionFailure("Received AX minimized callback without a valid windowId refcon")
+            return
+        }
+
+        scheduleOnMainRunLoop {
+            if let handler {
+                handler(pid, windowId, isMinimized)
+            } else {
+                AppAXContext.onWindowMinimizedChanged?(pid, windowId, isMinimized)
+            }
+        }
+    }
+
+    nonisolated private static func subscribeTrackedWindowNotifications(
+        observer: AXObserver,
+        element: AXUIElement,
+        windowId: Int
+    ) -> Bool {
+        guard let refcon = destroyNotificationRefcon(for: windowId) else {
+            return false
+        }
+
+        let notifications: [CFString] = [
+            kAXUIElementDestroyedNotification as CFString,
+            kAXWindowMiniaturizedNotification as CFString,
+            kAXWindowDeminiaturizedNotification as CFString
+        ]
+        var fullySubscribed = true
+
+        for notification in notifications {
+            let result = AXObserverAddNotification(observer, element, notification, refcon)
+            switch result {
+            case .success, .notificationAlreadyRegistered, .notificationUnsupported:
+                continue
+            default:
+                fullySubscribed = false
+            }
+        }
+
+        return fullySubscribed
+    }
+
     func getWindowsAsync() async throws -> [(AXWindowRef, Int)] {
         guard let thread else { return [] }
         nonisolated(unsafe) let appThread = thread
@@ -326,16 +376,11 @@ final class AppAXContext {
                 results.append((axRef, windowId))
 
                 if !subscribedWindowIds.contains(windowId), let obs = axObserver.value {
-                    guard let destroyRefcon = AppAXContext.destroyNotificationRefcon(for: windowId) else {
-                        continue
-                    }
-                    let subResult = AXObserverAddNotification(
-                        obs,
-                        element,
-                        kAXUIElementDestroyedNotification as CFString,
-                        destroyRefcon
-                    )
-                    if subResult == .success {
+                    if AppAXContext.subscribeTrackedWindowNotifications(
+                        observer: obs,
+                        element: element,
+                        windowId: windowId
+                    ) {
                         subscribedWindowIds.insert(windowId)
                     }
                 }
@@ -383,16 +428,13 @@ final class AppAXContext {
 
             subscribedWindowIds.remove(oldWindowId)
             if !subscribedWindowIds.contains(newWindow.windowId),
-               let observer = axObserver.value,
-               let destroyRefcon = AppAXContext.destroyNotificationRefcon(for: newWindow.windowId)
+               let observer = axObserver.value
             {
-                let result = AXObserverAddNotification(
-                    observer,
-                    newWindow.element,
-                    kAXUIElementDestroyedNotification as CFString,
-                    destroyRefcon
-                )
-                if result == .success {
+                if AppAXContext.subscribeTrackedWindowNotifications(
+                    observer: observer,
+                    element: newWindow.element,
+                    windowId: newWindow.windowId
+                ) {
                     subscribedWindowIds.insert(newWindow.windowId)
                 }
             }
@@ -570,7 +612,6 @@ final class AppAXContext {
         processIdentifier: pid_t = ProcessInfo.processInfo.processIdentifier
     ) async -> AppAXContext? {
         let nsApp = NSRunningApplication(processIdentifier: processIdentifier)
-            ?? NSWorkspace.shared.frontmostApplication
             ?? NSWorkspace.shared.runningApplications.first(where: { !$0.isTerminated })
         guard let nsApp else {
             return nil
@@ -703,18 +744,34 @@ private func applyFrameWriteRequest(
     )
 }
 
-private func axWindowDestroyedCallback(
+private func axWindowNotificationCallback(
     _: AXObserver,
     _ element: AXUIElement,
     _ notification: CFString,
     _ refcon: UnsafeMutableRawPointer?
 ) {
-    guard (notification as String) == (kAXUIElementDestroyedNotification as String) else { return }
-
     var pid: pid_t = 0
     guard AXUIElementGetPid(element, &pid) == .success else { return }
 
-    AppAXContext.handleWindowDestroyedCallback(pid: pid, refcon: refcon)
+    let notificationName = notification as String
+    switch notificationName {
+    case kAXUIElementDestroyedNotification:
+        AppAXContext.handleWindowDestroyedCallback(pid: pid, refcon: refcon)
+    case kAXWindowMiniaturizedNotification:
+        AppAXContext.handleWindowMinimizedChangedCallback(
+            pid: pid,
+            refcon: refcon,
+            isMinimized: true
+        )
+    case kAXWindowDeminiaturizedNotification:
+        AppAXContext.handleWindowMinimizedChangedCallback(
+            pid: pid,
+            refcon: refcon,
+            isMinimized: false
+        )
+    default:
+        return
+    }
 }
 
 private func axFocusedWindowChangedCallback(

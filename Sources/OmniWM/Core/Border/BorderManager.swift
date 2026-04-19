@@ -8,6 +8,13 @@ final class BorderManager {
     private var lastAppliedFrame: CGRect?
     private var lastAppliedWindowId: Int?
     private var lastAppliedOrderingMetadata: BorderOrderingMetadata?
+    /// Window number the surface coordinator is currently tracking. Re-registration
+    /// with the same number does a `Set` copy+unregister+insert per call, which adds
+    /// up on every displayLink tick during scroll animations. The registered
+    /// providers read `lastAppliedFrame` / `config.enabled` dynamically, so we only
+    /// need to re-register when the underlying border window number actually
+    /// changes (or on first registration).
+    private var registeredBorderWindowNumber: Int?
     private let surfaceCoordinator = SurfaceCoordinator.shared
     private let borderWindowFactory: @MainActor (BorderConfig) -> BorderWindow
 
@@ -82,6 +89,7 @@ final class BorderManager {
         lastAppliedWindowId = nil
         lastAppliedOrderingMetadata = nil
         surfaceCoordinator.unregister(id: surfaceID)
+        registeredBorderWindowNumber = nil
     }
 
     var lastAppliedFocusedWindowIdForTests: Int? {
@@ -97,13 +105,19 @@ final class BorderManager {
         borderWindow?.destroy()
         borderWindow = nil
         surfaceCoordinator.unregister(id: surfaceID)
+        registeredBorderWindowNumber = nil
     }
 
     private func syncSurfaceRegistration() {
         guard let borderWindow, let windowNumber = borderWindow.windowId.map(Int.init) else {
-            surfaceCoordinator.unregister(id: surfaceID)
+            if registeredBorderWindowNumber != nil {
+                surfaceCoordinator.unregister(id: surfaceID)
+                registeredBorderWindowNumber = nil
+            }
             return
         }
+
+        if registeredBorderWindowNumber == windowNumber { return }
 
         surfaceCoordinator.registerWindowNumber(
             id: surfaceID,
@@ -121,6 +135,7 @@ final class BorderManager {
                 suppressesManagedFocusRecovery: false
             )
         )
+        registeredBorderWindowNumber = windowNumber
     }
 
     private var surfaceID: String {

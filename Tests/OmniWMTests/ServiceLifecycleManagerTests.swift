@@ -1,3 +1,4 @@
+import AppKit
 import ApplicationServices
 import CoreGraphics
 import Foundation
@@ -186,6 +187,61 @@ private func waitUntilServiceLifecycleTest(
         #expect(controller.desiredHotkeysEnabled)
         #expect(controller.isEnabled)
         #expect(controller.hotkeysEnabled)
+    }
+
+    @Test @MainActor func workspaceActivationObserversUpdateFrontmostMirrorAndMetrics() async {
+        let defaults = makeLifecycleTestDefaults()
+        let settings = SettingsStore(defaults: defaults)
+        let controller = WMController(settings: settings)
+        let lifecycleManager = controller.serviceLifecycleManager
+        let currentPermissionGranted = true
+        let permissionStream = makeLifecyclePermissionStream(initial: true)
+
+        lifecycleManager.accessibilityPermissionStateProviderForTests = {
+            currentPermissionGranted
+        }
+        lifecycleManager.accessibilityPermissionStreamProviderForTests = { _ in
+            permissionStream.stream
+        }
+        lifecycleManager.accessibilityPermissionRequestHandlerForTests = { false }
+        controller.axEventHandler.focusedWindowRefProvider = { _ in nil }
+        FrontmostApplicationState.shared.setSnapshotForTests(nil)
+        HotPathDebugMetrics.shared.setEnabledForTests(true)
+        HotPathDebugMetrics.shared.reset()
+        defer {
+            permissionStream.continuation.finish()
+            controller.setEnabled(false)
+            FrontmostApplicationState.shared.setSnapshotForTests(nil)
+            HotPathDebugMetrics.shared.setEnabledForTests(false)
+        }
+
+        let pid: pid_t = 42_424
+        let bundleIdentifier = "com.example.frontmost"
+
+        controller.setEnabled(true)
+
+        await waitUntilServiceLifecycleTest {
+            controller.hasStartedServices && controller.isEnabled && controller.hotkeysEnabled
+        }
+
+        lifecycleManager.handleWorkspaceApplicationActivated(
+            pid: pid,
+            bundleIdentifier: bundleIdentifier
+        )
+
+        await waitUntilServiceLifecycleTest {
+            FrontmostApplicationState.shared.snapshot?.pid == pid
+                && HotPathDebugMetrics.shared.snapshot.frontmostActivationEvents == 1
+        }
+
+        #expect(FrontmostApplicationState.shared.snapshot?.bundleIdentifier == bundleIdentifier)
+
+        lifecycleManager.handleWorkspaceApplicationTerminated(pid: pid)
+
+        await waitUntilServiceLifecycleTest {
+            FrontmostApplicationState.shared.snapshot == nil
+                && HotPathDebugMetrics.shared.snapshot.frontmostTerminationEvents == 1
+        }
     }
 
     @Test @MainActor func secureInputSuppressionPersistsAcrossPermissionRestoreUntilSecureInputEnds() async {
@@ -533,6 +589,7 @@ private func waitUntilServiceLifecycleTest(
 
         let left = makeLifecycleMonitor(displayId: 100, name: "Left", x: 0, y: 0)
         let right = makeLifecycleMonitor(displayId: 200, name: "Right", x: 1920, y: 0)
+        settings.mouseWarpMonitorOrder = []
 
         lifecycleManager.applyMonitorConfigurationChanged(
             currentMonitors: [left, right],
@@ -540,7 +597,8 @@ private func waitUntilServiceLifecycleTest(
         )
 
         #expect(controller.isMouseWarpPolicyEnabled)
-        #expect(settings.mouseWarpMonitorOrder == ["Left", "Right"])
+        #expect(settings.mouseWarpMonitorOrder == [OutputId(from: left), OutputId(from: right)])
+        #expect(settings.effectiveMouseWarpMonitorOrder(for: [left, right]) == [left.id, right.id])
 
         lifecycleManager.applyMonitorConfigurationChanged(
             currentMonitors: [left],
@@ -548,7 +606,8 @@ private func waitUntilServiceLifecycleTest(
         )
 
         #expect(!controller.isMouseWarpPolicyEnabled)
-        #expect(settings.mouseWarpMonitorOrder == ["Left", "Right"])
+        #expect(settings.mouseWarpMonitorOrder == [OutputId(from: left), OutputId(from: right)])
+        #expect(settings.effectiveMouseWarpMonitorOrder(for: [left]) == [left.id])
 
         lifecycleManager.applyMonitorConfigurationChanged(
             currentMonitors: [left, right],
@@ -556,6 +615,7 @@ private func waitUntilServiceLifecycleTest(
         )
 
         #expect(controller.isMouseWarpPolicyEnabled)
-        #expect(settings.mouseWarpMonitorOrder == ["Left", "Right"])
+        #expect(settings.mouseWarpMonitorOrder == [OutputId(from: left), OutputId(from: right)])
+        #expect(settings.effectiveMouseWarpMonitorOrder(for: [left, right]) == [left.id, right.id])
     }
 }

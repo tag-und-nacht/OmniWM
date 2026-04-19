@@ -891,6 +891,122 @@ private func syncNiriWorkspaceStatesForRefreshTests(
         #expect(statusBarController.statusButtonTitleForTests() == " 1 \u{2013} Second App")
     }
 
+    @Test @MainActor func geometryOnlyLayoutCommandDoesNotQueueWorkspaceBarRefresh() async {
+        let controller = makeRefreshTestController()
+        defer { cleanupRefreshTestController(controller) }
+
+        guard let workspaceId = controller.activeWorkspace()?.id else {
+            Issue.record("Missing active workspace for geometry-only workspace bar refresh test")
+            return
+        }
+
+        _ = await prepareNiriState(
+            on: controller,
+            assignments: [
+                (workspaceId: workspaceId, windowId: 601),
+                (workspaceId: workspaceId, windowId: 602)
+            ],
+            focusedWindowId: 601
+        )
+
+        controller.resetWorkspaceBarRefreshDebugStateForTests()
+
+        controller.niriLayoutHandler.cycleSize(forward: true)
+        await waitForRefreshWork(on: controller)
+        await controller.waitForWorkspaceBarRefreshForTests()
+
+        #expect(controller.workspaceBarRefreshDebugState.requestCount == 0)
+        #expect(controller.workspaceBarRefreshDebugState.scheduledCount == 0)
+        #expect(controller.workspaceBarRefreshDebugState.executionCount == 0)
+        #expect(!controller.workspaceBarRefreshDebugState.isQueued)
+    }
+
+    @Test @MainActor func focusNavigationStillQueuesWorkspaceBarRefresh() async {
+        let controller = makeRefreshTestController()
+        defer { cleanupRefreshTestController(controller) }
+
+        guard let workspaceId = controller.activeWorkspace()?.id else {
+            Issue.record("Missing active workspace for focus navigation workspace bar refresh test")
+            return
+        }
+
+        _ = await prepareNiriState(
+            on: controller,
+            assignments: [
+                (workspaceId: workspaceId, windowId: 611),
+                (workspaceId: workspaceId, windowId: 612)
+            ],
+            focusedWindowId: 611
+        )
+
+        controller.resetWorkspaceBarRefreshDebugStateForTests()
+
+        controller.niriLayoutHandler.focusNeighbor(direction: .right)
+        await waitForRefreshWork(on: controller)
+
+        #expect(controller.workspaceBarRefreshDebugState.requestCount == 1)
+        #expect(controller.workspaceBarRefreshDebugState.scheduledCount == 1)
+        #expect(controller.workspaceBarRefreshDebugState.executionCount == 0)
+        #expect(controller.workspaceBarRefreshDebugState.isQueued)
+
+        await controller.waitForWorkspaceBarRefreshForTests()
+
+        #expect(controller.workspaceBarRefreshDebugState.executionCount == 1)
+        #expect(!controller.workspaceBarRefreshDebugState.isQueued)
+    }
+
+    @Test @MainActor func dwindleFocusNeighborEnqueuesImmediateRelayoutForActiveWorkspaceOnly() async {
+        let fixture = makeTwoMonitorRefreshTestController()
+        let controller = fixture.controller
+        defer { cleanupRefreshTestController(controller) }
+
+        configureWorkspaceLayouts(on: controller, layoutsByName: ["1": .dwindle, "2": .dwindle])
+        let primaryFirst = addWindow(
+            on: controller,
+            workspaceId: fixture.primaryWorkspaceId,
+            pid: getpid(),
+            windowId: 6_131
+        )
+        _ = addWindow(
+            on: controller,
+            workspaceId: fixture.primaryWorkspaceId,
+            pid: getpid(),
+            windowId: 6_132
+        )
+        _ = addWindow(
+            on: controller,
+            workspaceId: fixture.secondaryWorkspaceId,
+            pid: getpid(),
+            windowId: 6_141
+        )
+
+        controller.enableDwindleLayout()
+        await waitForRefreshWork(on: controller)
+
+        controller.dwindleLayoutHandler.activateWindow(primaryFirst.id, in: fixture.primaryWorkspaceId)
+        await waitForRefreshWork(on: controller)
+
+        var enqueuedRefreshes: [ScheduledRefresh] = []
+        controller.layoutRefreshController.resetDebugState()
+        controller.layoutRefreshController.debugHooks.onRefreshEnqueued = { refresh in
+            enqueuedRefreshes.append(refresh)
+        }
+        controller.layoutRefreshController.debugHooks.onRelayout = { _, _ in
+            true
+        }
+
+        controller.dwindleLayoutHandler.focusNeighbor(direction: .right)
+        await waitForRefreshWork(on: controller)
+
+        guard let refresh = enqueuedRefreshes.last(where: { $0.reason == .layoutCommand }) else {
+            Issue.record("Missing scoped dwindle focus refresh")
+            return
+        }
+
+        #expect(refresh.kind == .immediateRelayout)
+        #expect(refresh.affectedWorkspaceIds == [fixture.primaryWorkspaceId])
+    }
+
     @Test @MainActor func interactionMonitorChangeOnUnassignedThirdDisplayDoesNotRecurseAfterMonitorExpansion() {
         let controller = makeRefreshTestController(
             workspaceConfigurations: [
@@ -1058,9 +1174,16 @@ private func syncNiriWorkspaceStatesForRefreshTests(
 
     @Test @MainActor func workspaceTransitionFlowsUseImmediateRelayoutOnly() async {
         let controller = makeRefreshTestController()
-        _ = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true)
+        guard let workspaceTwo = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true) else {
+            Issue.record("Missing second workspace for workspace transition routing test")
+            return
+        }
         let recorder = RefreshEventRecorder()
         installRefreshSpies(on: controller, recorder: recorder)
+        var enqueuedRefreshes: [ScheduledRefresh] = []
+        controller.layoutRefreshController.debugHooks.onRefreshEnqueued = { refresh in
+            enqueuedRefreshes.append(refresh)
+        }
 
         controller.focusWorkspaceFromBar(named: "2")
         await waitForRefreshWork(on: controller)
@@ -1068,6 +1191,11 @@ private func syncNiriWorkspaceStatesForRefreshTests(
         #expect(recorder.relayoutEvents.map(\.0) == [.workspaceTransition])
         #expect(recorder.relayoutEvents.map(\.1) == [.immediateRelayout])
         #expect(recorder.fullRescanReasons.isEmpty)
+        guard let refresh = enqueuedRefreshes.last(where: { $0.reason == .workspaceTransition }) else {
+            Issue.record("Missing scoped workspace transition refresh")
+            return
+        }
+        #expect(refresh.affectedWorkspaceIds == [workspaceTwo])
         assertNoLegacyReasons(recorder)
     }
 
@@ -2941,6 +3069,7 @@ private func syncNiriWorkspaceStatesForRefreshTests(
     @Test @MainActor func nativeFullscreenNoSnapshotExitPreservesStackedNiriColumnTopology() async {
         let controller = makeRefreshTestController()
         defer { cleanupRefreshTestController(controller) }
+        controller.motionPolicy.animationsEnabled = false
         let visibleWindows = VisibleWindowsStore([
             (makeRefreshTestWindow(windowId: 6701), getpid(), 6701),
             (makeRefreshTestWindow(windowId: 6702), getpid(), 6702),
@@ -3081,6 +3210,7 @@ private func syncNiriWorkspaceStatesForRefreshTests(
     @Test @MainActor func nativeFullscreenNoSnapshotExitPreservesFullHeightNiriColumnTopology() async {
         let controller = makeRefreshTestController()
         defer { cleanupRefreshTestController(controller) }
+        controller.motionPolicy.animationsEnabled = false
         let visibleWindows = VisibleWindowsStore([
             (makeRefreshTestWindow(windowId: 6711), getpid(), 6711),
             (makeRefreshTestWindow(windowId: 6712), getpid(), 6712),
@@ -5629,6 +5759,26 @@ private func syncNiriWorkspaceStatesForRefreshTests(
 
         #expect(delivered?.0 == pid)
         #expect(delivered?.1 == windowId)
+    }
+
+    @Test @MainActor func minimizedCallbackDispatchesEncodedWindowIdAndState() async {
+        let pid = getpid()
+        let windowId = 6303
+        var delivered: (pid_t, Int, Bool)?
+
+        AppAXContext.handleWindowMinimizedChangedCallback(
+            pid: pid,
+            refcon: AppAXContext.destroyNotificationRefcon(for: windowId),
+            isMinimized: true,
+            handler: { callbackPid, callbackWindowId, callbackMinimized in
+                delivered = (callbackPid, callbackWindowId, callbackMinimized)
+            }
+        )
+        await waitUntil { delivered != nil }
+
+        #expect(delivered?.0 == pid)
+        #expect(delivered?.1 == windowId)
+        #expect(delivered?.2 == true)
     }
 
     @Test @MainActor func exactDestroyCallbackRemovesClosedWindowWithoutFullRescan() async {

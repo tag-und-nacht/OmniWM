@@ -4,7 +4,7 @@ import ScreenCaptureKit
 
 @MainActor
 struct OverviewEnvironment {
-    var frontmostApplicationPID: () -> pid_t? = { NSWorkspace.shared.frontmostApplication?.processIdentifier }
+    var frontmostApplicationPID: () -> pid_t? = { FrontmostApplicationState.shared.snapshot?.pid }
     var currentProcessID: () -> pid_t = { getpid() }
     var activateOmniWM: () -> Void = { NSApp.activate(ignoringOtherApps: true) }
     var activateApplication: (pid_t) -> Void = { pid in
@@ -983,6 +983,7 @@ extension OverviewController {
 
     private func performDragAction(session: DragSession, target: OverviewDragTarget) {
         guard let wmController else { return }
+        let affectedWorkspaceIds: Set<WorkspaceDescriptor.ID>
 
         switch target {
         case let .workspaceMove(targetWsId):
@@ -991,6 +992,7 @@ extension OverviewController {
                 handle: session.handle,
                 toWorkspaceId: targetWsId
             )
+            affectedWorkspaceIds = [session.workspaceId, targetWsId]
 
         case let .niriWindowInsert(targetWsId, targetHandle, position):
             guard isNiriLayout(workspaceId: targetWsId) else { return }
@@ -1008,6 +1010,9 @@ extension OverviewController {
                 in: targetWsId
             )
             wmController.layoutRefreshController.startScrollAnimation(for: targetWsId)
+            affectedWorkspaceIds = targetWsId == session.workspaceId
+                ? [targetWsId]
+                : [session.workspaceId, targetWsId]
 
         case let .niriColumnInsert(targetWsId, insertIndex):
             guard isNiriLayout(workspaceId: targetWsId) else { return }
@@ -1023,9 +1028,38 @@ extension OverviewController {
                 in: targetWsId
             )
             wmController.layoutRefreshController.startScrollAnimation(for: targetWsId)
+            affectedWorkspaceIds = targetWsId == session.workspaceId
+                ? [targetWsId]
+                : [session.workspaceId, targetWsId]
         }
 
-        wmController.layoutRefreshController.requestImmediateRelayout(reason: .overviewMutation)
+        wmController.layoutRefreshController.requestImmediateRelayout(
+            reason: .overviewMutation,
+            affectedWorkspaceIds: affectedWorkspaceIds
+        )
+    }
+
+    func performDragActionForTests(
+        handle: WindowHandle,
+        workspaceId: WorkspaceDescriptor.ID,
+        target: OverviewDragTarget
+    ) {
+        guard let wmController,
+              let monitorId = wmController.workspaceManager.monitorId(for: workspaceId)
+        else {
+            return
+        }
+
+        performDragAction(
+            session: DragSession(
+                handle: handle,
+                windowId: handle.windowId,
+                workspaceId: workspaceId,
+                monitorId: monitorId,
+                startPoint: .zero
+            ),
+            target: target
+        )
     }
 
     private func isNiriLayout(workspaceId: WorkspaceDescriptor.ID) -> Bool {

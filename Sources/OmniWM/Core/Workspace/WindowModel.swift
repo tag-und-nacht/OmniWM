@@ -7,6 +7,17 @@ enum TrackedWindowMode: Equatable, Hashable, Sendable {
 }
 
 struct ManagedReplacementMetadata: Equatable, Sendable {
+    struct RestoreIdentity: Equatable, Sendable {
+        let bundleId: String?
+        let workspaceId: WorkspaceDescriptor.ID
+        let mode: TrackedWindowMode
+        let role: String?
+        let subrole: String?
+        let title: String?
+        let windowLevel: Int32?
+        let parentWindowId: UInt32?
+    }
+
     var bundleId: String?
     var workspaceId: WorkspaceDescriptor.ID
     var mode: TrackedWindowMode
@@ -16,6 +27,19 @@ struct ManagedReplacementMetadata: Equatable, Sendable {
     var windowLevel: Int32?
     var parentWindowId: UInt32?
     var frame: CGRect?
+
+    var restoreIdentity: RestoreIdentity {
+        RestoreIdentity(
+            bundleId: bundleId,
+            workspaceId: workspaceId,
+            mode: mode,
+            role: role,
+            subrole: subrole,
+            title: title,
+            windowLevel: windowLevel,
+            parentWindowId: parentWindowId
+        )
+    }
 
     func mergingNonNilValues(from overlay: ManagedReplacementMetadata) -> ManagedReplacementMetadata {
         ManagedReplacementMetadata(
@@ -33,6 +57,33 @@ struct ManagedReplacementMetadata: Equatable, Sendable {
 }
 
 struct ManagedWindowRestoreSnapshot: Equatable {
+    struct SemanticIdentity: Equatable {
+        struct QuantizedFrame: Equatable {
+            private let minXBucket: Int
+            private let minYBucket: Int
+            private let widthBucket: Int
+            private let heightBucket: Int
+
+            init(frame: CGRect, tolerance: CGFloat) {
+                let step = max(tolerance, 0.000_1)
+                minXBucket = Self.bucket(frame.origin.x, step: step)
+                minYBucket = Self.bucket(frame.origin.y, step: step)
+                widthBucket = Self.bucket(frame.width, step: step)
+                heightBucket = Self.bucket(frame.height, step: step)
+            }
+
+            private static func bucket(_ value: CGFloat, step: CGFloat) -> Int {
+                Int(floor(Double(value / step)))
+            }
+        }
+
+        let workspaceId: WorkspaceDescriptor.ID
+        let frame: QuantizedFrame
+        let topologyProfile: TopologyProfile
+        let niriState: NiriState?
+        let replacementRestoreIdentity: ManagedReplacementMetadata.RestoreIdentity?
+    }
+
     struct NiriState: Equatable {
         struct ColumnSizing: Equatable {
             let width: ProportionalSize
@@ -68,6 +119,27 @@ struct ManagedWindowRestoreSnapshot: Equatable {
     let topologyProfile: TopologyProfile
     let niriState: NiriState?
     let replacementMetadata: ManagedReplacementMetadata?
+
+    func isSemanticallyEquivalent(
+        to other: ManagedWindowRestoreSnapshot,
+        frameTolerance: CGFloat
+    ) -> Bool {
+        workspaceId == other.workspaceId
+            && frame.approximatelyEqual(to: other.frame, tolerance: frameTolerance)
+            && topologyProfile == other.topologyProfile
+            && niriState == other.niriState
+            && replacementMetadata?.restoreIdentity == other.replacementMetadata?.restoreIdentity
+    }
+
+    func semanticIdentity(frameTolerance: CGFloat) -> SemanticIdentity {
+        SemanticIdentity(
+            workspaceId: workspaceId,
+            frame: .init(frame: frame, tolerance: frameTolerance),
+            topologyProfile: topologyProfile,
+            niriState: niriState,
+            replacementRestoreIdentity: replacementMetadata?.restoreIdentity
+        )
+    }
 
     func rekeyed(
         to newToken: WindowToken,

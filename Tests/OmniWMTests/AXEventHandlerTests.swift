@@ -2234,6 +2234,196 @@ private func waitUntilAXEventTest(
         #expect(controller.workspaceManager.isAppFullscreenActive)
     }
 
+    @Test @MainActor func managedRestoreGeometryBackfillsSnapshotMetadataBeforeFetchingFacts() {
+        let controller = makeAXEventTestController()
+        HotPathDebugMetrics.shared.setEnabledForTests(true)
+        HotPathDebugMetrics.shared.reset()
+        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
+        guard let workspaceId = controller.activeWorkspace()?.id else {
+            Issue.record("Missing active workspace")
+            return
+        }
+
+        let token = controller.workspaceManager.addWindow(
+            AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: 805),
+            pid: getpid(),
+            windowId: 805,
+            to: workspaceId
+        )
+        let cachedFrame = CGRect(x: 110, y: 150, width: 700, height: 520)
+        let refreshedFrame = CGRect(x: 130, y: 170, width: 720, height: 540)
+        let cachedMetadata = ManagedReplacementMetadata(
+            bundleId: "com.example.app",
+            workspaceId: workspaceId,
+            mode: .tiling,
+            role: kAXWindowRole as String,
+            subrole: kAXStandardWindowSubrole as String,
+            title: "Cached Title",
+            windowLevel: 19,
+            parentWindowId: 42,
+            frame: cachedFrame
+        )
+        let partialLiveMetadata = ManagedReplacementMetadata(
+            bundleId: "com.example.app",
+            workspaceId: workspaceId,
+            mode: .tiling,
+            role: nil,
+            subrole: nil,
+            title: nil,
+            windowLevel: nil,
+            parentWindowId: nil,
+            frame: refreshedFrame
+        )
+        _ = controller.workspaceManager.setManagedRestoreSnapshot(
+            ManagedWindowRestoreSnapshot(
+                token: token,
+                workspaceId: workspaceId,
+                frame: cachedFrame,
+                topologyProfile: controller.workspaceManager.topologyProfile,
+                niriState: nil,
+                replacementMetadata: cachedMetadata
+            ),
+            for: token
+        )
+        _ = controller.workspaceManager.setManagedReplacementMetadata(partialLiveMetadata, for: token)
+
+        var factFetchCount = 0
+        controller.axEventHandler.windowFactsProvider = { _, _ in
+            factFetchCount += 1
+            return makeAXEventWindowRuleFacts(
+                bundleId: "com.example.app",
+                title: "Fetched Title",
+                windowServer: WindowServerInfo(id: 805, pid: getpid(), level: 23, frame: refreshedFrame)
+            )
+        }
+        defer { controller.axEventHandler.windowFactsProvider = nil }
+
+        controller.recordManagedRestoreGeometry(for: token, frame: refreshedFrame)
+
+        let snapshot = HotPathDebugMetrics.shared.snapshot
+        let replacementMetadata = controller.workspaceManager.managedRestoreSnapshot(for: token)?.replacementMetadata
+        #expect(factFetchCount == 0)
+        #expect(snapshot.managedRestoreReplacementMetadataCalls == 1)
+        #expect(snapshot.managedRestoreReplacementMetadataFactFetchCount == 0)
+        #expect(snapshot.managedRestoreReplacementMetadataCacheReuseCount == 1)
+        #expect(replacementMetadata?.title == "Cached Title")
+        #expect(replacementMetadata?.windowLevel == 19)
+        #expect(replacementMetadata?.parentWindowId == 42)
+        #expect(replacementMetadata?.frame == refreshedFrame)
+    }
+
+    @Test @MainActor func managedRestoreGeometrySkipsMetadataRefreshWhenSnapshotSemanticsAreUnchangedWithinTolerance() {
+        let controller = makeAXEventTestController()
+        guard let workspaceId = controller.activeWorkspace()?.id else {
+            Issue.record("Missing active workspace")
+            return
+        }
+
+        let token = controller.workspaceManager.addWindow(
+            AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: 806),
+            pid: getpid(),
+            windowId: 806,
+            to: workspaceId
+        )
+        let cachedFrame = CGRect(x: 180, y: 160, width: 760, height: 540)
+        let jitteredFrame = cachedFrame.offsetBy(dx: 0.2, dy: -0.2)
+        let cachedMetadata = ManagedReplacementMetadata(
+            bundleId: "com.example.app",
+            workspaceId: workspaceId,
+            mode: .tiling,
+            role: kAXWindowRole as String,
+            subrole: kAXStandardWindowSubrole as String,
+            title: "Stable Title",
+            windowLevel: 8,
+            parentWindowId: nil,
+            frame: cachedFrame
+        )
+        _ = controller.workspaceManager.setManagedRestoreSnapshot(
+            ManagedWindowRestoreSnapshot(
+                token: token,
+                workspaceId: workspaceId,
+                frame: cachedFrame,
+                topologyProfile: controller.workspaceManager.topologyProfile,
+                niriState: nil,
+                replacementMetadata: cachedMetadata
+            ),
+            for: token
+        )
+
+        HotPathDebugMetrics.shared.setEnabledForTests(true)
+        HotPathDebugMetrics.shared.reset()
+        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
+
+        var factFetchCount = 0
+        controller.axEventHandler.windowFactsProvider = { _, _ in
+            factFetchCount += 1
+            return makeAXEventWindowRuleFacts(
+                bundleId: "com.example.app",
+                title: "Fetched Title",
+                windowServer: WindowServerInfo(id: 806, pid: getpid(), level: 11, frame: jitteredFrame)
+            )
+        }
+        defer { controller.axEventHandler.windowFactsProvider = nil }
+
+        controller.recordManagedRestoreGeometry(for: token, frame: jitteredFrame)
+
+        let snapshot = HotPathDebugMetrics.shared.snapshot
+        #expect(factFetchCount == 0)
+        #expect(snapshot.managedRestoreGeometryCalls == 1)
+        #expect(snapshot.managedRestoreReplacementMetadataCalls == 0)
+        #expect(snapshot.managedRestoreSnapshotSemanticNoOpCount == 1)
+        #expect(controller.workspaceManager.managedRestoreSnapshot(for: token)?.frame == cachedFrame)
+    }
+
+    @Test @MainActor func workspaceMovePersistsManagedRestoreSnapshotWithoutWaitingForFrameConfirmation() {
+        let controller = makeAXEventTestController()
+        guard let sourceWorkspaceId = controller.activeWorkspace()?.id,
+              let targetWorkspaceId = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true)
+        else {
+            Issue.record("Missing workspace fixture")
+            return
+        }
+
+        let token = controller.workspaceManager.addWindow(
+            AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: 807),
+            pid: getpid(),
+            windowId: 807,
+            to: sourceWorkspaceId
+        )
+        let frame = CGRect(x: 190, y: 170, width: 760, height: 540)
+        _ = controller.workspaceManager.setManagedReplacementMetadata(
+            ManagedReplacementMetadata(
+                bundleId: "com.example.workspace-move",
+                workspaceId: sourceWorkspaceId,
+                mode: .tiling,
+                role: kAXWindowRole as String,
+                subrole: kAXStandardWindowSubrole as String,
+                title: "Workspace Move Window",
+                windowLevel: 11,
+                parentWindowId: nil,
+                frame: frame
+            ),
+            for: token
+        )
+        controller.recordManagedRestoreGeometry(for: token, frame: frame)
+
+        HotPathDebugMetrics.shared.setEnabledForTests(true)
+        HotPathDebugMetrics.shared.reset()
+        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
+
+        controller.reassignManagedWindow(token, to: targetWorkspaceId)
+
+        let snapshot = controller.workspaceManager.managedRestoreSnapshot(for: token)
+        let metrics = HotPathDebugMetrics.shared.snapshot
+        #expect(controller.axManager.lastAppliedFrame(for: token.windowId) == nil)
+        #expect(snapshot?.workspaceId == targetWorkspaceId)
+        #expect(snapshot?.replacementMetadata?.workspaceId == targetWorkspaceId)
+        #expect(metrics.managedRestoreGeometryCalls == 1)
+        #expect(metrics.managedRestoreSnapshotPersistenceAttemptsByReason[.workspaceMoved] == 1)
+        #expect(metrics.managedRestoreSnapshotWritesByReason[.workspaceMoved] == 1)
+        #expect(metrics.managedRestoreSnapshotSemanticNoOpCountByReason[.workspaceMoved, default: 0] == 0)
+    }
+
     @Test @MainActor func hiddenMoveResizeEventsAreSuppressedButVisibleOnesStillRelayout() async {
         let controller = makeAXEventTestController()
         guard let workspaceId = controller.activeWorkspace()?.id else {
@@ -2486,6 +2676,62 @@ private func waitUntilAXEventTest(
             controller.workspaceManager.floatingState(for: token)?.lastFrame
                 == CGRect(x: 120, y: 140, width: 360, height: 240)
         )
+    }
+
+    @Test @MainActor func pendingManagedFrameWriteSuppressesRelayoutAndCachesObservedFrame() async {
+        let controller = makeAXEventTestController()
+        guard let workspaceId = controller.activeWorkspace()?.id else {
+            Issue.record("Missing active workspace")
+            return
+        }
+
+        let token = controller.workspaceManager.addWindow(
+            AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: 8144),
+            pid: getpid(),
+            windowId: 8144,
+            to: workspaceId
+        )
+        let observedFrame = CGRect(x: 220, y: 160, width: 720, height: 480)
+        let cachedMetadataFrame = CGRect(x: 80, y: 60, width: 600, height: 420)
+        _ = controller.workspaceManager.setManagedReplacementMetadata(
+            ManagedReplacementMetadata(
+                bundleId: "com.example.app",
+                workspaceId: workspaceId,
+                mode: .tiling,
+                role: kAXWindowRole as String,
+                subrole: kAXStandardWindowSubrole as String,
+                title: "Pinned Metadata",
+                windowLevel: 5,
+                parentWindowId: nil,
+                frame: cachedMetadataFrame
+            ),
+            for: token
+        )
+
+        controller.axManager.setPendingFrameWriteForTests(windowId: token.windowId, frame: observedFrame)
+        controller.axEventHandler.frameProvider = { _ in observedFrame }
+        defer {
+            controller.axManager.setPendingFrameWriteForTests(windowId: token.windowId, frame: nil)
+            controller.axEventHandler.frameProvider = nil
+        }
+
+        var relayoutReasons: [RefreshReason] = []
+        controller.layoutRefreshController.resetDebugState()
+        controller.layoutRefreshController.debugHooks.onRelayout = { reason, _ in
+            relayoutReasons.append(reason)
+            return true
+        }
+
+        controller.axEventHandler.cgsEventObserver(
+            CGSEventObserver.shared,
+            didReceive: .frameChanged(windowId: 8144)
+        )
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+
+        #expect(relayoutReasons.isEmpty)
+        #expect(controller.axEventHandler.debugCounters.geometryRelayoutRequests == 0)
+        #expect(controller.axManager.lastAppliedFrame(for: token.windowId) == observedFrame)
+        #expect(controller.workspaceManager.managedReplacementMetadata(for: token)?.frame == cachedMetadataFrame)
     }
 
     @Test @MainActor func interactiveGestureDoesNotConsumeWorkspaceHideFreshFrameWakeup() async {
@@ -5325,6 +5571,85 @@ private func waitUntilAXEventTest(
         #expect(lastAppliedBorderWindowId(on: controller) == nil)
     }
 
+    @Test @MainActor func minimizingFocusedWindowHidesBorderAndRestoreRerendersIt() {
+        let controller = makeAXEventTestController()
+        guard let workspaceId = controller.activeWorkspace()?.id else {
+            Issue.record("Missing active workspace")
+            return
+        }
+
+        let pid = getpid()
+        let axRef = AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: 833)
+        let token = controller.workspaceManager.addWindow(
+            axRef,
+            pid: pid,
+            windowId: 833,
+            to: workspaceId
+        )
+        _ = controller.workspaceManager.setManagedFocus(
+            token,
+            in: workspaceId,
+            onMonitor: controller.workspaceManager.monitorId(for: workspaceId)
+        )
+
+        let frame = CGRect(x: 24, y: 32, width: 820, height: 620)
+
+        controller.setBordersEnabled(true)
+        controller.axEventHandler.frameProvider = { _ in frame }
+        controller.axEventHandler.windowInfoProvider = { windowId in
+            guard windowId == 833 else { return nil }
+            return makeAXEventWindowInfo(
+                id: windowId,
+                pid: pid,
+                frame: frame
+            )
+        }
+        controller.axEventHandler.windowFactsProvider = { axRef, _ in
+            makeAXEventWindowRuleFacts(
+                title: "minimized-window",
+                windowServer: makeAXEventWindowInfo(
+                    id: UInt32(axRef.windowId),
+                    pid: pid,
+                    title: "minimized-window",
+                    frame: frame
+                )
+            )
+        }
+        controller.borderCoordinator.minimizedProviderForTests = { _ in false }
+
+        let target = controller.keyboardFocusTarget(for: token, axRef: axRef)
+        #expect(
+            controller.renderKeyboardFocusBorder(
+                for: target,
+                preferredFrame: frame,
+                policy: .direct,
+                source: .manualRender
+            )
+        )
+        #expect(lastAppliedBorderWindowId(on: controller) == 833)
+
+        controller.borderCoordinator.minimizedProviderForTests = { _ in true }
+        controller.axEventHandler.handleWindowMinimizedChanged(
+            pid: pid,
+            windowId: 833,
+            isMinimized: true
+        )
+
+        #expect(lastAppliedBorderWindowId(on: controller) == nil)
+        #expect(controller.borderCoordinator.ownerStateSnapshotForTests().owner == .none)
+
+        controller.borderCoordinator.minimizedProviderForTests = { _ in false }
+        controller.axEventHandler.handleWindowMinimizedChanged(
+            pid: pid,
+            windowId: 833,
+            isMinimized: false
+        )
+
+        let ownerState = controller.borderCoordinator.ownerStateSnapshotForTests()
+        #expect(lastAppliedBorderWindowId(on: controller) == 833)
+        #expect(ownerState.owner == .managed(token: token, wid: 833, workspaceId: workspaceId))
+    }
+
     @Test @MainActor func destroyRemovesInactiveWorkspaceEntryImmediately() {
         let controller = makeAXEventTestController()
         guard let monitorId = controller.workspaceManager.monitors.first?.id,
@@ -5467,7 +5792,10 @@ private func waitUntilAXEventTest(
         #expect(controller.workspaceManager.entry(for: liveToken) != nil)
     }
 
-    @Test @MainActor func handleRemovedPidPathInvalidatesCachedTitle() {
+    @Test @MainActor func handleRemovedPidPathInvalidatesCachedTitle() async {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
         AXWindowService.clearTitleCacheForTests()
         defer {
             AXWindowService.titleLookupProviderForTests = nil

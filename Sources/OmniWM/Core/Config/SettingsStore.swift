@@ -527,6 +527,14 @@ final class SettingsStore {
             workspaceConfigurations = reboundWorkspaceConfigurations
         }
 
+        let updatedMouseWarpMonitorOrder = reboundMouseWarpMonitorOrder(
+            mouseWarpMonitorOrder,
+            to: monitors
+        )
+        if updatedMouseWarpMonitorOrder != mouseWarpMonitorOrder {
+            mouseWarpMonitorOrder = updatedMouseWarpMonitorOrder
+        }
+
         rebindMonitorSettings(\.monitorBarSettings, to: monitors)
         rebindMonitorSettings(\.monitorOrientationSettings, to: monitors)
         rebindMonitorSettings(\.monitorNiriSettings, to: monitors)
@@ -547,59 +555,90 @@ final class SettingsStore {
         workspaceConfigurations.first(where: { $0.name == workspaceName })?.effectiveDisplayName ?? workspaceName
     }
 
-    func effectiveMouseWarpMonitorOrder(for monitors: [Monitor], axis: MouseWarpAxis? = nil) -> [String] {
-        let sortedNames = (axis ?? mouseWarpAxis).sortedMonitors(monitors).map(\.name)
-        guard !sortedNames.isEmpty else { return [] }
+    func effectiveMouseWarpMonitorOrder(for monitors: [Monitor], axis: MouseWarpAxis? = nil) -> [Monitor.ID] {
+        effectiveMouseWarpMonitorOrder(
+            for: monitors,
+            storedOrder: mouseWarpMonitorOrder,
+            axis: axis
+        )
+    }
 
-        var remainingCounts = sortedNames.reduce(into: [String: Int]()) { counts, name in
-            counts[name, default: 0] += 1
+    private func effectiveMouseWarpMonitorOrder(
+        for monitors: [Monitor],
+        storedOrder: [OutputId],
+        axis: MouseWarpAxis? = nil
+    ) -> [Monitor.ID] {
+        let sortedMonitors = (axis ?? mouseWarpAxis).sortedMonitors(monitors)
+        guard !sortedMonitors.isEmpty else { return [] }
+
+        let resolution = OutputId.resolveOrderedPreservingUnresolved(
+            storedOrder,
+            in: sortedMonitors
+        )
+        var orderedMonitorIds = resolution.resolvedMonitorIds
+
+        for monitor in sortedMonitors where !resolution.claimedMonitorIds.contains(monitor.id) {
+            orderedMonitorIds.append(monitor.id)
         }
-        var resolved: [String] = []
 
-        for name in mouseWarpMonitorOrder {
-            guard let remaining = remainingCounts[name], remaining > 0 else { continue }
-            resolved.append(name)
-            remainingCounts[name] = remaining - 1
-        }
-
-        for name in sortedNames {
-            guard let remaining = remainingCounts[name], remaining > 0 else { continue }
-            resolved.append(name)
-            remainingCounts[name] = remaining - 1
-        }
-
-        return resolved
+        return orderedMonitorIds
     }
 
     @discardableResult
-    func persistEffectiveMouseWarpMonitorOrder(for monitors: [Monitor], axis: MouseWarpAxis? = nil) -> [String] {
+    func persistEffectiveMouseWarpMonitorOrder(for monitors: [Monitor], axis: MouseWarpAxis? = nil) -> [Monitor.ID] {
         let warpAxis = axis ?? mouseWarpAxis
-        let sortedNames = warpAxis.sortedMonitors(monitors).map(\.name)
-        guard !sortedNames.isEmpty else { return [] }
+        let persisted = reboundMouseWarpMonitorOrder(mouseWarpMonitorOrder, to: monitors, axis: warpAxis)
+        return effectiveMouseWarpMonitorOrder(for: monitors, storedOrder: persisted, axis: warpAxis)
+    }
 
-        var persisted = mouseWarpMonitorOrder
-        var persistedCounts = persisted.reduce(into: [String: Int]()) { counts, name in
-            counts[name, default: 0] += 1
-        }
-        let currentCounts = sortedNames.reduce(into: [String: Int]()) { counts, name in
-            counts[name, default: 0] += 1
-        }
+    func commitMouseWarpMonitorOrder(
+        orderedMonitorIds: [Monitor.ID],
+        connectedMonitors: [Monitor],
+        axis: MouseWarpAxis? = nil
+    ) {
+        let warpAxis = axis ?? mouseWarpAxis
+        let sortedMonitors = warpAxis.sortedMonitors(connectedMonitors)
+        let outputsById = Dictionary(uniqueKeysWithValues: sortedMonitors.map { ($0.id, OutputId(from: $0)) })
 
-        for name in sortedNames {
-            let currentCount = currentCounts[name, default: 0]
-            let persistedCount = persistedCounts[name, default: 0]
-            guard persistedCount < currentCount else { continue }
-            for _ in 0..<(currentCount - persistedCount) {
-                persisted.append(name)
+        var seenMonitorIds: Set<Monitor.ID> = []
+        var reorderedLiveOutputs: [OutputId] = []
+        for monitorId in orderedMonitorIds {
+            guard seenMonitorIds.insert(monitorId).inserted,
+                  let output = outputsById[monitorId]
+            else {
+                continue
             }
-            persistedCounts[name] = currentCount
+            reorderedLiveOutputs.append(output)
+        }
+        for monitor in sortedMonitors where seenMonitorIds.insert(monitor.id).inserted {
+            reorderedLiveOutputs.append(OutputId(from: monitor))
+        }
+
+        let resolution = OutputId.resolveOrderedPreservingUnresolved(
+            mouseWarpMonitorOrder,
+            in: sortedMonitors
+        )
+        var reorderedIterator = reorderedLiveOutputs.makeIterator()
+        var persisted: [OutputId] = []
+        persisted.reserveCapacity(max(mouseWarpMonitorOrder.count, reorderedLiveOutputs.count))
+
+        for (index, output) in mouseWarpMonitorOrder.enumerated() {
+            if resolution.resolvedSlotIndices.contains(index) {
+                if let reorderedOutput = reorderedIterator.next() {
+                    persisted.append(reorderedOutput)
+                }
+            } else {
+                persisted.append(output)
+            }
+        }
+
+        while let reorderedOutput = reorderedIterator.next() {
+            persisted.append(reorderedOutput)
         }
 
         if mouseWarpMonitorOrder != persisted {
             mouseWarpMonitorOrder = persisted
         }
-
-        return effectiveMouseWarpMonitorOrder(for: monitors, axis: warpAxis)
     }
 
     func barSettings(for monitor: Monitor) -> MonitorBarSettings? {
@@ -833,6 +872,7 @@ final class SettingsStore {
 
     func applyExport(_ export: SettingsExport, monitors: [Monitor]) {
         let baseline = SettingsStore.defaultExport
+        let importedMouseWarpAxis = MouseWarpAxis(rawValue: export.mouseWarpAxis ?? baseline.mouseWarpAxis ?? "") ?? .horizontal
 
         isApplyingExport = true
         defer { isApplyingExport = false }
@@ -841,8 +881,12 @@ final class SettingsStore {
         focusFollowsMouse = export.focusFollowsMouse
         moveMouseToFocusedWindow = export.moveMouseToFocusedWindow
         focusFollowsWindowToMonitor = export.focusFollowsWindowToMonitor
-        mouseWarpMonitorOrder = export.mouseWarpMonitorOrder
-        mouseWarpAxis = MouseWarpAxis(rawValue: export.mouseWarpAxis ?? baseline.mouseWarpAxis ?? "") ?? .horizontal
+        mouseWarpMonitorOrder = reboundMouseWarpMonitorOrder(
+            export.mouseWarpMonitorOrder,
+            to: monitors,
+            axis: importedMouseWarpAxis
+        )
+        mouseWarpAxis = importedMouseWarpAxis
         mouseWarpMargin = export.mouseWarpMargin
         gapSize = export.gapSize
         outerGapLeft = export.outerGapLeft
@@ -1065,6 +1109,27 @@ final class SettingsStore {
         }
 
         return normalized
+    }
+
+    private func reboundMouseWarpMonitorOrder(
+        _ storedOrder: [OutputId],
+        to monitors: [Monitor],
+        axis: MouseWarpAxis? = nil
+    ) -> [OutputId] {
+        let sortedMonitors = (axis ?? mouseWarpAxis).sortedMonitors(monitors)
+        guard !sortedMonitors.isEmpty else { return storedOrder }
+
+        let resolution = OutputId.resolveOrderedPreservingUnresolved(
+            storedOrder,
+            in: sortedMonitors
+        )
+        var reboundOrder = resolution.reboundOutputs
+
+        for monitor in sortedMonitors where !resolution.claimedMonitorIds.contains(monitor.id) {
+            reboundOrder.append(OutputId(from: monitor))
+        }
+
+        return reboundOrder
     }
 
     private static func reboundMonitorBarSettings(

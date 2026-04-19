@@ -2,9 +2,11 @@ import ApplicationServices
 import CoreGraphics
 import Foundation
 
-struct WindowToken: Hashable, Sendable {
+struct WindowToken: Hashable, Sendable, CustomStringConvertible {
     let pid: pid_t
     let windowId: Int
+
+    var description: String { "pid=\(pid) wid=\(windowId)" }
 }
 
 final class WindowHandle: Hashable {

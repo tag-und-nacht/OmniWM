@@ -384,7 +384,7 @@ final class CommandHandler {
             return
         }
 
-        let frontmostPid = frontmostAppPidProvider?() ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let frontmostPid = frontmostAppPidProvider?() ?? FrontmostApplicationState.shared.snapshot?.pid
         let frontmostToken = frontmostFocusedWindowTokenProvider?()
             ?? frontmostPid.flatMap { controller.axEventHandler.focusedWindowToken(for: $0) }
         guard let token = controller.workspaceManager.nativeFullscreenCommandTarget(frontmostToken: frontmostToken),
@@ -423,7 +423,10 @@ final class CommandHandler {
         guard let controller else { return }
         controller.niriLayoutHandler.withNiriWorkspaceContext { engine, wsId, motion, state, _, _, _ in
             if engine.toggleColumnTabbed(in: wsId, state: state, motion: motion) {
-                controller.layoutRefreshController.requestImmediateRelayout(reason: .layoutCommand)
+                controller.layoutRefreshController.requestImmediateRelayout(
+                    reason: .layoutCommand,
+                    affectedWorkspaceIds: [wsId]
+                )
                 if engine.hasAnyWindowAnimationsRunning(in: wsId) {
                     controller.layoutRefreshController.startScrollAnimation(for: wsId)
                 }

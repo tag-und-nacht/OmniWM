@@ -134,7 +134,8 @@ import QuartzCore
                     )
                 )
                 controller.layoutRefreshController.requestImmediateRelayout(
-                    reason: .layoutCommand
+                    reason: .layoutCommand,
+                    affectedWorkspaceIds: [wsId]
                 ) { [weak controller] in
                     controller?.focusWindow(token)
                 }
@@ -161,7 +162,8 @@ import QuartzCore
             )
         )
         controller.layoutRefreshController.requestImmediateRelayout(
-            reason: .layoutCommand
+            reason: .layoutCommand,
+            affectedWorkspaceIds: [workspaceId]
         ) { [weak controller] in
             controller?.focusWindow(token)
         }
@@ -172,7 +174,10 @@ import QuartzCore
         withDwindleContext { engine, wsId in
             capturePresentationForNextRelayout(workspaceId: wsId)
             if engine.swapWindows(direction: direction, in: wsId) {
-                controller.layoutRefreshController.requestImmediateRelayout(reason: .layoutCommand)
+                controller.layoutRefreshController.requestImmediateRelayout(
+                    reason: .layoutCommand,
+                    affectedWorkspaceIds: [wsId]
+                )
             } else {
                 discardPresentationForNextRelayout(workspaceId: wsId)
             }
@@ -191,7 +196,10 @@ import QuartzCore
                         rememberedFocusToken: token
                     )
                 )
-                controller.layoutRefreshController.requestImmediateRelayout(reason: .layoutCommand)
+                controller.layoutRefreshController.requestImmediateRelayout(
+                    reason: .layoutCommand,
+                    affectedWorkspaceIds: [wsId]
+                )
             } else {
                 discardPresentationForNextRelayout(workspaceId: wsId)
             }
@@ -203,7 +211,10 @@ import QuartzCore
         withDwindleContext { engine, wsId in
             capturePresentationForNextRelayout(workspaceId: wsId)
             engine.cycleSplitRatio(forward: forward, in: wsId)
-            controller.layoutRefreshController.requestImmediateRelayout(reason: .layoutCommand)
+            controller.layoutRefreshController.requestImmediateRelayout(
+                reason: .layoutCommand,
+                affectedWorkspaceIds: [wsId]
+            )
         }
     }
 
@@ -212,7 +223,10 @@ import QuartzCore
         withDwindleContext { engine, wsId in
             capturePresentationForNextRelayout(workspaceId: wsId)
             engine.balanceSizes(in: wsId)
-            controller.layoutRefreshController.requestImmediateRelayout(reason: .layoutCommand)
+            controller.layoutRefreshController.requestImmediateRelayout(
+                reason: .layoutCommand,
+                affectedWorkspaceIds: [wsId]
+            )
         }
     }
 
@@ -221,7 +235,10 @@ import QuartzCore
         withDwindleContext { engine, wsId in
             capturePresentationForNextRelayout(workspaceId: wsId)
             engine.moveSelectionToRoot(stable: stable, in: wsId)
-            controller.layoutRefreshController.requestImmediateRelayout(reason: .layoutCommand)
+            controller.layoutRefreshController.requestImmediateRelayout(
+                reason: .layoutCommand,
+                affectedWorkspaceIds: [wsId]
+            )
         }
     }
 
@@ -230,7 +247,10 @@ import QuartzCore
         withDwindleContext { engine, wsId in
             capturePresentationForNextRelayout(workspaceId: wsId)
             engine.toggleOrientation(in: wsId)
-            controller.layoutRefreshController.requestImmediateRelayout(reason: .layoutCommand)
+            controller.layoutRefreshController.requestImmediateRelayout(
+                reason: .layoutCommand,
+                affectedWorkspaceIds: [wsId]
+            )
         }
     }
 
@@ -239,7 +259,10 @@ import QuartzCore
         withDwindleContext { engine, wsId in
             capturePresentationForNextRelayout(workspaceId: wsId)
             engine.swapSplit(in: wsId)
-            controller.layoutRefreshController.requestImmediateRelayout(reason: .layoutCommand)
+            controller.layoutRefreshController.requestImmediateRelayout(
+                reason: .layoutCommand,
+                affectedWorkspaceIds: [wsId]
+            )
         }
     }
 
@@ -249,7 +272,10 @@ import QuartzCore
             let delta = grow ? engine.settings.resizeStep : -engine.settings.resizeStep
             capturePresentationForNextRelayout(workspaceId: wsId)
             engine.resizeSelected(by: delta, direction: direction, in: wsId)
-            controller.layoutRefreshController.requestImmediateRelayout(reason: .layoutCommand)
+            controller.layoutRefreshController.requestImmediateRelayout(
+                reason: .layoutCommand,
+                affectedWorkspaceIds: [wsId]
+            )
         }
     }
 
@@ -338,7 +364,12 @@ import QuartzCore
     }
 
     private func monitorScale(for displayId: CGDirectDisplayID) -> CGFloat {
-        NSScreen.screens.first(where: { $0.displayId == displayId })?.backingScaleFactor ?? 2.0
+        guard let monitor = controller?.workspaceManager.monitors.first(where: { $0.displayId == displayId }),
+              let controller
+        else {
+            return ScreenLookupCache.shared.backingScale(for: displayId)
+        }
+        return controller.layoutRefreshController.backingScale(for: monitor)
     }
 
     private func makeWorkspaceSnapshot(
@@ -452,10 +483,6 @@ import QuartzCore
             frames = animationFrames.frames
             animationsActive = animationFrames.animationsActive
         }
-        recordManagedRestoreGeometry(
-            windows: snapshot.windows,
-            frames: hasNativeFullscreenRestoreCycle ? frames : newFrames
-        )
 
         let diff = layoutDiff(
             windows: snapshot.windows,
@@ -482,6 +509,12 @@ import QuartzCore
             windows: snapshot.windows,
             frames: frames
         )
+        plan.managedRestoreMaterialStateChanges = managedRestoreMaterialStateChanges(
+            windows: snapshot.windows,
+            oldFrames: oldFrames,
+            newFrames: frames
+        )
+        plan.persistManagedRestoreSnapshots = false
         return plan
     }
 
@@ -496,7 +529,6 @@ import QuartzCore
             screen: snapshot.monitor.workingFrame,
             scale: snapshot.monitor.scale
         )
-        recordManagedRestoreGeometry(windows: snapshot.windows, frames: frames)
         let diff = layoutDiff(
             windows: snapshot.windows,
             frames: frames,
@@ -505,12 +537,14 @@ import QuartzCore
             canRestoreHiddenWorkspaceWindows: snapshot.isActiveWorkspace
         )
 
-        return WorkspaceLayoutPlan(
+        var plan = WorkspaceLayoutPlan(
             workspaceId: snapshot.workspaceId,
             monitor: snapshot.monitor,
             sessionPatch: WorkspaceSessionPatch(workspaceId: snapshot.workspaceId),
             diff: diff
         )
+        plan.persistManagedRestoreSnapshots = false
+        return plan
     }
 
     private func buildAnimationPlan(
@@ -525,7 +559,6 @@ import QuartzCore
             screen: snapshot.monitor.workingFrame,
             scale: snapshot.monitor.scale
         )
-        recordManagedRestoreGeometry(windows: snapshot.windows, frames: baseFrames)
         let animationFrames = engine.animationFrames(
             from: baseFrames,
             in: snapshot.workspaceId,
@@ -541,12 +574,14 @@ import QuartzCore
             canRestoreHiddenWorkspaceWindows: snapshot.isActiveWorkspace
         )
 
-        return WorkspaceLayoutPlan(
+        var plan = WorkspaceLayoutPlan(
             workspaceId: snapshot.workspaceId,
             monitor: snapshot.monitor,
             sessionPatch: WorkspaceSessionPatch(workspaceId: snapshot.workspaceId),
             diff: diff
         )
+        plan.persistManagedRestoreSnapshots = false
+        return plan
     }
 
     private func layoutDiff(
@@ -624,6 +659,36 @@ import QuartzCore
         engine.settings.outerGapRight = snapshot.settings.outerGapRight
         engine.displayRefreshRate = snapshot.displayRefreshRate
     }
+
+    private func managedRestoreMaterialStateChanges(
+        windows: [LayoutWindowSnapshot],
+        oldFrames: [WindowToken: CGRect],
+        newFrames: [WindowToken: CGRect]
+    ) -> [ManagedRestoreMaterialStateChange] {
+        guard framesMatchSemantically(oldFrames, newFrames) else { return [] }
+        return windows.compactMap { window in
+            guard !window.isNativeFullscreenSuspended else { return nil }
+            return ManagedRestoreMaterialStateChange(
+                token: window.token,
+                reason: .topologyChanged
+            )
+        }
+    }
+
+    private func framesMatchSemantically(
+        _ lhs: [WindowToken: CGRect],
+        _ rhs: [WindowToken: CGRect]
+    ) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        for (token, frame) in lhs {
+            guard let otherFrame = rhs[token],
+                  frame.approximatelyEqual(to: otherFrame, tolerance: 0.5)
+            else {
+                return false
+            }
+        }
+        return true
+    }
 }
 
 extension DwindleLayoutHandler: LayoutFocusable, LayoutSizable {}
@@ -662,17 +727,6 @@ private extension DwindleLayoutHandler {
                 return nil
             }
             return window.token
-        }
-    }
-
-    func recordManagedRestoreGeometry(
-        windows: [LayoutWindowSnapshot],
-        frames: [WindowToken: CGRect]
-    ) {
-        guard let controller else { return }
-        for window in windows where !window.isNativeFullscreenSuspended {
-            guard let frame = frames[window.token] else { continue }
-            controller.recordManagedRestoreGeometry(for: window.token, frame: frame)
         }
     }
 }

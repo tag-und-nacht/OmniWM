@@ -17,6 +17,7 @@ final class ServiceLifecycleManager {
 
     private var displayObserver: DisplayConfigurationObserver?
     private var appActivationObserver: NSObjectProtocol?
+    private var appTerminationObserver: NSObjectProtocol?
     private var appHideObserver: NSObjectProtocol?
     private var appUnhideObserver: NSObjectProtocol?
     private var workspaceObserver: NSObjectProtocol?
@@ -77,12 +78,20 @@ final class ServiceLifecycleManager {
             guard let controller else { return }
             controller.axEventHandler.handleRemoved(pid: pid, winId: windowId)
         }
+        AppAXContext.onWindowMinimizedChanged = { [weak controller] pid, windowId, isMinimized in
+            controller?.axEventHandler.handleWindowMinimizedChanged(
+                pid: pid,
+                windowId: windowId,
+                isMinimized: isMinimized
+            )
+        }
         AppAXContext.onFocusedWindowChanged = { [weak controller] pid in
             controller?.axEventHandler.handleAppActivation(
                 pid: pid,
                 source: .focusedWindowChanged
             )
         }
+        FrontmostApplicationState.shared.primeFromWorkspace()
         setupWorkspaceObservation()
         controller.mouseEventHandler.setup()
         controller.syncMouseWarpPolicy()
@@ -109,6 +118,7 @@ final class ServiceLifecycleManager {
             controller.isLockScreenActive = false
             controller.serviceLifecycleManager.handleUnlockDetected()
         }
+        controller.lockScreenObserver.syncWithFrontmostApplicationState()
         controller.lockScreenObserver.start()
     }
 
@@ -252,23 +262,57 @@ final class ServiceLifecycleManager {
     }
 
     private func setupAppActivationObserver() {
-        guard let controller else { return }
-        appActivationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+        guard controller != nil else { return }
+        let notificationCenter = NSWorkspace.shared.notificationCenter
+        appActivationObserver = notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
             queue: .main
-        ) { [weak controller] notification in
+        ) { notification in
+            guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else {
+                return
+            }
+            let pid = app.processIdentifier
+            let bundleIdentifier = app.bundleIdentifier
+            MainActor.assumeIsolated {
+                self.handleWorkspaceApplicationActivated(
+                    pid: pid,
+                    bundleIdentifier: bundleIdentifier
+                )
+            }
+        }
+
+        appTerminationObserver = notificationCenter.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { notification in
             guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else {
                 return
             }
             let pid = app.processIdentifier
             MainActor.assumeIsolated {
-                controller?.axEventHandler.handleAppActivation(
-                    pid: pid,
-                    source: .workspaceDidActivateApplication
-                )
+                self.handleWorkspaceApplicationTerminated(pid: pid)
             }
         }
+    }
+
+    func handleWorkspaceApplicationActivated(pid: pid_t, bundleIdentifier: String?) {
+        let snapshot = FrontmostApplicationState.shared.update(
+            pid: pid,
+            bundleIdentifier: bundleIdentifier
+        )
+        controller?.lockScreenObserver.handleFrontmostApplicationDidActivate(
+            bundleId: snapshot.bundleIdentifier
+        )
+        controller?.axEventHandler.handleAppActivation(
+            pid: pid,
+            source: .workspaceDidActivateApplication
+        )
+    }
+
+    func handleWorkspaceApplicationTerminated(pid: pid_t) {
+        _ = FrontmostApplicationState.shared.clearIfNeeded(terminatedPid: pid)
     }
 
     private func setupAppHideObservers() {
@@ -330,6 +374,7 @@ final class ServiceLifecycleManager {
         controller.hasStartedServices = false
 
         AppAXContext.onWindowDestroyed = nil
+        AppAXContext.onWindowMinimizedChanged = nil
         AppAXContext.onFocusedWindowChanged = nil
         controller.axManager.onAppLaunched = nil
         controller.axManager.onAppTerminated = nil
@@ -351,6 +396,10 @@ final class ServiceLifecycleManager {
         if let observer = appActivationObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
             appActivationObserver = nil
+        }
+        if let observer = appTerminationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+            appTerminationObserver = nil
         }
         if let observer = appHideObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)

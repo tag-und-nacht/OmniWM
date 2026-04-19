@@ -227,6 +227,7 @@ final class AXEventHandler: CGSEventDelegate {
     var axWindowRefProvider: ((UInt32, pid_t) -> AXWindowRef?)?
     var bundleIdProvider: ((pid_t) -> String?)?
     var windowSubscriptionHandler: (([UInt32]) -> Void)?
+    var windowUnsubscriptionHandler: (([UInt32]) -> Set<UInt32>)?
     var focusedWindowValueProvider: ((pid_t) -> CFTypeRef?)?
     var focusedWindowRefProvider: ((pid_t) -> AXWindowRef?)?
     var windowFactsProvider: ((AXWindowRef, pid_t) -> WindowRuleFacts?)?
@@ -451,23 +452,26 @@ final class AXEventHandler: CGSEventDelegate {
             return
         }
 
-        if let frame = frameProvider?(entry.axRef)
+        let observedFrame = frameProvider?(entry.axRef)
             ?? fastFrameProvider?(entry.axRef)
             ?? AXWindowService.framePreferFast(entry.axRef)
             ?? (try? AXWindowService.frame(entry.axRef))
-        {
+        let hasPendingFrameWrite = controller.axManager.hasPendingFrameWrite(for: entry.windowId)
+
+        if let frame = observedFrame, !hasPendingFrameWrite {
             updateManagedReplacementFrame(frame, for: entry)
         }
 
         if entry.mode == .floating {
-            if let frame = frameProvider?(entry.axRef)
-                ?? fastFrameProvider?(entry.axRef)
-                ?? AXWindowService.framePreferFast(entry.axRef)
-                ?? (try? AXWindowService.frame(entry.axRef))
-            {
+            if let frame = observedFrame {
                 controller.workspaceManager.updateFloatingGeometry(frame: frame, for: token)
             }
-            if controller.layoutRefreshController.handleFreshFrameEvent(for: token) {
+            let shouldRetryWorkspaceHide = controller.layoutRefreshController.handleFreshFrameEvent(for: token)
+            if hasPendingFrameWrite, let frame = observedFrame {
+                controller.axManager.confirmFrameWrite(for: entry.windowId, pid: entry.pid, frame: frame)
+            }
+            if shouldRetryWorkspaceHide {
+                debugCounters.geometryRelayoutRequests += 1
                 controller.layoutRefreshController.requestRelayout(
                     reason: .axWindowChanged,
                     affectedWorkspaceIds: [entry.workspaceId]
@@ -481,9 +485,26 @@ final class AXEventHandler: CGSEventDelegate {
             return
         }
 
-        _ = controller.layoutRefreshController.handleFreshFrameEvent(for: token)
+        let shouldRetryWorkspaceHide = controller.layoutRefreshController.handleFreshFrameEvent(for: token)
+        if hasPendingFrameWrite {
+            if let frame = observedFrame {
+                controller.axManager.confirmFrameWrite(for: entry.windowId, pid: entry.pid, frame: frame)
+            }
+            if shouldRetryWorkspaceHide {
+                debugCounters.geometryRelayoutRequests += 1
+                controller.layoutRefreshController.requestRelayout(
+                    reason: .axWindowChanged,
+                    affectedWorkspaceIds: [entry.workspaceId]
+                )
+            }
+            return
+        }
+
         debugCounters.geometryRelayoutRequests += 1
-        controller.layoutRefreshController.requestRelayout(reason: .axWindowChanged)
+        controller.layoutRefreshController.requestRelayout(
+            reason: .axWindowChanged,
+            affectedWorkspaceIds: [entry.workspaceId]
+        )
     }
 
     private func handleCGSWindowDestroyed(windowId: UInt32) {
@@ -1114,6 +1135,7 @@ final class AXEventHandler: CGSEventDelegate {
         if shouldActivateWorkspace, confirmRequest {
             controller.syncMonitorsToNiriEngine()
             controller.layoutRefreshController.commitWorkspaceTransition(
+                affectedWorkspaces: [wsId],
                 reason: .appActivationTransition
             )
         }
@@ -1146,7 +1168,8 @@ final class AXEventHandler: CGSEventDelegate {
             onMonitor: monitorId
         )
         controller.layoutRefreshController.requestImmediateRelayout(
-            reason: .appActivationTransition
+            reason: .appActivationTransition,
+            affectedWorkspaceIds: [wsId]
         )
     }
 
@@ -1454,6 +1477,25 @@ final class AXEventHandler: CGSEventDelegate {
             source: .appUnhide
         )
         controller.layoutRefreshController.requestVisibilityRefresh(reason: .appUnhidden)
+    }
+
+    func handleWindowMinimizedChanged(pid: pid_t, windowId: Int, isMinimized: Bool) {
+        guard let controller else { return }
+
+        if isMinimized {
+            _ = controller.hideKeyboardFocusBorder(
+                source: .windowMinimizedChanged,
+                reason: "window minimized",
+                matchingPid: pid,
+                matchingWindowId: windowId
+            )
+            return
+        }
+
+        _ = controller.renderKeyboardFocusBorder(
+            policy: .direct,
+            source: .windowMinimizedChanged
+        )
     }
 
     func resetManagedReplacementState() {
@@ -2567,16 +2609,40 @@ final class AXEventHandler: CGSEventDelegate {
         axWindowRefProvider?(windowId, pid) ?? AXWindowService.axWindowRef(for: windowId, pid: pid)
     }
 
-    private func subscribeToWindows(_ windowIds: [UInt32]) {
+    @discardableResult
+    private func subscribeToWindows(_ windowIds: [UInt32]) -> Bool {
         if let windowSubscriptionHandler {
             windowSubscriptionHandler(windowIds)
-            return
+            return true
         }
-        CGSEventObserver.shared.subscribeToWindows(windowIds)
+        return CGSEventObserver.shared.subscribeToWindows(windowIds)
     }
 
-    func requestWindowNotificationSubscription(_ windowIds: [UInt32]) {
-        subscribeToWindows(windowIds)
+    @discardableResult
+    private func retainWindowNotificationSubscriptions(_ windowIds: [UInt32]) -> Bool {
+        if let windowSubscriptionHandler {
+            windowSubscriptionHandler(windowIds)
+            return true
+        }
+        return CGSEventObserver.shared.retainWindowNotificationSubscriptions(windowIds)
+    }
+
+    @discardableResult
+    private func releaseWindowNotificationSubscriptions(_ windowIds: [UInt32]) -> Set<UInt32> {
+        if let windowUnsubscriptionHandler {
+            return windowUnsubscriptionHandler(windowIds)
+        }
+        return CGSEventObserver.shared.releaseWindowNotificationSubscriptions(windowIds)
+    }
+
+    @discardableResult
+    func requestWindowNotificationSubscription(_ windowIds: [UInt32]) -> Bool {
+        retainWindowNotificationSubscriptions(windowIds)
+    }
+
+    @discardableResult
+    func releaseWindowNotificationSubscription(_ windowIds: [UInt32]) -> Set<UInt32> {
+        releaseWindowNotificationSubscriptions(windowIds)
     }
 
     private func resolveFocusedWindowValue(pid: pid_t) -> CFTypeRef? {

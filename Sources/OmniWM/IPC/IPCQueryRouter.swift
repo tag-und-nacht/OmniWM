@@ -284,7 +284,8 @@ final class IPCQueryRouter {
         IPCReconcileDebugQueryResult(
             snapshot: controller.workspaceManager.reconcileSnapshotDump(),
             trace: controller.workspaceManager.reconcileTraceDump(limit: traceLimit),
-            traceLimit: traceLimit
+            traceLimit: traceLimit,
+            hotPathMetrics: HotPathDebugMetrics.shared.debugDump()
         )
     }
 

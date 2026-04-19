@@ -428,6 +428,195 @@ private func workspaceConfigurations(
 }
 
 struct WorkspaceManagerTests {
+    @Test func `managed restore semantic identity changes when semantic snapshot fields change`() {
+        let frameTolerance: CGFloat = 0.5
+        let workspaceId = UUID()
+        let token = WindowToken(pid: 88, windowId: 8801)
+        let frame = CGRect(x: 120, y: 140, width: 800, height: 520)
+        let monitor = makeWorkspaceManagerTestMonitor(displayId: 880, name: "Main", x: 0, y: 0)
+        let metadata = makeWorkspaceManagerReplacementMetadata(
+            workspaceId: workspaceId,
+            title: "Managed Restore",
+            frame: frame
+        )
+        let baseState = ManagedWindowRestoreSnapshot.NiriState(
+            nodeId: nil,
+            columnIndex: 0,
+            tileIndex: 0,
+            columnWindowTokens: [token],
+            columnSizing: .init(
+                width: .fixed(640),
+                cachedWidth: 640,
+                presetWidthIdx: 1,
+                isFullWidth: false,
+                savedWidth: .proportion(0.45),
+                hasManualSingleWindowWidthOverride: false,
+                height: .fixed(720),
+                cachedHeight: 720,
+                isFullHeight: false,
+                savedHeight: .proportion(0.55)
+            ),
+            windowSizing: .init(
+                height: .auto(weight: 1.5),
+                savedHeight: .fixed(320),
+                windowWidth: .fixed(410),
+                sizingMode: .normal
+            )
+        )
+        let changedState = ManagedWindowRestoreSnapshot.NiriState(
+            nodeId: nil,
+            columnIndex: 1,
+            tileIndex: 0,
+            columnWindowTokens: [token],
+            columnSizing: baseState.columnSizing,
+            windowSizing: baseState.windowSizing
+        )
+        let baseSnapshot = ManagedWindowRestoreSnapshot(
+            token: token,
+            workspaceId: workspaceId,
+            frame: frame,
+            topologyProfile: TopologyProfile(monitors: [monitor]),
+            niriState: baseState,
+            replacementMetadata: metadata
+        )
+        let changedSnapshot = ManagedWindowRestoreSnapshot(
+            token: token,
+            workspaceId: workspaceId,
+            frame: frame,
+            topologyProfile: TopologyProfile(monitors: [monitor]),
+            niriState: changedState,
+            replacementMetadata: metadata
+        )
+
+        #expect(
+            baseSnapshot.isSemanticallyEquivalent(
+                to: changedSnapshot,
+                frameTolerance: frameTolerance
+            ) == false
+        )
+        #expect(
+            baseSnapshot.semanticIdentity(
+                frameTolerance: frameTolerance
+            ) != changedSnapshot.semanticIdentity(
+                frameTolerance: frameTolerance
+            )
+        )
+    }
+
+    @Test @MainActor func `managed restore snapshot skips approximate frame-only updates but keeps material state changes`() {
+        let defaults = makeWorkspaceManagerTestDefaults()
+        let settings = SettingsStore(defaults: defaults)
+        let manager = WorkspaceManager(settings: settings)
+        let monitor = makeWorkspaceManagerTestMonitor(displayId: 360, name: "Main", x: 0, y: 0)
+        manager.applyMonitorConfigurationChange([monitor])
+
+        guard let workspaceId = manager.workspaceId(for: "1", createIfMissing: true) else {
+            Issue.record("Failed to create workspace")
+            return
+        }
+
+        let token = manager.addWindow(
+            makeWorkspaceManagerTestWindow(windowId: 3601),
+            pid: 3601,
+            windowId: 3601,
+            to: workspaceId
+        )
+        let frame = CGRect(x: 120, y: 140, width: 800, height: 520)
+        let jitteredFrame = frame.offsetBy(dx: 0.2, dy: -0.2)
+        let metadata = makeWorkspaceManagerReplacementMetadata(
+            workspaceId: workspaceId,
+            title: "Managed Restore",
+            frame: frame
+        )
+
+        HotPathDebugMetrics.shared.setEnabledForTests(true)
+        HotPathDebugMetrics.shared.reset()
+        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
+
+        #expect(
+            manager.setManagedRestoreSnapshot(
+                ManagedWindowRestoreSnapshot(
+                    token: token,
+                    workspaceId: workspaceId,
+                    frame: frame,
+                    topologyProfile: manager.topologyProfile,
+                    niriState: nil,
+                    replacementMetadata: metadata
+                ),
+                for: token
+            )
+        )
+
+        #expect(
+            manager.setManagedRestoreSnapshot(
+                ManagedWindowRestoreSnapshot(
+                    token: token,
+                    workspaceId: workspaceId,
+                    frame: jitteredFrame,
+                    topologyProfile: manager.topologyProfile,
+                    niriState: nil,
+                    replacementMetadata: makeWorkspaceManagerReplacementMetadata(
+                        workspaceId: workspaceId,
+                        title: "Managed Restore",
+                        frame: jitteredFrame
+                    )
+                ),
+                for: token
+            ) == false
+        )
+
+        let resizedState = ManagedWindowRestoreSnapshot.NiriState(
+            nodeId: nil,
+            columnIndex: 0,
+            tileIndex: 0,
+            columnWindowTokens: [token],
+            columnSizing: .init(
+                width: .fixed(640),
+                cachedWidth: 640,
+                presetWidthIdx: 1,
+                isFullWidth: false,
+                savedWidth: .proportion(0.45),
+                hasManualSingleWindowWidthOverride: true,
+                height: .fixed(720),
+                cachedHeight: 720,
+                isFullHeight: false,
+                savedHeight: .proportion(0.55)
+            ),
+            windowSizing: .init(
+                height: .auto(weight: 1.5),
+                savedHeight: .fixed(320),
+                windowWidth: .fixed(410),
+                sizingMode: .normal
+            )
+        )
+
+        #expect(
+            manager.setManagedRestoreSnapshot(
+                ManagedWindowRestoreSnapshot(
+                    token: token,
+                    workspaceId: workspaceId,
+                    frame: jitteredFrame,
+                    topologyProfile: manager.topologyProfile,
+                    niriState: resizedState,
+                    replacementMetadata: makeWorkspaceManagerReplacementMetadata(
+                        workspaceId: workspaceId,
+                        title: "Managed Restore",
+                        frame: jitteredFrame
+                    )
+                ),
+                for: token
+            )
+        )
+
+        let storedSnapshot = manager.managedRestoreSnapshot(for: token)
+        let metrics = HotPathDebugMetrics.shared.snapshot
+        #expect(storedSnapshot?.frame == jitteredFrame)
+        #expect(storedSnapshot?.niriState == resizedState)
+        #expect(metrics.managedRestoreSnapshotPersistenceAttempts == 0)
+        #expect(metrics.managedRestoreSnapshotWrites == 0)
+        #expect(metrics.managedRestoreSnapshotSemanticNoOpCount == 0)
+    }
+
     @Test @MainActor func `equal distance remap uses deterministic tie break`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
@@ -739,6 +928,26 @@ struct WorkspaceManagerTests {
         #expect(manager.previousInteractionMonitorId == left.id)
         #expect(manager.activeWorkspace(on: left.id)?.id == ws1)
         #expect(manager.activeWorkspace(on: right.id)?.id == ws2)
+    }
+
+    @Test @MainActor func `failed topology reconcile rolls back transient mouse warp rebinds`() {
+        let defaults = makeWorkspaceManagerTestDefaults()
+        let settings = SettingsStore(defaults: defaults)
+        let manager = WorkspaceManager(settings: settings)
+        let left = makeWorkspaceManagerTestMonitor(displayId: 10, name: "Left", x: 0, y: 0)
+        let replacement = makeWorkspaceManagerTestMonitor(displayId: 11, name: "Left", x: 0, y: 0)
+
+        manager.applyMonitorConfigurationChange([left])
+
+        let persistedLeft = OutputId(from: left)
+        settings.mouseWarpMonitorOrder = [persistedLeft]
+
+        WorkspaceManager.forceTopologyReconcileFailureForTests = true
+        defer { WorkspaceManager.forceTopologyReconcileFailureForTests = false }
+        manager.applyMonitorConfigurationChange([replacement])
+
+        #expect(settings.mouseWarpMonitorOrder == [persistedLeft])
+        #expect(manager.monitors == [left])
     }
 
     @Test @MainActor func `move workspace to foreign monitor is rejected when home monitor differs`() {

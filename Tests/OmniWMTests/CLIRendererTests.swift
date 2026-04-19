@@ -235,7 +235,8 @@ import OmniWMIPC
                 reconcileDebug: IPCReconcileDebugQueryResult(
                     snapshot: "focused=nil",
                     trace: "#1 event=system-wake",
-                    traceLimit: 25
+                    traceLimit: 25,
+                    hotPathMetrics: "display_link_ticks=0"
                 )
             )
         )
@@ -245,7 +246,9 @@ import OmniWMIPC
 
         #expect(text.contains("SNAPSHOT"))
         #expect(text.contains("TRACE (last 25)"))
+        #expect(text.contains("HOT PATH METRICS"))
         #expect(text.contains("focused=nil"))
         #expect(text.contains("#1 event=system-wake"))
+        #expect(text.contains("display_link_ticks=0"))
     }
 }

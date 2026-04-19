@@ -1212,21 +1212,35 @@ struct DwindleLayoutEngineTests {
         await waitForLayoutPlanRefreshWork(on: controller)
 
         controller.dwindleLayoutHandler.swapWindow(direction: .left)
-        await waitForLayoutPlanRefreshWork(on: controller)
 
         guard let engine = controller.dwindleEngine else {
             Issue.record("Missing Dwindle engine for repeated swap test")
             return
         }
 
-        let sampleTime = controller.animationClock.now()
-        let canonicalFrames = engine.currentFrames(in: workspaceId)
-        let presentedFrames = engine.capturePresentedFrames(
+        var sampleTime = controller.animationClock.now()
+        var canonicalFrames = engine.currentFrames(in: workspaceId)
+        var presentedFrames = engine.capturePresentedFrames(
             in: workspaceId,
             at: sampleTime,
             scale: layoutPlanTestMonitorScale(monitor)
         )
+        let observedAnimatedPresentation = await waitForConditionForTests(
+            timeoutNanoseconds: 2_000_000_000
+        ) {
+            sampleTime = controller.animationClock.now()
+            canonicalFrames = engine.currentFrames(in: workspaceId)
+            presentedFrames = engine.capturePresentedFrames(
+                in: workspaceId,
+                at: sampleTime,
+                scale: layoutPlanTestMonitorScale(monitor)
+            )
+            return controller.layoutRefreshController.hasDwindleAnimationRunning(in: workspaceId)
+                && engine.hasActiveAnimations(in: workspaceId, at: sampleTime)
+                && presentedFrames != canonicalFrames
+        }
 
+        #expect(observedAnimatedPresentation)
         #expect(controller.layoutRefreshController.hasDwindleAnimationRunning(in: workspaceId))
         #expect(engine.hasActiveAnimations(in: workspaceId, at: sampleTime))
         #expect(presentedFrames != canonicalFrames)
@@ -1301,21 +1315,34 @@ struct DwindleLayoutEngineTests {
         await waitForLayoutPlanRefreshWork(on: controller)
 
         #expect(controller.windowActionHandler.summonWindowRight(handle: WindowHandle(id: summonedToken)))
-        await waitForLayoutPlanRefreshWork(on: controller)
-
         guard let engine = controller.dwindleEngine else {
             Issue.record("Missing Dwindle engine for summon-right animation test")
             return
         }
 
-        let sampleTime = controller.animationClock.now()
-        let canonicalFrames = engine.currentFrames(in: workspaceId)
-        let presentedFrames = engine.capturePresentedFrames(
+        var sampleTime = controller.animationClock.now()
+        var canonicalFrames = engine.currentFrames(in: workspaceId)
+        var presentedFrames = engine.capturePresentedFrames(
             in: workspaceId,
             at: sampleTime,
             scale: layoutPlanTestMonitorScale(monitor)
         )
+        let observedAnimatedPresentation = await waitForConditionForTests(
+            timeoutNanoseconds: 2_000_000_000
+        ) {
+            sampleTime = controller.animationClock.now()
+            canonicalFrames = engine.currentFrames(in: workspaceId)
+            presentedFrames = engine.capturePresentedFrames(
+                in: workspaceId,
+                at: sampleTime,
+                scale: layoutPlanTestMonitorScale(monitor)
+            )
+            return controller.layoutRefreshController.hasDwindleAnimationRunning(in: workspaceId)
+                && engine.hasActiveAnimations(in: workspaceId, at: sampleTime)
+                && presentedFrames != canonicalFrames
+        }
 
+        #expect(observedAnimatedPresentation)
         #expect(controller.layoutRefreshController.hasDwindleAnimationRunning(in: workspaceId))
         #expect(engine.hasActiveAnimations(in: workspaceId, at: sampleTime))
         #expect(presentedFrames != canonicalFrames)

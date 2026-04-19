@@ -3,7 +3,7 @@ import Foundation
 
 @MainActor
 final class LockScreenObserver {
-    static let lockScreenAppBundleId = "com.apple.loginwindow"
+    nonisolated static let lockScreenAppBundleId = "com.apple.loginwindow"
 
     enum LockState {
         case unlocked
@@ -15,11 +15,10 @@ final class LockScreenObserver {
 
     var onLockDetected: (() -> Void)?
     var onUnlockDetected: (() -> Void)?
-    var frontmostApplicationProvider: @MainActor () -> NSRunningApplication? = {
-        NSWorkspace.shared.frontmostApplication
+    var frontmostSnapshotProvider: @MainActor () -> FrontmostSnapshot? = {
+        FrontmostApplicationState.shared.snapshot
     }
 
-    private var activationObserver: NSObjectProtocol?
     private var screenLockObserver: NSObjectProtocol?
     private var screenUnlockObserver: NSObjectProtocol?
 
@@ -34,22 +33,6 @@ final class LockScreenObserver {
     }
 
     private func setupObservers() {
-        let nc = NSWorkspace.shared.notificationCenter
-
-        activationObserver = nc.addObserver(
-            forName: NSWorkspace.didActivateApplicationNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] notification in
-            guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else {
-                return
-            }
-            let bundleId = app.bundleIdentifier
-            Task { @MainActor in
-                self?.handleAppActivation(bundleId: bundleId)
-            }
-        }
-
         let dnc = DistributedNotificationCenter.default()
 
         screenLockObserver = dnc.addObserver(
@@ -73,7 +56,11 @@ final class LockScreenObserver {
         }
     }
 
-    private func handleAppActivation(bundleId: String?) {
+    func syncWithFrontmostApplicationState() {
+        handleFrontmostApplicationDidActivate(bundleId: frontmostSnapshotProvider()?.bundleIdentifier)
+    }
+
+    func handleFrontmostApplicationDidActivate(bundleId: String?) {
         if bundleId == Self.lockScreenAppBundleId {
             handleLockEvent()
         } else if state == .locked || state == .transitioning {
@@ -101,14 +88,10 @@ final class LockScreenObserver {
     }
 
     func isFrontmostAppLockScreen() -> Bool {
-        frontmostApplicationProvider()?.bundleIdentifier == Self.lockScreenAppBundleId
+        frontmostSnapshotProvider()?.isLockScreen == true
     }
 
     func cleanup() {
-        if let observer = activationObserver {
-            NSWorkspace.shared.notificationCenter.removeObserver(observer)
-            activationObserver = nil
-        }
         let dnc = DistributedNotificationCenter.default()
         if let observer = screenLockObserver {
             dnc.removeObserver(observer)

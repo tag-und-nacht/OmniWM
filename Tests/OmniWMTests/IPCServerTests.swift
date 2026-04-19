@@ -741,6 +741,9 @@ private func makeTestFocusEvent(id: String, title: String) -> IPCEventEnvelope {
     }
 
     @Test func focusSubscriptionStreamsNDJSONEventsFromRealFocusChanges() async throws {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
         let socketPath = makeIPCTestSocketPath()
         let controller = makeLayoutPlanTestController()
         defer {
@@ -899,6 +902,9 @@ private func makeTestFocusEvent(id: String, title: String) -> IPCEventEnvelope {
     }
 
     @Test func focusSubscriptionDeliversInitialSnapshotBeforeBufferedLiveEvent() async throws {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
         let socketPath = makeIPCTestSocketPath()
         let controller = makeLayoutPlanTestController()
         defer {

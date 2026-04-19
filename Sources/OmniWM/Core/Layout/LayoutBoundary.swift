@@ -163,6 +163,11 @@ struct RefreshExecutionEffects {
     var subscribeManagedWindows: Bool = false
 }
 
+struct ManagedRestoreMaterialStateChange {
+    let token: WindowToken
+    let reason: ManagedRestoreTriggerReason
+}
+
 struct WorkspaceLayoutPlan {
     let workspaceId: WorkspaceDescriptor.ID
     let monitor: LayoutMonitorSnapshot
@@ -170,6 +175,9 @@ struct WorkspaceLayoutPlan {
     var diff: WorkspaceLayoutDiff
     var animationDirectives: [AnimationDirective] = []
     var nativeFullscreenRestoreFinalizeTokens: [WindowToken] = []
+    var managedRestoreMaterialStateChanges: [ManagedRestoreMaterialStateChange] = []
+    var persistManagedRestoreSnapshots: Bool = true
+    var skipFrameApplicationForAnimation: Bool = false
 }
 
 typealias RefreshPostLayoutAction = @MainActor () -> Void

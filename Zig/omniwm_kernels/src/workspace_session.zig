@@ -1614,7 +1614,9 @@ fn planInternal(
     string_byte_count: usize,
     output: *Output,
 ) KernelError!i32 {
-    const allocator = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const monitor_inputs = try sliceFromOptionalPtr(MonitorInput, monitors_ptr, monitor_count);
     const previous_monitor_inputs = try sliceFromOptionalPtr(
         PreviousMonitorInput,

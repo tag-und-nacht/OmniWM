@@ -1,6 +1,63 @@
 import AppKit
 import CoreGraphics
 
+@MainActor
+final class ScreenLookupCache {
+    private struct Entry {
+        let screen: NSScreen
+        let backingScale: CGFloat
+    }
+
+    static let shared = ScreenLookupCache()
+
+    private var entriesByDisplayId: [CGDirectDisplayID: Entry] = [:]
+
+    private init() {}
+
+    func refresh(screens: [NSScreen] = NSScreen.screens) {
+        HotPathDebugMetrics.shared.recordScreenCacheRefresh()
+        entriesByDisplayId = Dictionary(
+            uniqueKeysWithValues: screens.compactMap { screen in
+                guard let displayId = screen.displayId else { return nil }
+                return (
+                    displayId,
+                    Entry(
+                        screen: screen,
+                        backingScale: screen.backingScaleFactor
+                    )
+                )
+            }
+        )
+    }
+
+    func screen(for displayId: CGDirectDisplayID) -> NSScreen? {
+        if let entry = entriesByDisplayId[displayId] {
+            HotPathDebugMetrics.shared.recordScreenLookup(hit: true)
+            return entry.screen
+        }
+
+        refresh()
+        HotPathDebugMetrics.shared.recordScreenLookup(hit: false)
+        return entriesByDisplayId[displayId]?.screen
+    }
+
+    func backingScale(for displayId: CGDirectDisplayID, fallback: CGFloat = 2.0) -> CGFloat {
+        if let entry = entriesByDisplayId[displayId] {
+            HotPathDebugMetrics.shared.recordBackingScaleLookup(hit: true)
+            return entry.backingScale
+        }
+
+        refresh()
+        let resolvedScale = entriesByDisplayId[displayId]?.backingScale
+        HotPathDebugMetrics.shared.recordBackingScaleLookup(hit: false)
+        return resolvedScale ?? fallback
+    }
+
+    func resetForTests() {
+        entriesByDisplayId = [:]
+    }
+}
+
 struct Monitor: Identifiable, Hashable {
     struct ID: Hashable {
         let displayId: CGDirectDisplayID

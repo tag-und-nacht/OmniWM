@@ -69,6 +69,9 @@ final class WMController {
     let focusBridge: FocusBridgeCoordinator
     let focusPolicyEngine: FocusPolicyEngine
     private let restorePlanner = RestorePlanner()
+    @ObservationIgnored
+    private var managedRestoreFastPathIdentitiesByWindowId: [Int: ManagedRestoreFastPathIdentity] =
+        [:]
     let windowRuleEngine = WindowRuleEngine()
 
     var niriEngine: NiriLayoutEngine?
@@ -173,6 +176,15 @@ final class WMController {
         hotkeys.onCommand = { [weak self] command in
             self?.commandHandler.handleCommand(command)
         }
+        self.workspaceManager.onWindowRemoved = { [weak self] token in
+            self?.invalidateManagedRestoreFastPathIdentity(forWindowId: token.windowId)
+        }
+        self.workspaceManager.onWindowRekeyed = { [weak self] oldToken, newToken in
+            self?.invalidateManagedRestoreFastPathIdentityForRekey(
+                fromWindowId: oldToken.windowId,
+                toWindowId: newToken.windowId
+            )
+        }
         tabbedOverlayManager.onSelect = { [weak self] workspaceId, columnId, visualIndex in
             self?.layoutRefreshController.selectTabInNiri(
                 workspaceId: workspaceId,
@@ -183,10 +195,12 @@ final class WMController {
         self.workspaceManager.onSessionStateChanged = { [weak self] in
             self?.handleSessionStateChanged()
         }
-        axManager.onFrameConfirmed = { [weak self] pid, windowId, frame in
+        axManager.onFrameConfirmed = { [weak self] pid, windowId, frame, frameConfirmResult in
             self?.recordManagedRestoreGeometry(
                 for: WindowToken(pid: pid, windowId: windowId),
-                frame: frame
+                frame: frame,
+                reason: .frameConfirmed,
+                frameConfirmResult: frameConfirmResult
             )
         }
         focusPolicyEngine.onLeaseChanged = { [weak self] lease in
@@ -630,10 +644,6 @@ final class WMController {
         let effectiveMonitors = monitors ?? workspaceManager.monitors
         let shouldEnable = shouldUseMouseWarp(for: effectiveMonitors)
 
-        if shouldEnable {
-            _ = settings.persistEffectiveMouseWarpMonitorOrder(for: effectiveMonitors)
-        }
-
         guard shouldEnable != isMouseWarpPolicyEnabled else {
             return shouldEnable
         }
@@ -654,7 +664,7 @@ final class WMController {
     }
 
     func insetWorkingFrame(for monitor: Monitor) -> CGRect {
-        let scale = NSScreen.screens.first(where: { $0.displayId == monitor.displayId })?.backingScaleFactor ?? 2.0
+        let scale = layoutRefreshController.backingScale(for: monitor)
         let resolved = settings.resolvedBarSettings(for: monitor)
         let reservedTopInset = WorkspaceBarGeometry.resolve(
             monitor: monitor,
@@ -808,6 +818,10 @@ final class WMController {
 
     func isWorkspaceBarRuntimeHiddenForTests(on monitorId: Monitor.ID) -> Bool {
         hiddenWorkspaceBarMonitorIds.contains(monitorId)
+    }
+
+    func managedRestoreFastPathCacheWindowIdsForTests() -> Set<Int> {
+        Set(managedRestoreFastPathIdentitiesByWindowId.keys)
     }
 
     func configureWorkspaceBarManagerForTests(
@@ -1136,7 +1150,7 @@ final class WMController {
     ) -> WindowToken? {
         let focusedToken = workspaceManager.focusedToken
         let frontmostPid = commandHandler.frontmostAppPidProvider?()
-            ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
+            ?? FrontmostApplicationState.shared.snapshot?.pid
         let frontmostToken = commandHandler.frontmostFocusedWindowTokenProvider?()
             ?? frontmostPid.flatMap { axEventHandler.focusedWindowToken(for: $0) }
         if preferFrontmostWhenNonManagedFocusActive, workspaceManager.isNonManagedFocusActive {
@@ -1826,7 +1840,10 @@ final class WMController {
         hideScratchpadWindow(updatedEntry, monitor: hideMonitor)
 
         if transitionedFromTiling {
-            layoutRefreshController.requestImmediateRelayout(reason: .layoutCommand)
+            layoutRefreshController.requestImmediateRelayout(
+                reason: .layoutCommand,
+                affectedWorkspaceIds: [updatedEntry.workspaceId]
+            )
         }
     }
 
@@ -1995,6 +2012,10 @@ final class WMController {
         to workspaceId: WorkspaceDescriptor.ID
     ) {
         workspaceManager.setWorkspace(for: token, to: workspaceId)
+        recordManagedRestoreGeometryIfMaterialStateChanged(
+            for: CGWindowID(token.windowId),
+            reason: .workspaceMoved
+        )
         guard let entry = workspaceManager.entry(for: token) else { return }
         focusBridge.updateFocusedTargetWorkspace(
             matching: token,
@@ -2394,16 +2415,180 @@ extension WMController {
         let restoreFailure: WorkspaceManager.NativeFullscreenRecord.RestoreFailure?
     }
 
+    private struct ManagedRestoreFastPathNiriState: Equatable {
+        let nodeId: NodeId
+        let columnId: NodeId
+        let workspaceColumnIds: [NodeId]
+        let tileIndex: Int?
+        let columnWindowTokens: [WindowToken]
+        let columnSizing: ManagedWindowRestoreSnapshot.NiriState.ColumnSizing
+        let windowSizing: ManagedWindowRestoreSnapshot.NiriState.WindowSizing
+
+        func matches(_ snapshot: ManagedWindowRestoreSnapshot.NiriState?) -> Bool {
+            guard let snapshot else { return false }
+            guard snapshot.nodeId == nodeId,
+                  snapshot.tileIndex == tileIndex,
+                  snapshot.columnWindowTokens == columnWindowTokens,
+                  snapshot.columnSizing == columnSizing,
+                  snapshot.windowSizing == windowSizing,
+                  let snapshotColumnIndex = snapshot.columnIndex,
+                  workspaceColumnIds.indices.contains(snapshotColumnIndex)
+            else {
+                return false
+            }
+            return workspaceColumnIds[snapshotColumnIndex] == columnId
+        }
+    }
+
+    private struct ManagedRestoreFastPathIdentity: Equatable {
+        let workspaceId: WorkspaceDescriptor.ID
+        let frame: ManagedWindowRestoreSnapshot.SemanticIdentity.QuantizedFrame
+        let topologyProfile: TopologyProfile
+        let niriState: ManagedRestoreFastPathNiriState?
+        let replacementRestoreIdentity: ManagedReplacementMetadata.RestoreIdentity
+
+        func matches(_ snapshot: ManagedWindowRestoreSnapshot) -> Bool {
+            guard workspaceId == snapshot.workspaceId,
+                  frame == snapshot.semanticIdentity(frameTolerance: 0.5).frame,
+                  topologyProfile == snapshot.topologyProfile,
+                  replacementRestoreIdentity == snapshot.replacementMetadata?.restoreIdentity
+            else {
+                return false
+            }
+
+            switch (niriState, snapshot.niriState) {
+            case (nil, nil):
+                return true
+            case let (current?, snapshotState?):
+                return current.matches(snapshotState)
+            default:
+                return false
+            }
+        }
+    }
+
+    private struct ManagedRestoreSnapshotPreview {
+        let token: WindowToken
+        let entry: WindowModel.Entry
+        let frame: CGRect
+        let topologyProfile: TopologyProfile
+        let niriState: ManagedWindowRestoreSnapshot.NiriState?
+        let provisionalMetadata: ManagedReplacementMetadata
+        let needsFactRefresh: Bool
+
+        var provisionalSnapshot: ManagedWindowRestoreSnapshot {
+            ManagedWindowRestoreSnapshot(
+                token: token,
+                workspaceId: entry.workspaceId,
+                frame: frame,
+                topologyProfile: topologyProfile,
+                niriState: niriState,
+                replacementMetadata: provisionalMetadata
+            )
+        }
+    }
+
     func recordManagedRestoreGeometry(
         for token: WindowToken,
-        frame: CGRect
+        frame: CGRect,
+        reason: ManagedRestoreTriggerReason = .frameConfirmed,
+        frameConfirmResult: FrameConfirmResult? = nil
     ) {
-        guard workspaceManager.entry(for: token) != nil else { return }
-        guard workspaceManager.layoutReason(for: token) != .nativeFullscreen else { return }
-        guard let snapshot = makeManagedWindowRestoreSnapshot(for: token, frame: frame) else {
-            return
+        _ = persistManagedRestoreSnapshotIfNeeded(
+            for: token,
+            frame: frame,
+            reason: reason,
+            frameConfirmResult: frameConfirmResult
+        )
+    }
+
+    func recordManagedRestoreGeometryIfMaterialStateChanged(
+        for windowId: CGWindowID,
+        reason: ManagedRestoreTriggerReason
+    ) {
+        guard let entry = workspaceManager.entry(forWindowId: Int(windowId)) else { return }
+        guard let frame = resolveManagedRestoreMaterialStateFrame(for: entry.token) else { return }
+        _ = persistManagedRestoreSnapshotIfNeeded(
+            for: entry.token,
+            frame: frame,
+            reason: reason
+        )
+    }
+
+    @discardableResult
+    private func persistManagedRestoreSnapshotIfNeeded(
+        for token: WindowToken,
+        frame: CGRect,
+        reason: ManagedRestoreTriggerReason = .frameConfirmed,
+        frameConfirmResult: FrameConfirmResult? = nil
+    ) -> Bool {
+        HotPathDebugMetrics.shared.recordManagedRestoreGeometry(reason: reason)
+        if let frameConfirmResult {
+            HotPathDebugMetrics.shared.recordManagedRestoreSnapshotFrameConfirmResult(
+                frameConfirmResult
+            )
         }
-        _ = workspaceManager.setManagedRestoreSnapshot(snapshot, for: token)
+        guard let entry = workspaceManager.entry(for: token) else { return false }
+        guard workspaceManager.layoutReason(for: token) != .nativeFullscreen else { return false }
+        if shouldShortCircuitManagedRestoreSnapshot(for: entry, frame: frame) {
+            HotPathDebugMetrics.shared.recordManagedRestoreSnapshotShortCircuit()
+            HotPathDebugMetrics.shared.recordManagedRestoreSnapshotSemanticNoOp(reason: reason)
+            return false
+        }
+        guard let preview = makeManagedRestoreSnapshotPreview(for: entry, frame: frame) else {
+            return false
+        }
+
+        if !preview.needsFactRefresh,
+           !workspaceManager.shouldPersistManagedRestoreSnapshot(
+               preview.provisionalSnapshot,
+               for: preview.token
+           )
+        {
+            HotPathDebugMetrics.shared.recordManagedRestoreSnapshotSemanticNoOp(reason: reason)
+            return false
+        }
+
+        let snapshot = makeManagedWindowRestoreSnapshot(from: preview)
+        HotPathDebugMetrics.shared.recordManagedRestoreSnapshotPersistenceAttempt(reason: reason)
+        guard workspaceManager.shouldPersistManagedRestoreSnapshot(snapshot, for: token) else {
+            HotPathDebugMetrics.shared.recordManagedRestoreSnapshotSemanticNoOp(reason: reason)
+            return false
+        }
+
+        guard workspaceManager.setManagedRestoreSnapshot(snapshot, for: token) else {
+            return false
+        }
+        cacheManagedRestoreFastPathIdentity(
+            for: entry,
+            frame: frame,
+            topologyProfile: snapshot.topologyProfile,
+            replacementMetadata: snapshot.replacementMetadata
+        )
+        HotPathDebugMetrics.shared.recordManagedRestoreSnapshotWrite(reason: reason)
+        return true
+    }
+
+    private func makeManagedRestoreSnapshotPreview(
+        for entry: WindowModel.Entry,
+        frame: CGRect
+    ) -> ManagedRestoreSnapshotPreview? {
+        let niriState = captureNiriRestoreState(for: entry.token, workspaceId: entry.workspaceId)
+        let provisionalMetadata = provisionalManagedRestoreReplacementMetadata(
+            for: entry,
+            frame: frame
+        )
+        return ManagedRestoreSnapshotPreview(
+            token: entry.token,
+            entry: entry,
+            frame: frame,
+            topologyProfile: workspaceManager.topologyProfile,
+            niriState: niriState,
+            provisionalMetadata: provisionalMetadata,
+            needsFactRefresh: managedRestoreMetadataNeedsAXFactRefresh(
+                provisionalMetadata: provisionalMetadata
+            )
+        )
     }
 
     private func makeManagedWindowRestoreSnapshot(
@@ -2411,41 +2596,206 @@ extension WMController {
         frame: CGRect
     ) -> ManagedWindowRestoreSnapshot? {
         guard let entry = workspaceManager.entry(for: token) else { return nil }
-        let replacementMetadata = managedRestoreReplacementMetadata(for: entry, frame: frame)
+        if shouldShortCircuitManagedRestoreSnapshot(for: entry, frame: frame) {
+            return nil
+        }
+        guard let preview = makeManagedRestoreSnapshotPreview(for: entry, frame: frame) else {
+            return nil
+        }
+        if !preview.needsFactRefresh,
+           !workspaceManager.shouldPersistManagedRestoreSnapshot(
+               preview.provisionalSnapshot,
+               for: preview.token
+           )
+        {
+            return nil
+        }
+        return makeManagedWindowRestoreSnapshot(from: preview)
+    }
+
+    private func makeManagedWindowRestoreSnapshot(
+        from preview: ManagedRestoreSnapshotPreview
+    ) -> ManagedWindowRestoreSnapshot {
+        let replacementMetadata = finalizedManagedRestoreReplacementMetadata(
+            for: preview.entry,
+            frame: preview.frame,
+            provisionalMetadata: preview.provisionalMetadata,
+            needsFactRefresh: preview.needsFactRefresh
+        )
         return ManagedWindowRestoreSnapshot(
-            token: token,
-            workspaceId: entry.workspaceId,
-            frame: frame,
-            topologyProfile: workspaceManager.topologyProfile,
-            niriState: captureNiriRestoreState(for: token, workspaceId: entry.workspaceId),
+            token: preview.token,
+            workspaceId: preview.entry.workspaceId,
+            frame: preview.frame,
+            topologyProfile: preview.topologyProfile,
+            niriState: preview.niriState,
             replacementMetadata: replacementMetadata
         )
     }
 
-    private func managedRestoreReplacementMetadata(
+    private func shouldShortCircuitManagedRestoreSnapshot(
         for entry: WindowModel.Entry,
         frame: CGRect
-    ) -> ManagedReplacementMetadata? {
-        var metadata = workspaceManager.managedReplacementMetadata(for: entry.token)
-            ?? workspaceManager.managedRestoreSnapshot(for: entry.token)?.replacementMetadata
-            ?? ManagedReplacementMetadata(
-                bundleId: appInfoCache.bundleId(for: entry.pid)
-                    ?? NSRunningApplication(processIdentifier: entry.pid)?.bundleIdentifier,
-                workspaceId: entry.workspaceId,
-                mode: entry.mode,
-                role: nil,
-                subrole: nil,
-                title: nil,
-                windowLevel: nil,
-                parentWindowId: nil,
-                frame: nil
+    ) -> Bool {
+        guard let previousSnapshot = workspaceManager.managedRestoreSnapshot(for: entry.token),
+              let currentIdentity = captureManagedRestoreFastPathIdentity(
+                  for: entry,
+                  frame: frame
+              )
+        else {
+            return false
+        }
+
+        if let cachedIdentity = managedRestoreFastPathIdentitiesByWindowId[entry.windowId],
+           cachedIdentity.matches(previousSnapshot),
+           cachedIdentity == currentIdentity
+        {
+            managedRestoreFastPathIdentitiesByWindowId[entry.windowId] = currentIdentity
+            return true
+        }
+
+        guard currentIdentity.matches(previousSnapshot) else { return false }
+        managedRestoreFastPathIdentitiesByWindowId[entry.windowId] = currentIdentity
+        return true
+    }
+
+    private func captureManagedRestoreFastPathIdentity(
+        for entry: WindowModel.Entry,
+        frame: CGRect,
+        topologyProfile: TopologyProfile? = nil,
+        replacementMetadata: ManagedReplacementMetadata? = nil
+    ) -> ManagedRestoreFastPathIdentity? {
+        let resolvedReplacementMetadata = replacementMetadata
+            ?? fastManagedRestoreReplacementMetadata(for: entry, frame: frame)
+        guard resolvedReplacementMetadata.bundleId != nil,
+              !managedRestoreMetadataNeedsAXFactRefresh(
+                  provisionalMetadata: resolvedReplacementMetadata
+              )
+        else {
+            return nil
+        }
+
+        return ManagedRestoreFastPathIdentity(
+            workspaceId: entry.workspaceId,
+            frame: .init(
+                frame: frame,
+                tolerance: WorkspaceManager.managedRestoreSnapshotFrameTolerance
+            ),
+            topologyProfile: topologyProfile ?? workspaceManager.topologyProfile,
+            niriState: captureManagedRestoreFastPathNiriState(
+                for: entry.token,
+                workspaceId: entry.workspaceId
+            ),
+            replacementRestoreIdentity: resolvedReplacementMetadata.restoreIdentity
+        )
+    }
+
+    private func cacheManagedRestoreFastPathIdentity(
+        for entry: WindowModel.Entry,
+        frame: CGRect,
+        topologyProfile: TopologyProfile,
+        replacementMetadata: ManagedReplacementMetadata?
+    ) {
+        managedRestoreFastPathIdentitiesByWindowId[entry.windowId] =
+            captureManagedRestoreFastPathIdentity(
+                for: entry,
+                frame: frame,
+                topologyProfile: topologyProfile,
+                replacementMetadata: replacementMetadata
             )
+    }
+
+    private func invalidateManagedRestoreFastPathIdentity(forWindowId windowId: Int) {
+        managedRestoreFastPathIdentitiesByWindowId.removeValue(forKey: windowId)
+    }
+
+    private func invalidateManagedRestoreFastPathIdentityForRekey(
+        fromWindowId oldWindowId: Int,
+        toWindowId newWindowId: Int
+    ) {
+        managedRestoreFastPathIdentitiesByWindowId.removeValue(forKey: oldWindowId)
+        guard newWindowId != oldWindowId else { return }
+        managedRestoreFastPathIdentitiesByWindowId.removeValue(forKey: newWindowId)
+    }
+
+    private func provisionalManagedRestoreReplacementMetadata(
+        for entry: WindowModel.Entry,
+        frame: CGRect
+    ) -> ManagedReplacementMetadata {
+        var metadata = ManagedReplacementMetadata(
+            bundleId: appInfoCache.bundleId(for: entry.pid)
+                ?? NSRunningApplication(processIdentifier: entry.pid)?.bundleIdentifier,
+            workspaceId: entry.workspaceId,
+            mode: entry.mode,
+            role: nil,
+            subrole: nil,
+            title: nil,
+            windowLevel: nil,
+            parentWindowId: nil,
+            frame: nil
+        )
+        if let restoreMetadata = workspaceManager.managedRestoreSnapshot(for: entry.token)?.replacementMetadata {
+            metadata = metadata.mergingNonNilValues(from: restoreMetadata)
+        }
+        if let liveMetadata = workspaceManager.managedReplacementMetadata(for: entry.token) {
+            metadata = metadata.mergingNonNilValues(from: liveMetadata)
+        }
+        metadata.workspaceId = entry.workspaceId
+        metadata.mode = entry.mode
+        metadata.frame = frame
+        if metadata.title == nil, let title = AXWindowService.titlePreferFast(windowId: UInt32(entry.windowId)) {
+            metadata.title = title
+        }
+        return metadata
+    }
+
+    private func fastManagedRestoreReplacementMetadata(
+        for entry: WindowModel.Entry,
+        frame: CGRect
+    ) -> ManagedReplacementMetadata {
+        var metadata = ManagedReplacementMetadata(
+            bundleId: nil,
+            workspaceId: entry.workspaceId,
+            mode: entry.mode,
+            role: nil,
+            subrole: nil,
+            title: nil,
+            windowLevel: nil,
+            parentWindowId: nil,
+            frame: nil
+        )
+        if let restoreMetadata = workspaceManager.managedRestoreSnapshot(for: entry.token)?.replacementMetadata {
+            metadata = metadata.mergingNonNilValues(from: restoreMetadata)
+        }
+        if let liveMetadata = workspaceManager.managedReplacementMetadata(for: entry.token) {
+            metadata = metadata.mergingNonNilValues(from: liveMetadata)
+        }
+        metadata.workspaceId = entry.workspaceId
+        metadata.mode = entry.mode
+        metadata.frame = frame
+        return metadata
+    }
+
+    private func managedRestoreMetadataNeedsAXFactRefresh(
+        provisionalMetadata metadata: ManagedReplacementMetadata
+    ) -> Bool {
         let canResolveWindowServerInfo = axEventHandler.windowInfoProvider != nil
-        let needsFacts = metadata.role == nil
+        return metadata.role == nil
             || metadata.subrole == nil
             || metadata.title == nil
             || (canResolveWindowServerInfo && metadata.windowLevel == nil)
-        if needsFacts {
+    }
+
+    private func finalizedManagedRestoreReplacementMetadata(
+        for entry: WindowModel.Entry,
+        frame: CGRect,
+        provisionalMetadata: ManagedReplacementMetadata,
+        needsFactRefresh: Bool
+    ) -> ManagedReplacementMetadata {
+        HotPathDebugMetrics.shared.recordManagedRestoreReplacementMetadata(
+            didFetchFacts: needsFactRefresh
+        )
+        var metadata = provisionalMetadata
+        if needsFactRefresh {
             let appInfo = resolvedAppInfo(for: entry.pid)
             let facts = axEventHandler.windowFactsProvider?(entry.axRef, entry.pid) ?? WindowRuleFacts(
                 appName: appInfo?.name,
@@ -2470,9 +2820,6 @@ extension WMController {
         metadata.workspaceId = entry.workspaceId
         metadata.mode = entry.mode
         metadata.frame = frame
-        if metadata.title == nil, let title = AXWindowService.titlePreferFast(windowId: UInt32(entry.windowId)) {
-            metadata.title = title
-        }
         return metadata
     }
 
@@ -2492,6 +2839,47 @@ extension WMController {
         return ManagedWindowRestoreSnapshot.NiriState(
             nodeId: node.id,
             columnIndex: engine.columnIndex(of: column, in: workspaceId),
+            tileIndex: tileIndex,
+            columnWindowTokens: columnWindowTokens,
+            columnSizing: ManagedWindowRestoreSnapshot.NiriState.ColumnSizing(
+                width: column.width,
+                cachedWidth: column.cachedWidth,
+                presetWidthIdx: column.presetWidthIdx,
+                isFullWidth: column.isFullWidth,
+                savedWidth: column.savedWidth,
+                hasManualSingleWindowWidthOverride: column.hasManualSingleWindowWidthOverride,
+                height: column.height,
+                cachedHeight: column.cachedHeight,
+                isFullHeight: column.isFullHeight,
+                savedHeight: column.savedHeight
+            ),
+            windowSizing: ManagedWindowRestoreSnapshot.NiriState.WindowSizing(
+                height: node.height,
+                savedHeight: node.savedHeight,
+                windowWidth: node.windowWidth,
+                sizingMode: node.sizingMode
+            )
+        )
+    }
+
+    private func captureManagedRestoreFastPathNiriState(
+        for token: WindowToken,
+        workspaceId: WorkspaceDescriptor.ID
+    ) -> ManagedRestoreFastPathNiriState? {
+        guard let engine = niriEngine,
+              let node = engine.findNode(for: token),
+              let column = engine.column(of: node)
+        else {
+            return nil
+        }
+
+        let workspaceColumns = engine.columns(in: workspaceId)
+        let columnWindowTokens = column.windowNodes.map(\.token)
+        let tileIndex = columnWindowTokens.firstIndex(of: token)
+        return ManagedRestoreFastPathNiriState(
+            nodeId: node.id,
+            columnId: column.id,
+            workspaceColumnIds: workspaceColumns.map(\.id),
             tileIndex: tileIndex,
             columnWindowTokens: columnWindowTokens,
             columnSizing: ManagedWindowRestoreSnapshot.NiriState.ColumnSizing(
@@ -2551,6 +2939,13 @@ extension WMController {
         return nil
     }
 
+    private func resolveManagedRestoreMaterialStateFrame(
+        for token: WindowToken
+    ) -> CGRect? {
+        canonicalManagedRestoreMaterialStateFrame(for: token)
+            ?? workspaceManager.managedRestoreSnapshot(for: token)?.frame
+    }
+
     private func currentAXRestoreFrame(
         for token: WindowToken
     ) -> CGRect? {
@@ -2560,6 +2955,28 @@ extension WMController {
         }
         if let frame = try? AXWindowService.frame(entry.axRef) {
             return frame
+        }
+        return nil
+    }
+
+    private func canonicalManagedRestoreMaterialStateFrame(
+        for token: WindowToken
+    ) -> CGRect? {
+        if let node = niriEngine?.findNode(for: token),
+           let frame = node.frame
+        {
+            return frame
+        }
+        if let node = dwindleEngine?.findNode(for: token),
+           let cachedFrame = node.cachedFrame
+        {
+            return cachedFrame
+        }
+        if let floatingFrame = workspaceManager.floatingState(for: token)?.lastFrame {
+            return floatingFrame
+        }
+        if let appliedFrame = axManager.lastAppliedFrame(for: token.windowId) {
+            return appliedFrame
         }
         return nil
     }

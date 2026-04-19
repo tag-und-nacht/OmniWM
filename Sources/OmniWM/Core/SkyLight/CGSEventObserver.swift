@@ -32,6 +32,10 @@ final class CGSEventObserver {
 
     private var isRegistered = false
     private var isWindowClosedNotifyRegistered = false
+    private var requestedWindowIds: Set<UInt32> = []
+    private var retainedWindowSubscriptionCounts: [UInt32: Int] = [:]
+    var windowNotificationRequestHandlerForTests: (([UInt32]) -> Bool)?
+    var windowNotificationUnrequestHandlerForTests: (([UInt32]) -> Bool?)?
 
     private init() {}
 
@@ -113,11 +117,83 @@ final class CGSEventObserver {
         }
 
         updateCallbackRegistrationState(false)
+        requestedWindowIds.removeAll()
+        retainedWindowSubscriptionCounts.removeAll()
     }
 
     @discardableResult
     func subscribeToWindows(_ windowIds: [UInt32]) -> Bool {
-        SkyLight.shared.subscribeToWindowNotifications(windowIds)
+        let newWindowIds = uniqueWindowIds(windowIds).filter { !requestedWindowIds.contains($0) }
+        guard !newWindowIds.isEmpty else {
+            return true
+        }
+        guard requestWindowNotifications(newWindowIds) else {
+            return false
+        }
+        requestedWindowIds.formUnion(newWindowIds)
+        return true
+    }
+
+    @discardableResult
+    func retainWindowNotificationSubscriptions(_ windowIds: [UInt32]) -> Bool {
+        let uniqueWindowIds = uniqueWindowIds(windowIds)
+        guard subscribeToWindows(uniqueWindowIds) else {
+            return false
+        }
+        for windowId in uniqueWindowIds {
+            retainedWindowSubscriptionCounts[windowId, default: 0] += 1
+        }
+        return true
+    }
+
+    @discardableResult
+    func releaseWindowNotificationSubscriptions(_ windowIds: [UInt32]) -> Set<UInt32> {
+        let uniqueWindowIds = uniqueWindowIds(windowIds)
+        var orphanedWindowIds: [UInt32] = []
+        for windowId in uniqueWindowIds {
+            guard let currentCount = retainedWindowSubscriptionCounts[windowId] else { continue }
+            if currentCount > 1 {
+                retainedWindowSubscriptionCounts[windowId] = currentCount - 1
+            } else {
+                retainedWindowSubscriptionCounts.removeValue(forKey: windowId)
+                orphanedWindowIds.append(windowId)
+            }
+        }
+
+        let releasedWindowIds = Set(orphanedWindowIds)
+        let removedWindowIds = unsubscribeFromWindowNotificationsIfAvailable(orphanedWindowIds)
+        requestedWindowIds.subtract(removedWindowIds)
+        return releasedWindowIds
+    }
+
+    private func requestWindowNotifications(_ windowIds: [UInt32]) -> Bool {
+        if let windowNotificationRequestHandlerForTests {
+            return windowNotificationRequestHandlerForTests(windowIds)
+        }
+        return SkyLight.shared.subscribeToWindowNotifications(windowIds)
+    }
+
+    private func unsubscribeFromWindowNotificationsIfAvailable(_ windowIds: [UInt32]) -> Set<UInt32> {
+        guard !windowIds.isEmpty else {
+            return []
+        }
+
+        if let windowNotificationUnrequestHandlerForTests {
+            guard windowNotificationUnrequestHandlerForTests(windowIds) == true else {
+                return []
+            }
+            return Set(windowIds)
+        }
+
+        guard SkyLight.shared.unsubscribeFromWindowNotifications(windowIds) == true else {
+            return []
+        }
+        return Set(windowIds)
+    }
+
+    private func uniqueWindowIds(_ windowIds: [UInt32]) -> [UInt32] {
+        var seen: Set<UInt32> = []
+        return windowIds.filter { seen.insert($0).inserted }
     }
 
     func flushPendingCGSEventsForTests() {
@@ -140,11 +216,22 @@ final class CGSEventObserver {
     }
 
     func resetDebugStateForTests() {
+        requestedWindowIds.removeAll()
+        retainedWindowSubscriptionCounts.removeAll()
+        windowNotificationRequestHandlerForTests = nil
+        windowNotificationUnrequestHandlerForTests = nil
         resetPendingCGSEventState(isRegistered: isRegistered)
     }
 
     func cgsDebugSnapshot() -> DebugCounters {
         cgsPendingEvents.withLock { $0.debugCounters }
+    }
+
+    func windowNotificationStateForTests() -> (
+        requestedWindowIds: Set<UInt32>,
+        retainedWindowSubscriptionCounts: [UInt32: Int]
+    ) {
+        (requestedWindowIds, retainedWindowSubscriptionCounts)
     }
 
     fileprivate func drainPendingEventsOnMainRunLoop(ignoreRegistration: Bool = false) {
@@ -168,6 +255,7 @@ final class CGSEventObserver {
 
         for event in pendingDrain.events {
             delegate?.cgsEventObserver(self, didReceive: event)
+            forgetWindowNotificationStateIfNeeded(for: event)
         }
     }
 
@@ -176,6 +264,16 @@ final class CGSEventObserver {
             cgsPendingEvents.withLock { $0.isRegistered = true }
         } else {
             resetPendingCGSEventState(isRegistered: false)
+        }
+    }
+
+    private func forgetWindowNotificationStateIfNeeded(for event: CGSWindowEvent) {
+        switch event {
+        case let .destroyed(windowId, _), let .closed(windowId):
+            requestedWindowIds.remove(windowId)
+            retainedWindowSubscriptionCounts.removeValue(forKey: windowId)
+        case .created, .frameChanged, .frontAppChanged, .titleChanged:
+            return
         }
     }
 }

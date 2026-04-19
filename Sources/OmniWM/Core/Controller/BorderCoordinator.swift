@@ -81,6 +81,19 @@ enum BorderOwner: Equatable {
     }
 }
 
+extension BorderOwner: CustomStringConvertible {
+    var description: String {
+        switch self {
+        case .none:
+            return "none"
+        case let .managed(token, wid, workspaceId):
+            return "managed(token=\(token), wid=\(wid), ws=\(workspaceId))"
+        case let .fallback(pid, wid):
+            return "fallback(pid=\(pid), wid=\(wid))"
+        }
+    }
+}
+
 struct BorderOwnerState: Equatable {
     var owner: BorderOwner = .none
     var generation: UInt64 = 0
@@ -89,9 +102,15 @@ struct BorderOwnerState: Equatable {
     var cachedAXRef: AXWindowRef?
     var resolvedFrame: CGRect?
     var resolvedWindowInfo: WindowServerInfo?
+    var resolvedWindowInfoValidated = false
     var resolvedAXFacts: AXWindowFacts?
+    var resolvedDecision: WindowDecision?
+    var resolvedIsFullscreen: Bool?
+    var resolvedIsMinimized: Bool?
     var orderingMetadata: BorderOrderingMetadata?
     var orderingDecision = "fallback:safe-default"
+    fileprivate var orderingCacheKey: BorderOrderingCacheKey?
+    var lastRenderPolicy: KeyboardFocusBorderRenderPolicy?
     var fallbackSubscribedWindowIds: Set<UInt32> = []
 }
 
@@ -106,6 +125,7 @@ enum BorderReconcileSource: String, Equatable {
     case frontmostAppChanged
     case appHide
     case appUnhide
+    case windowMinimizedChanged
     case focusClear
     case cgsFrameChanged
     case cgsClosed
@@ -124,6 +144,101 @@ enum BorderReconcileSource: String, Equatable {
     case fallbackLeaseExpired
     case manualRender
     case cleanup
+}
+
+private extension BorderReconcileSource {
+    var requiresManagedWindowInfoRefresh: Bool {
+        switch self {
+        case .manualRender,
+             .borderReapplyPostLayout,
+             .borderReapplyAnimationSettled,
+             .borderReapplyRetryExhaustedFallback,
+             .windowMinimizedChanged:
+            false
+        case .focusedWindowChanged,
+             .frontmostAppChanged,
+             .appHide,
+             .appUnhide,
+             .focusClear,
+             .cgsFrameChanged,
+             .cgsClosed,
+             .cgsDestroyed,
+             .managedRekey,
+             .replacementSettle,
+             .workspaceActivation,
+             .activeSpaceChanged,
+             .nativeFullscreenEnter,
+             .nativeFullscreenExit,
+             .monitorConfigurationChanged,
+             .appTerminated,
+             .fallbackLeaseExpired,
+             .cleanup:
+            true
+        }
+    }
+
+    var invalidatesManagedEligibilityCache: Bool {
+        switch self {
+        case .manualRender,
+             .cgsFrameChanged,
+             .borderReapplyPostLayout,
+             .borderReapplyAnimationSettled,
+             .borderReapplyRetryExhaustedFallback:
+            false
+        case .focusedWindowChanged,
+             .frontmostAppChanged,
+             .appHide,
+             .appUnhide,
+             .windowMinimizedChanged,
+             .focusClear,
+             .cgsClosed,
+             .cgsDestroyed,
+             .managedRekey,
+             .replacementSettle,
+             .workspaceActivation,
+             .activeSpaceChanged,
+             .nativeFullscreenEnter,
+             .nativeFullscreenExit,
+             .monitorConfigurationChanged,
+             .appTerminated,
+             .fallbackLeaseExpired,
+             .cleanup:
+            true
+        }
+    }
+
+    /// True for sources that may change a window's corner radius / shape.
+    /// These events should drop the cached corner radius for the target window
+    /// so the next query refreshes from the window server.
+    var invalidatesCornerRadius: Bool {
+        switch self {
+        case .nativeFullscreenEnter,
+             .nativeFullscreenExit,
+             .monitorConfigurationChanged:
+            true
+        case .manualRender,
+             .focusedWindowChanged,
+             .frontmostAppChanged,
+             .appHide,
+             .appUnhide,
+             .windowMinimizedChanged,
+             .focusClear,
+             .cgsFrameChanged,
+             .cgsClosed,
+             .cgsDestroyed,
+             .managedRekey,
+             .replacementSettle,
+             .borderReapplyPostLayout,
+             .borderReapplyAnimationSettled,
+             .borderReapplyRetryExhaustedFallback,
+             .workspaceActivation,
+             .activeSpaceChanged,
+             .appTerminated,
+             .fallbackLeaseExpired,
+             .cleanup:
+            false
+        }
+    }
 }
 
 enum BorderReconcileEvent {
@@ -169,6 +284,7 @@ struct BorderTraceRecord: Equatable {
 private struct BorderOrderingResolution {
     let metadata: BorderOrderingMetadata
     let decision: String
+    let cacheKey: BorderOrderingCacheKey
 }
 
 private struct BorderRenderContext {
@@ -178,6 +294,41 @@ private struct BorderRenderContext {
     let ordering: BorderOrderingMetadata
     let orderingDecision: String
     let policy: KeyboardFocusBorderRenderPolicy
+}
+
+private struct BorderWindowInfoCacheKey: Equatable {
+    let id: UInt32
+    let pid: Int32
+    let level: Int32
+    let parentId: UInt32
+    let attributes: UInt32
+    let tags: UInt64
+}
+
+private struct BorderWindowInfoValidationResult {
+    let windowInfo: WindowServerInfo?
+    let cacheKeyMatched: Bool
+}
+
+fileprivate struct BorderOrderingCacheKey: Equatable {
+    let relativeTo: UInt32
+    let windowInfoKey: BorderWindowInfoCacheKey?
+    let cornerRadius: CGFloat?
+}
+
+private struct BorderEligibilityResolution {
+    let axFacts: AXWindowFacts?
+    let decision: WindowDecision?
+    let isFullscreen: Bool
+    let isMinimized: Bool
+    let usedCache: Bool
+}
+
+private struct BorderEligibilityEvaluation {
+    let axFacts: AXWindowFacts?
+    let decision: WindowDecision?
+    let isFullscreen: Bool
+    let isMinimized: Bool
 }
 
 private enum BorderResolutionDecision {
@@ -201,6 +352,7 @@ final class BorderCoordinator {
     private static let traceLimit = 128
     private static let fallbackLeaseDuration: Duration = .milliseconds(500)
     private static let liveMotionIdleDuration: Duration = .milliseconds(150)
+    private static let managedFastPathFrameTolerance: CGFloat = 1.0
     private static let safeOrderingLevels: Set<Int32> = [0, 3, 8]
     private static let visibleAttributeMask: UInt32 = 0x2
     private static let visibleTagMask: UInt64 = 0x0040_0000_0000_0000
@@ -212,13 +364,30 @@ final class BorderCoordinator {
     var suppressNextKeyboardFocusBorderRenderForTests: ((KeyboardFocusTarget, KeyboardFocusBorderRenderPolicy) -> Bool)?
     var suppressNextManagedBorderUpdateForTests: ((WindowToken, KeyboardFocusBorderRenderPolicy) -> Bool)?
     var cornerRadiusProviderForTests: ((Int) -> CGFloat?)?
+    var minimizedProviderForTests: ((AXWindowRef) -> Bool)?
     var fallbackLeaseDurationForTests: Duration?
     var liveMotionIdleDurationForTests: Duration?
 
     private(set) var ownerState = BorderOwnerState()
+    /// Test-facing toggle. Production paths leave this `false`, which causes
+    /// `recordTrace` to skip the per-call `Date()`, formatting, and ring-buffer
+    /// allocation. Set to `true` in test fixtures that read
+    /// `traceSnapshotForTests()`.
+    var traceRingEnabled = false
     private var trace: [BorderTraceRecord] = []
     private var pendingFallbackLeaseTask: Task<Void, Never>?
     private var pendingLiveMotionResetTask: Task<Void, Never>?
+    /// Per-window cache for `SkyLight.cornerRadius`. The window server lookup is
+    /// expensive enough that it was the dominant cost of `orderingCacheKey` on
+    /// every displayLink tick, defeating the render-decision cache. Corner radius
+    /// only changes on window-shape events (create, fullscreen toggle, destroy),
+    /// so we cache per-windowId and invalidate on those events. Boxed in a struct
+    /// so the absence of an entry is distinguishable from a cached `nil`.
+    private var cornerRadiusCache: [Int: CachedCornerRadius] = [:]
+
+    private struct CachedCornerRadius {
+        let value: CGFloat?
+    }
 
     init(controller: WMController) {
         self.controller = controller
@@ -308,9 +477,11 @@ final class BorderCoordinator {
             return reconcileCurrentOwnerFrameChange(windowId: windowId)
 
         case let .cgsClosed(windowId):
+            invalidateCornerRadiusCache(for: windowId)
             return reconcileOwnerTeardown(windowId: windowId, source: .cgsClosed, reason: "window closed")
 
         case let .cgsDestroyed(windowId):
+            invalidateCornerRadiusCache(for: windowId)
             return reconcileOwnerTeardown(windowId: windowId, source: .cgsDestroyed, reason: "window destroyed")
 
         case let .managedRekey(from, to, workspaceId, axRef, preferredFrame, policy):
@@ -326,7 +497,9 @@ final class BorderCoordinator {
         case .cleanup:
             cancelFallbackLease()
             cancelLiveMotionReset()
+            releaseFallbackSubscription(for: ownerState.owner)
             clearTransientState(clearFallbackBookkeeping: true)
+            clearCornerRadiusCache()
             ownerState.owner = .none
             ownerState.generation &+= 1
             recordTrace(
@@ -348,6 +521,7 @@ final class BorderCoordinator {
         preferredFrame: CGRect?,
         policy: KeyboardFocusBorderRenderPolicy
     ) -> Bool {
+        HotPathDebugMetrics.shared.recordBorderRenderRequested()
         guard let target else {
             clearOwnerAndHide(source: source, reason: "no focused target")
             return false
@@ -358,9 +532,11 @@ final class BorderCoordinator {
         adoptOwnerIfNeeded(nextOwner)
 
         switch resolveRenderDecision(
+            source: source,
             target: target,
             preferredFrame: preferredFrame,
-            policy: policy
+            policy: policy,
+            recordRenderRequestedMetrics: true
         ) {
         case let .update(context):
             applyRender(context, source: source, reason: "rendered")
@@ -445,9 +621,11 @@ final class BorderCoordinator {
         }
 
         switch resolveRenderDecision(
+            source: .cgsFrameChanged,
             target: target,
             preferredFrame: nil,
-            policy: .direct
+            policy: .direct,
+            recordRenderRequestedMetrics: false
         ) {
         case let .update(context):
             applyRender(context, source: .cgsFrameChanged, reason: "frame changed")
@@ -558,9 +736,11 @@ final class BorderCoordinator {
     }
 
     private func resolveRenderDecision(
+        source: BorderReconcileSource,
         target: KeyboardFocusTarget,
         preferredFrame: CGRect?,
-        policy: KeyboardFocusBorderRenderPolicy
+        policy: KeyboardFocusBorderRenderPolicy,
+        recordRenderRequestedMetrics: Bool
     ) -> BorderResolutionDecision {
         guard let controller else { return .hide(reason: "controller unavailable") }
 
@@ -597,22 +777,106 @@ final class BorderCoordinator {
                 : .hide(reason: "AX ref unresolved")
         }
 
-        let validatedWindowInfo = resolveValidatedWindowInfo(for: owner)
-        let windowInfo = sanitizedWindowInfo(validatedWindowInfo, for: owner)
-        let evaluation = evaluateEligibility(
+        let reuseManagedCache = canReuseManagedEligibilityCache(
+            owner: owner,
+            axRef: axRef,
+            source: source
+        )
+        let windowInfoValidation = resolveWindowInfoValidation(
+            for: owner,
+            source: source,
+            reuseManagedCache: reuseManagedCache
+        )
+        let orderingWindowInfo = sanitizedWindowInfo(windowInfoValidation.windowInfo, for: owner)
+        if source.invalidatesCornerRadius {
+            invalidateCornerRadiusCache(for: target.windowId)
+        }
+        let currentOrderingCacheKey = orderingCacheKey(
+            for: target,
+            windowInfo: orderingWindowInfo
+        )
+
+        if owner.isManaged,
+           let token = owner.token
+        {
+            guard let entry = controller.workspaceManager.entry(for: token) else {
+                return .hide(reason: "managed entry missing")
+            }
+            guard controller.isManagedWindowDisplayable(entry.handle) else {
+                return .hide(reason: "managed target not displayable")
+            }
+            if controller.workspaceManager.isAppFullscreenActive || isManagedWindowFullscreen(token) {
+                return .hide(reason: "fullscreen target")
+            }
+        }
+
+        if let cachedContext = cachedManagedRenderContext(
             target: target,
             owner: owner,
             axRef: axRef,
-            windowInfo: windowInfo
+            preferredFrame: preferredFrame,
+            policy: policy,
+            orderingCacheKey: currentOrderingCacheKey,
+            windowInfoCacheMatched: windowInfoValidation.cacheKeyMatched,
+            reuseManagedCache: reuseManagedCache
+        ) {
+            ownerState.cachedAXRef = axRef
+            ownerState.resolvedFrame = cachedContext.frame
+            ownerState.resolvedWindowInfo = windowInfoValidation.windowInfo
+            ownerState.resolvedWindowInfoValidated = true
+            ownerState.lastRenderPolicy = policy
+            if recordRenderRequestedMetrics {
+                HotPathDebugMetrics.shared.recordBorderReconcileCacheOutcome(.fastPathHit)
+            }
+            return .update(cachedContext)
+        }
+
+        if let missComponent = fastPathMissComponent(
+            target: target,
+            owner: owner,
+            axRef: axRef,
+            preferredFrame: preferredFrame,
+            policy: policy,
+            orderingCacheKey: currentOrderingCacheKey,
+            reuseManagedCache: reuseManagedCache,
+            windowInfoCacheMatched: windowInfoValidation.cacheKeyMatched
+        ) {
+            if recordRenderRequestedMetrics {
+                HotPathDebugMetrics.shared.recordBorderReconcileCacheMissComponent(missComponent)
+            }
+        }
+
+        let eligibility = resolveEligibilityState(
+            target: target,
+            owner: owner,
+            axRef: axRef,
+            windowInfo: windowInfoValidation.windowInfo,
+            reuseManagedCache: reuseManagedCache,
+            windowInfoCacheMatched: windowInfoValidation.cacheKeyMatched
         )
-        ownerState.resolvedAXFacts = evaluation?.facts.ax
+        ownerState.resolvedAXFacts = eligibility.axFacts
+        ownerState.resolvedDecision = eligibility.decision
+        ownerState.resolvedIsFullscreen = eligibility.isFullscreen
+        ownerState.resolvedIsMinimized = eligibility.isMinimized
+        ownerState.cachedAXRef = axRef
+        ownerState.resolvedWindowInfo = windowInfoValidation.windowInfo
+        ownerState.resolvedWindowInfoValidated = true
+        ownerState.lastRenderPolicy = policy
+        let postFastPathOutcome: BorderReconcileCacheOutcome =
+            eligibility.usedCache ? .eligibilityCacheHit : .fullResolution
+        if recordRenderRequestedMetrics {
+            HotPathDebugMetrics.shared.recordBorderReconcileCacheOutcome(postFastPathOutcome)
+        }
 
         if let resolution = eligibilityDecision(
+            source: source,
             target: target,
             owner: owner,
-            axRef: axRef,
-            evaluation: evaluation,
-            windowInfo: windowInfo
+            axFacts: eligibility.axFacts,
+            decision: eligibility.decision,
+            isFullscreen: eligibility.isFullscreen,
+            isMinimized: eligibility.isMinimized,
+            windowInfo: windowInfoValidation.windowInfo
         ) {
             return resolution
         }
@@ -622,7 +886,7 @@ final class BorderCoordinator {
             owner: owner,
             axRef: axRef,
             preferredFrame: preferredFrame,
-            windowInfo: windowInfo
+            windowInfo: orderingWindowInfo
         ) else {
             return owner.isManaged && policy.shouldDeferForAnimations
                 ? .ignore(reason: "managed frame unresolved")
@@ -637,12 +901,22 @@ final class BorderCoordinator {
             return .ignore(reason: "managed animation deferred")
         }
 
-        let ordering = resolveOrdering(for: target, windowInfo: windowInfo)
+        let ordering = resolveOrdering(
+            for: target,
+            owner: owner,
+            windowInfo: orderingWindowInfo,
+            reuseManagedCache: reuseManagedCache,
+            windowInfoCacheMatched: windowInfoValidation.cacheKeyMatched,
+            cacheKey: currentOrderingCacheKey
+        )
         ownerState.cachedAXRef = axRef
         ownerState.resolvedFrame = frame
-        ownerState.resolvedWindowInfo = windowInfo
+        ownerState.resolvedWindowInfo = windowInfoValidation.windowInfo
+        ownerState.resolvedWindowInfoValidated = true
         ownerState.orderingMetadata = ordering.metadata
         ownerState.orderingDecision = ordering.decision
+        ownerState.orderingCacheKey = ordering.cacheKey
+        ownerState.lastRenderPolicy = policy
 
         return .update(
             BorderRenderContext(
@@ -657,10 +931,13 @@ final class BorderCoordinator {
     }
 
     private func eligibilityDecision(
-        target: KeyboardFocusTarget,
+        source: BorderReconcileSource,
+        target _: KeyboardFocusTarget,
         owner: BorderOwner,
-        axRef: AXWindowRef,
-        evaluation: WMController.WindowDecisionEvaluation?,
+        axFacts: AXWindowFacts?,
+        decision: WindowDecision?,
+        isFullscreen: Bool,
+        isMinimized: Bool,
         windowInfo: WindowServerInfo?
     ) -> BorderResolutionDecision? {
         guard let controller else { return .hide(reason: "controller unavailable") }
@@ -669,27 +946,16 @@ final class BorderCoordinator {
            let token = owner.token,
            (controller.workspaceManager.isAppFullscreenActive
                || isManagedWindowFullscreen(token)
-               || AXWindowService.isFullscreen(axRef))
+               || isFullscreen)
         {
             return .hide(reason: "fullscreen target")
         }
 
-        if owner.isManaged,
-           let token = owner.token
-        {
-            guard let entry = controller.workspaceManager.entry(for: token) else {
-                return .hide(reason: "managed entry missing")
-            }
-            guard controller.isManagedWindowDisplayable(entry.handle) else {
-                return .hide(reason: "managed target not displayable")
-            }
-        }
-
-        if isAXWindowMinimized(axRef) {
+        if isMinimized {
             return .hide(reason: "window minimized")
         }
 
-        if let facts = evaluation?.facts.ax {
+        if let facts = axFacts {
             if let role = facts.role, role != kAXWindowRole as String {
                 return .hide(reason: "AX role is not window")
             }
@@ -702,17 +968,12 @@ final class BorderCoordinator {
             if owner.isFallback, !isWindowServerInfoDisplayable(windowInfo) {
                 return .hide(reason: "unsafe window server metadata")
             }
-            if owner.isManaged,
-               (windowInfo.parentId != 0 || !Self.safeOrderingLevels.contains(windowInfo.level))
-            {
-                return .hide(reason: "unsafe window server metadata")
-            }
         }
 
         if owner.isFallback {
-            guard let evaluation else { return .hide(reason: "fallback evaluation unavailable") }
-            guard evaluation.decision.disposition != .unmanaged,
-                  evaluation.decision.disposition != .undecided
+            guard let decision else { return .hide(reason: "fallback evaluation unavailable") }
+            guard decision.disposition != .unmanaged,
+                  decision.disposition != .undecided
             else {
                 return .hide(reason: "fallback target not border eligible")
             }
@@ -721,19 +982,63 @@ final class BorderCoordinator {
         return nil
     }
 
+    private func resolveEligibilityState(
+        target: KeyboardFocusTarget,
+        owner: BorderOwner,
+        axRef: AXWindowRef,
+        windowInfo: WindowServerInfo?,
+        reuseManagedCache: Bool,
+        windowInfoCacheMatched: Bool
+    ) -> BorderEligibilityResolution {
+        if let cached = cachedManagedEligibilityState(
+            owner: owner,
+            axRef: axRef,
+            reuseManagedCache: reuseManagedCache,
+            windowInfoCacheMatched: windowInfoCacheMatched
+        ) {
+            return BorderEligibilityResolution(
+                axFacts: cached.axFacts,
+                decision: cached.decision,
+                isFullscreen: cached.isFullscreen,
+                isMinimized: cached.isMinimized,
+                usedCache: true
+            )
+        }
+
+        let evaluation = evaluateEligibility(
+            target: target,
+            owner: owner,
+            axRef: axRef,
+            windowInfo: windowInfo
+        )
+        return BorderEligibilityResolution(
+            axFacts: evaluation?.axFacts,
+            decision: evaluation?.decision,
+            isFullscreen: evaluation?.isFullscreen ?? false,
+            isMinimized: evaluation?.isMinimized ?? false,
+            usedCache: false
+        )
+    }
+
     private func evaluateEligibility(
         target: KeyboardFocusTarget,
         owner _: BorderOwner,
         axRef: AXWindowRef,
         windowInfo: WindowServerInfo?
-    ) -> WMController.WindowDecisionEvaluation? {
+    ) -> BorderEligibilityEvaluation? {
         guard let controller else { return nil }
-        return controller.evaluateWindowDisposition(
+        let evaluation = controller.evaluateWindowDisposition(
             axRef: axRef,
             pid: target.pid,
             appFullscreen: nil,
             applyingManualOverride: false,
             windowInfo: windowInfo
+        )
+        return BorderEligibilityEvaluation(
+            axFacts: evaluation.facts.ax,
+            decision: evaluation.decision,
+            isFullscreen: evaluation.appFullscreen,
+            isMinimized: isAXWindowMinimized(axRef)
         )
     }
 
@@ -776,6 +1081,94 @@ final class BorderCoordinator {
         return observedFrame(for: axRef) ?? windowInfo?.frame ?? preferredFrame
     }
 
+    private func cachedManagedRenderContext(
+        target: KeyboardFocusTarget,
+        owner: BorderOwner,
+        axRef: AXWindowRef,
+        preferredFrame: CGRect?,
+        policy: KeyboardFocusBorderRenderPolicy,
+        orderingCacheKey: BorderOrderingCacheKey,
+        windowInfoCacheMatched: Bool,
+        reuseManagedCache: Bool
+    ) -> BorderRenderContext? {
+        // Size-only-moved fast path: during scroll animations the origin
+        // changes every tick but eligibility/ordering/decision are all
+        // frame-independent (they depend on window identity, not position).
+        // Require size equality but allow any origin — the returned
+        // `BorderRenderContext.frame` uses the new `preferredFrame` below,
+        // so the border follows the animated window.
+        guard owner.isManaged,
+              reuseManagedCache,
+              ownerState.owner == owner,
+              ownerState.lastRenderPolicy == policy,
+              ownerState.cachedAXRef?.windowId == axRef.windowId,
+              windowInfoCacheMatched,
+              let preferredFrame,
+              let cachedFrame = ownerState.resolvedFrame,
+              abs(preferredFrame.size.width - cachedFrame.size.width) <= Self.managedFastPathFrameTolerance,
+              abs(preferredFrame.size.height - cachedFrame.size.height) <= Self.managedFastPathFrameTolerance,
+              let ordering = cachedManagedOrderingResolution(
+                  target: target,
+                  owner: owner,
+                  cacheKey: orderingCacheKey,
+                  reuseManagedCache: reuseManagedCache,
+                  windowInfoCacheMatched: windowInfoCacheMatched
+              ),
+              let decision = ownerState.resolvedDecision,
+              decision.disposition != .unmanaged,
+              decision.disposition != .undecided
+        else {
+            return nil
+        }
+
+        return BorderRenderContext(
+            target: target,
+            owner: owner,
+            frame: preferredFrame,
+            ordering: ordering.metadata,
+            orderingDecision: ordering.decision,
+            policy: policy
+        )
+    }
+
+    private func cachedManagedEligibilityState(
+        owner: BorderOwner,
+        axRef: AXWindowRef,
+        reuseManagedCache: Bool,
+        windowInfoCacheMatched: Bool
+    ) -> (axFacts: AXWindowFacts?, decision: WindowDecision?, isFullscreen: Bool, isMinimized: Bool)? {
+        guard owner.isManaged,
+              reuseManagedCache,
+              ownerState.owner == owner,
+              ownerState.cachedAXRef?.windowId == axRef.windowId,
+              windowInfoCacheMatched,
+              let decision = ownerState.resolvedDecision,
+              let isFullscreen = ownerState.resolvedIsFullscreen,
+              let isMinimized = ownerState.resolvedIsMinimized
+        else {
+            return nil
+        }
+
+        return (ownerState.resolvedAXFacts, decision, isFullscreen, isMinimized)
+    }
+
+    private func cachedWindowInfoMatches(_ windowInfo: WindowServerInfo?) -> Bool {
+        ownerState.resolvedWindowInfoValidated
+            && windowInfoCacheKey(for: ownerState.resolvedWindowInfo) == windowInfoCacheKey(for: windowInfo)
+    }
+
+    private func windowInfoCacheKey(for windowInfo: WindowServerInfo?) -> BorderWindowInfoCacheKey? {
+        guard let windowInfo else { return nil }
+        return BorderWindowInfoCacheKey(
+            id: windowInfo.id,
+            pid: windowInfo.pid,
+            level: windowInfo.level,
+            parentId: windowInfo.parentId,
+            attributes: windowInfo.attributes,
+            tags: windowInfo.tags
+        )
+    }
+
     private func observedFrame(for axRef: AXWindowRef) -> CGRect? {
         if let observedFrameProviderForTests {
             return observedFrameProviderForTests(axRef)
@@ -799,45 +1192,214 @@ final class BorderCoordinator {
 
     private func resolveOrdering(
         for target: KeyboardFocusTarget,
-        windowInfo: WindowServerInfo?
+        owner: BorderOwner,
+        windowInfo: WindowServerInfo?,
+        reuseManagedCache: Bool,
+        windowInfoCacheMatched: Bool,
+        cacheKey: BorderOrderingCacheKey
     ) -> BorderOrderingResolution {
+        if let cachedOrdering = cachedManagedOrderingResolution(
+            target: target,
+            owner: owner,
+            cacheKey: cacheKey,
+            reuseManagedCache: reuseManagedCache,
+            windowInfoCacheMatched: windowInfoCacheMatched
+        ) {
+            return cachedOrdering
+        }
+
         let fallback = BorderOrderingMetadata.fallback(relativeTo: UInt32(target.windowId))
         guard let windowInfo else {
             return BorderOrderingResolution(
                 metadata: fallback,
-                decision: "fallback:missing-window-server-info"
+                decision: "fallback:missing-window-server-info",
+                cacheKey: cacheKey
             )
         }
 
         guard Self.safeOrderingLevels.contains(windowInfo.level) else {
             return BorderOrderingResolution(
                 metadata: fallback,
-                decision: "fallback:unsafe-level=\(windowInfo.level)"
+                decision: "fallback:unsafe-level=\(windowInfo.level)",
+                cacheKey: cacheKey
             )
         }
 
-        let cornerRadius = cornerRadiusProviderForTests?(target.windowId)
-            ?? SkyLight.shared.cornerRadius(forWindowId: target.windowId)
+        let cornerRadius = cacheKey.cornerRadius
         let overlayMetadata = BorderOrderingMetadata.fallback(
             relativeTo: UInt32(target.windowId),
             cornerRadius: cornerRadius
         )
         return BorderOrderingResolution(
             metadata: overlayMetadata,
-            decision: "derived:overlay-level=\(overlayMetadata.level)\(cornerRadius == nil ? "" : ",corner-radius")"
+            decision: "derived:overlay-level=\(overlayMetadata.level)\(cornerRadius == nil ? "" : ",corner-radius")",
+            cacheKey: cacheKey
         )
     }
 
-    private func resolveValidatedWindowInfo(for owner: BorderOwner) -> WindowServerInfo? {
-        guard let windowId = owner.windowIdUInt32,
-              let pid = owner.pid,
-              let windowInfo = resolveWindowInfo(windowId),
-              windowInfo.id == windowId,
-              pid_t(windowInfo.pid) == pid
+    private func cachedManagedOrderingResolution(
+        target: KeyboardFocusTarget,
+        owner: BorderOwner,
+        cacheKey: BorderOrderingCacheKey,
+        reuseManagedCache: Bool,
+        windowInfoCacheMatched: Bool
+    ) -> BorderOrderingResolution? {
+        guard owner.isManaged,
+              reuseManagedCache,
+              ownerState.owner == owner,
+              windowInfoCacheMatched,
+              let metadata = ownerState.orderingMetadata,
+              ownerState.orderingCacheKey == cacheKey
         else {
             return nil
         }
-        return windowInfo
+
+        return BorderOrderingResolution(
+            metadata: metadata,
+            decision: ownerState.orderingDecision,
+            cacheKey: cacheKey
+        )
+    }
+
+    private func orderingCacheKey(
+        for target: KeyboardFocusTarget,
+        windowInfo: WindowServerInfo?
+    ) -> BorderOrderingCacheKey {
+        BorderOrderingCacheKey(
+            relativeTo: UInt32(target.windowId),
+            windowInfoKey: windowInfoCacheKey(for: windowInfo),
+            cornerRadius: orderingCornerRadius(for: target.windowId, windowInfo: windowInfo)
+        )
+    }
+
+    private func orderingCornerRadius(for windowId: Int, windowInfo: WindowServerInfo?) -> CGFloat? {
+        guard windowInfo != nil else { return nil }
+        if let provider = cornerRadiusProviderForTests {
+            return provider(windowId)
+        }
+        if let cached = cornerRadiusCache[windowId] {
+            return cached.value
+        }
+        let value = SkyLight.shared.cornerRadius(forWindowId: windowId)
+        cornerRadiusCache[windowId] = CachedCornerRadius(value: value)
+        return value
+    }
+
+    private func invalidateCornerRadiusCache(for windowId: Int) {
+        cornerRadiusCache.removeValue(forKey: windowId)
+    }
+
+    private func invalidateCornerRadiusCache(for windowId: UInt32) {
+        cornerRadiusCache.removeValue(forKey: Int(windowId))
+    }
+
+    private func clearCornerRadiusCache() {
+        cornerRadiusCache.removeAll(keepingCapacity: true)
+    }
+
+    private func canReuseManagedEligibilityCache(
+        owner: BorderOwner,
+        axRef: AXWindowRef,
+        source: BorderReconcileSource
+    ) -> Bool {
+        owner.isManaged
+            && !source.invalidatesManagedEligibilityCache
+            && ownerState.owner == owner
+            && ownerState.cachedAXRef?.windowId == axRef.windowId
+    }
+
+    private func resolveWindowInfoValidation(
+        for owner: BorderOwner,
+        source: BorderReconcileSource,
+        reuseManagedCache: Bool
+    ) -> BorderWindowInfoValidationResult {
+        if owner.isManaged,
+           !source.requiresManagedWindowInfoRefresh,
+           controller?.axEventHandler.windowInfoProvider == nil,
+           reuseManagedCache,
+           ownerState.resolvedWindowInfoValidated
+        {
+            return BorderWindowInfoValidationResult(
+                windowInfo: ownerState.resolvedWindowInfo,
+                cacheKeyMatched: true
+            )
+        }
+
+        let windowInfo = fetchValidatedWindowInfo(for: owner)
+        return BorderWindowInfoValidationResult(
+            windowInfo: windowInfo,
+            cacheKeyMatched: cachedWindowInfoMatches(windowInfo)
+        )
+    }
+
+    private func fastPathMissComponent(
+        target: KeyboardFocusTarget,
+        owner: BorderOwner,
+        axRef: AXWindowRef,
+        preferredFrame: CGRect?,
+        policy: KeyboardFocusBorderRenderPolicy,
+        orderingCacheKey: BorderOrderingCacheKey,
+        reuseManagedCache: Bool,
+        windowInfoCacheMatched: Bool
+    ) -> BorderReconcileCacheMissComponent? {
+        guard owner.isManaged else { return nil }
+        guard ownerState.owner == owner,
+              ownerState.cachedAXRef?.windowId == axRef.windowId
+        else {
+            return .owner
+        }
+        guard ownerState.lastRenderPolicy == policy else {
+            return .policy
+        }
+        guard reuseManagedCache,
+              windowInfoCacheMatched
+        else {
+            return .windowInfoKey
+        }
+        guard let preferredFrame,
+              let cachedFrame = ownerState.resolvedFrame,
+              abs(preferredFrame.size.width - cachedFrame.size.width) <= Self.managedFastPathFrameTolerance,
+              abs(preferredFrame.size.height - cachedFrame.size.height) <= Self.managedFastPathFrameTolerance
+        else {
+            return .preferredFrame
+        }
+        guard cachedManagedOrderingResolution(
+            target: target,
+            owner: owner,
+            cacheKey: orderingCacheKey,
+            reuseManagedCache: reuseManagedCache,
+            windowInfoCacheMatched: windowInfoCacheMatched
+        ) != nil,
+              let decision = ownerState.resolvedDecision,
+              decision.disposition != .unmanaged,
+              decision.disposition != .undecided
+        else {
+            return .ordering
+        }
+        return nil
+    }
+
+    private func fetchValidatedWindowInfo(for owner: BorderOwner) -> WindowServerInfo? {
+        guard let windowId = owner.windowIdUInt32 else { return nil }
+        return validatedWindowInfo(
+            for: owner,
+            candidate: resolveWindowInfo(windowId)
+        )
+    }
+
+    private func validatedWindowInfo(
+        for owner: BorderOwner,
+        candidate: WindowServerInfo?
+    ) -> WindowServerInfo? {
+        guard let windowId = owner.windowIdUInt32,
+              let pid = owner.pid,
+              let candidate,
+              candidate.id == windowId,
+              pid_t(candidate.pid) == pid
+        else {
+            return nil
+        }
+        return candidate
     }
 
     private func resolveWindowInfo(_ windowId: UInt32) -> WindowServerInfo? {
@@ -894,6 +1456,10 @@ final class BorderCoordinator {
     }
 
     private func isAXWindowMinimized(_ axRef: AXWindowRef) -> Bool {
+        if let minimizedProviderForTests {
+            return minimizedProviderForTests(axRef)
+        }
+
         var value: CFTypeRef?
         let result = AXUIElementCopyAttributeValue(
             axRef.element,
@@ -938,11 +1504,13 @@ final class BorderCoordinator {
     }
 
     private func adoptOwnerIfNeeded(_ owner: BorderOwner) {
-        guard ownerState.owner != owner else { return }
+        let previousOwner = ownerState.owner
+        guard previousOwner != owner else { return }
 
         ownerState.generation &+= 1
         cancelFallbackLease()
         cancelLiveMotionReset()
+        releaseFallbackSubscription(for: previousOwner)
         clearTransientState(clearFallbackBookkeeping: true)
         ownerState.owner = owner
 
@@ -955,10 +1523,12 @@ final class BorderCoordinator {
 
     private func clearOwnerAndHide(source: BorderReconcileSource, reason: String) {
         let rawFocus = controller?.currentKeyboardFocusTargetForRendering()
+        let previousOwner = ownerState.owner
         controller?.borderManager.hideBorder()
         ownerState.generation &+= 1
         cancelFallbackLease()
         cancelLiveMotionReset()
+        releaseFallbackSubscription(for: previousOwner)
         clearTransientState(clearFallbackBookkeeping: true)
         ownerState.owner = .none
         recordTrace(
@@ -971,18 +1541,21 @@ final class BorderCoordinator {
         )
     }
 
-    private func clearTransientState(clearFallbackBookkeeping: Bool) {
+    private func clearTransientState(clearFallbackBookkeeping _: Bool) {
         ownerState.leaseDeadline = nil
         ownerState.isLiveMotion = false
         ownerState.cachedAXRef = nil
         ownerState.resolvedFrame = nil
         ownerState.resolvedWindowInfo = nil
+        ownerState.resolvedWindowInfoValidated = false
         ownerState.resolvedAXFacts = nil
+        ownerState.resolvedDecision = nil
+        ownerState.resolvedIsFullscreen = nil
+        ownerState.resolvedIsMinimized = nil
         ownerState.orderingMetadata = nil
         ownerState.orderingDecision = "fallback:safe-default"
-        if clearFallbackBookkeeping {
-            ownerState.fallbackSubscribedWindowIds.removeAll()
-        }
+        ownerState.orderingCacheKey = nil
+        ownerState.lastRenderPolicy = nil
     }
 
     private func applyRender(
@@ -1013,8 +1586,19 @@ final class BorderCoordinator {
     }
 
     private func requestFallbackSubscription(_ windowId: UInt32) {
+        guard !ownerState.fallbackSubscribedWindowIds.contains(windowId) else { return }
+        guard controller?.axEventHandler.requestWindowNotificationSubscription([windowId]) == true else { return }
         ownerState.fallbackSubscribedWindowIds.insert(windowId)
-        controller?.axEventHandler.requestWindowNotificationSubscription([windowId])
+    }
+
+    private func releaseFallbackSubscription(for owner: BorderOwner) {
+        guard case let .fallback(_, wid) = owner,
+              let windowId = UInt32(exactly: wid)
+        else {
+            return
+        }
+        let removedWindowIds = controller?.axEventHandler.releaseWindowNotificationSubscription([windowId]) ?? []
+        ownerState.fallbackSubscribedWindowIds.subtract(removedWindowIds)
     }
 
     private func refreshFallbackLease() {
@@ -1058,9 +1642,11 @@ final class BorderCoordinator {
         }
 
         switch resolveRenderDecision(
+            source: .fallbackLeaseExpired,
             target: target,
             preferredFrame: nil,
-            policy: .direct
+            policy: .direct,
+            recordRenderRequestedMetrics: false
         ) {
         case let .update(context):
             applyRender(context, source: .fallbackLeaseExpired, reason: "fallback lease revalidated")
@@ -1149,6 +1735,11 @@ final class BorderCoordinator {
         frame: CGRect?,
         orderingDecision: String?
     ) {
+        // Hot path: skip all formatting and allocation when nobody will read
+        // the trace. `traceRingEnabled` is opt-in for tests; `traceLoggingEnabled`
+        // is the env-gated stderr logger.
+        guard traceRingEnabled || Self.traceLoggingEnabled else { return }
+
         let record = BorderTraceRecord(
             timestamp: Date(),
             source: source,

@@ -69,6 +69,119 @@ private func makeRecordingPanelFactory(
         #expect(frameRecorder.setFrameCallCount(for: panel) == 1)
     }
 
+    @Test @MainActor func unchangedSnapshotReusesCachedMeasurementWidth() {
+        let monitor = makeLayoutPlanTestMonitor(displayId: 770)
+        let controller = makeLayoutPlanTestController(monitors: [monitor])
+        let manager = WorkspaceBarManager()
+
+        HotPathDebugMetrics.shared.setEnabledForTests(true)
+        HotPathDebugMetrics.shared.reset()
+        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
+
+        manager.monitorProvider = { [monitor] }
+        manager.screenProvider = { _ in nil }
+
+        manager.setup(controller: controller, settings: controller.settings)
+        defer { manager.cleanup() }
+
+        #expect(HotPathDebugMetrics.shared.snapshot.workspaceBarMeasuredWidthCalls == 1)
+
+        manager.update()
+
+        #expect(HotPathDebugMetrics.shared.snapshot.workspaceBarMeasuredWidthCalls == 1)
+    }
+
+    @Test @MainActor func nonWidthAppearanceChangesReuseCachedMeasurementWidth() {
+        let monitor = makeLayoutPlanTestMonitor(displayId: 771)
+        let controller = makeLayoutPlanTestController(monitors: [monitor])
+        let manager = WorkspaceBarManager()
+
+        HotPathDebugMetrics.shared.setEnabledForTests(true)
+        HotPathDebugMetrics.shared.reset()
+        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
+
+        manager.monitorProvider = { [monitor] }
+        manager.screenProvider = { _ in nil }
+
+        manager.setup(controller: controller, settings: controller.settings)
+        defer { manager.cleanup() }
+
+        #expect(HotPathDebugMetrics.shared.snapshot.workspaceBarMeasuredWidthCalls == 1)
+
+        controller.settings.workspaceBarBackgroundOpacity = 0.35
+        manager.updateSettings()
+
+        #expect(HotPathDebugMetrics.shared.snapshot.workspaceBarMeasuredWidthCalls == 1)
+    }
+
+    @Test @MainActor func groupedWindowBadgeWidthChangeRemeasuresAndExpandsFrame() throws {
+        let monitor = makeLayoutPlanTestMonitor(displayId: 772, width: 3200)
+        let controller = makeLayoutPlanTestController(monitors: [monitor])
+        guard let workspaceId = controller.workspaceManager.workspaceId(for: "1", createIfMissing: false) else {
+            Issue.record("Missing workspace bar fixture")
+            return
+        }
+
+        controller.settings.workspaceBarDeduplicateAppIcons = true
+        controller.appInfoCache.storeInfoForTests(
+            pid: 8201,
+            name: "Shared App",
+            bundleId: "com.example.shared"
+        )
+
+        for windowId in 1301...1309 {
+            _ = controller.workspaceManager.addWindow(
+                makeLayoutPlanTestWindow(windowId: windowId),
+                pid: 8201,
+                windowId: windowId,
+                to: workspaceId,
+                mode: .tiling
+            )
+        }
+
+        let manager = WorkspaceBarManager()
+        let panelStore = RecordingPanelStore()
+        let frameRecorder = FrameApplyRecorder()
+
+        HotPathDebugMetrics.shared.setEnabledForTests(true)
+        HotPathDebugMetrics.shared.reset()
+        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
+
+        manager.monitorProvider = { [monitor] }
+        manager.screenProvider = { _ in nil }
+        manager.panelFactory = makeRecordingPanelFactory(store: panelStore)
+        manager.frameApplier = { panel, frame in
+            frameRecorder.apply(frame: frame, to: panel)
+        }
+
+        manager.setup(controller: controller, settings: controller.settings)
+        defer { manager.cleanup() }
+
+        _ = try #require(panelStore.panels.first)
+        let initialSnapshot = try #require(manager.snapshotForTests(on: monitor.id))
+        let initialWorkspaceItem = try #require(initialSnapshot.items.first(where: { $0.id == workspaceId }))
+
+        #expect(HotPathDebugMetrics.shared.snapshot.workspaceBarMeasuredWidthCalls == 1)
+        #expect(initialWorkspaceItem.tiledWindows.count == 1)
+        #expect(initialWorkspaceItem.tiledWindows.first?.windowCount == 9)
+
+        _ = controller.workspaceManager.addWindow(
+            makeLayoutPlanTestWindow(windowId: 1310),
+            pid: 8201,
+            windowId: 1310,
+            to: workspaceId,
+            mode: .tiling
+        )
+
+        manager.update()
+
+        let updatedSnapshot = try #require(manager.snapshotForTests(on: monitor.id))
+        let updatedWorkspaceItem = try #require(updatedSnapshot.items.first(where: { $0.id == workspaceId }))
+        #expect(HotPathDebugMetrics.shared.snapshot.workspaceBarMeasuredWidthCalls == 2)
+        #expect(updatedWorkspaceItem.tiledWindows.count == 1)
+        #expect(updatedWorkspaceItem.tiledWindows.first?.windowCount == 10)
+    }
+
     @Test @MainActor func widthChangingContentRefreshRemeasuresOnceAndUpdatesFrame() throws {
         let monitor = makeLayoutPlanTestMonitor(displayId: 78, width: 3200)
         let workspaceConfigurations = (1...9).map {

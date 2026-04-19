@@ -4,6 +4,11 @@ import Foundation
 
 private let perAppTimeout: TimeInterval = 0.5
 
+enum FrameConfirmResult: String, Sendable {
+    case cachedNoOp = "cached_noop"
+    case confirmedWrite = "confirmed_write"
+}
+
 @MainActor
 final class AXManager {
     typealias FrameApplicationTerminalObserver = @MainActor (AXFrameApplyResult) -> Void
@@ -28,7 +33,7 @@ final class AXManager {
     var currentWindowsAsyncOverride: (@MainActor () async -> [(AXWindowRef, pid_t, Int)])?
     var fullRescanEnumerationOverrideForTests: (@MainActor () async -> FullRescanEnumerationSnapshot)?
     var frameApplyOverrideForTests: (([AXFrameApplicationRequest]) -> [AXFrameApplyResult])?
-    var onFrameConfirmed: ((pid_t, Int, CGRect) -> Void)?
+    var onFrameConfirmed: ((pid_t, Int, CGRect, FrameConfirmResult) -> Void)?
 
     private struct PendingFrameObserver {
         var windowId: Int
@@ -187,10 +192,21 @@ final class AXManager {
         AppAXContext.contexts[pid]?.rekeyWindow(oldWindowId: oldWindowId, newWindow: newWindow)
     }
 
-    func confirmFrameWrite(for windowId: Int, frame: CGRect) {
+    func confirmFrameWrite(for windowId: Int, pid: pid_t? = nil, frame: CGRect) {
         lastAppliedFrames[windowId] = frame
         recentFrameWriteFailures.removeValue(forKey: windowId)
         retryBudgetByWindowId.removeValue(forKey: windowId)
+        if let pid {
+            onFrameConfirmed?(pid, windowId, frame, .confirmedWrite)
+        }
+    }
+
+    func setPendingFrameWriteForTests(windowId: Int, frame: CGRect?) {
+        if let frame {
+            pendingFrameWrites[windowId] = frame
+        } else {
+            pendingFrameWrites.removeValue(forKey: windowId)
+        }
     }
 
     func cleanup() {
@@ -349,6 +365,7 @@ final class AXManager {
                             )
                         )
                     }
+                    onFrameConfirmed?(pid, windowId, cached, .cachedNoOp)
                     continue
                 }
             }
@@ -402,8 +419,12 @@ final class AXManager {
             )
         }
 
-        let requestsForTests = framesByPidBuffer.values.flatMap { $0 }
-        if let frameApplyOverrideForTests, !requestsForTests.isEmpty {
+        if let frameApplyOverrideForTests {
+            let requestsForTests = framesByPidBuffer.values.flatMap { $0 }
+            guard !requestsForTests.isEmpty else { return }
+            HotPathDebugMetrics.shared.recordAXFrameApplyOverrideBatch(
+                requestCount: requestsForTests.count
+            )
             handleFrameApplyResults(frameApplyOverrideForTests(requestsForTests))
             return
         }
@@ -560,7 +581,12 @@ final class AXManager {
                 lastAppliedFrames[resolvedWindowId] = confirmedFrame
                 recentFrameWriteFailures.removeValue(forKey: resolvedWindowId)
                 retryBudgetByWindowId.removeValue(forKey: resolvedWindowId)
-                onFrameConfirmed?(resolvedResult.pid, resolvedWindowId, confirmedFrame)
+                onFrameConfirmed?(
+                    resolvedResult.pid,
+                    resolvedWindowId,
+                    confirmedFrame,
+                    .confirmedWrite
+                )
                 notifyPendingFrameObserver(with: resolvedResult)
                 continue
             }

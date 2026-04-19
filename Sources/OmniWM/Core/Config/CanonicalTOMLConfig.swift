@@ -39,7 +39,7 @@ struct CanonicalTOMLConfig: Codable, Equatable {
     }
 
     struct MouseWarp: Codable, Equatable {
-        var monitorOrder: [String]
+        var monitorOrder: [OutputId]
         var axis: String?
         var margin: Int
     }

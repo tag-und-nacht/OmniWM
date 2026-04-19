@@ -57,6 +57,25 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
         #expect(snapshot.workingFrame == CGRect(x: 0, y: 0, width: 1000, height: 748))
     }
 
+    @Test @MainActor func backingScaleLookupUsesScreenCacheAfterFirstResolution() {
+        let monitor = makeLayoutPlanPrimaryTestMonitor()
+        let controller = makeLayoutPlanTestController(monitors: [monitor])
+        HotPathDebugMetrics.shared.setEnabledForTests(true)
+        ScreenLookupCache.shared.resetForTests()
+        defer {
+            ScreenLookupCache.shared.resetForTests()
+            HotPathDebugMetrics.shared.setEnabledForTests(false)
+        }
+
+        _ = controller.layoutRefreshController.backingScale(for: monitor)
+        _ = controller.layoutRefreshController.backingScale(for: monitor)
+
+        let snapshot = HotPathDebugMetrics.shared.snapshot
+        #expect(snapshot.backingScaleRequests == 2)
+        #expect(snapshot.backingScaleCacheHits == 1)
+        #expect(snapshot.backingScaleCacheMisses == 1)
+    }
+
     @Test @MainActor func executeLayoutPlanAppliesFrameDiffAndFocusedBorder() {
         let controller = makeLayoutPlanTestController()
         guard let monitor = controller.workspaceManager.monitors.first,
@@ -91,6 +110,421 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
         #expect(controller.axManager.lastAppliedFrame(for: 101) == frame)
         #expect(lastAppliedBorderWindowIdForLayoutPlanTests(on: controller) == 101)
         #expect(controller.workspaceManager.preferredFocusToken(in: workspaceId) == token)
+    }
+
+    @Test @MainActor func executeLayoutPlanSkipsFrameApplicationWhenAnimationOwnsFrames() {
+        let controller = makeLayoutPlanTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing monitor or active workspace for animation-owned frame skip test")
+            return
+        }
+
+        let token = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 119)
+        _ = controller.workspaceManager.setManagedFocus(token, in: workspaceId, onMonitor: monitor.id)
+        controller.setBordersEnabled(true)
+
+        let frame = CGRect(x: 180, y: 120, width: 840, height: 560)
+        var diff = WorkspaceLayoutDiff()
+        diff.frameChanges = [LayoutFrameChange(token: token, frame: frame, forceApply: false)]
+        diff.focusedFrame = LayoutFocusedFrame(token: token, frame: frame)
+        diff.borderMode = .direct
+
+        var plan = WorkspaceLayoutPlan(
+            workspaceId: workspaceId,
+            monitor: controller.layoutRefreshController.buildMonitorSnapshot(for: monitor),
+            sessionPatch: WorkspaceSessionPatch(
+                workspaceId: workspaceId,
+                rememberedFocusToken: token
+            ),
+            diff: diff
+        )
+        plan.skipFrameApplicationForAnimation = true
+
+        controller.layoutRefreshController.executeLayoutPlan(plan)
+
+        #expect(controller.axManager.lastAppliedFrame(for: token.windowId) == nil)
+        #expect(lastAppliedBorderWindowIdForLayoutPlanTests(on: controller) == token.windowId)
+        #expect(lastAppliedBorderFrameForLayoutPlanTests(on: controller) == frame)
+        #expect(controller.workspaceManager.preferredFocusToken(in: workspaceId) == token)
+    }
+
+    @Test @MainActor func windowCloseAnimationCachesDisplayLinkReverseLookup() {
+        let controller = makeLayoutPlanTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing monitor or active workspace for display-link reverse lookup test")
+            return
+        }
+
+        let token = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 120)
+        guard let entry = controller.workspaceManager.entry(for: token) else {
+            Issue.record("Missing managed entry for display-link reverse lookup test")
+            return
+        }
+
+        AXWindowService.fastFrameProviderForTests = { axRef in
+            guard axRef.windowId == token.windowId else { return nil }
+            return CGRect(x: 200, y: 140, width: 720, height: 480)
+        }
+        defer { AXWindowService.fastFrameProviderForTests = nil }
+
+        controller.layoutRefreshController.startWindowCloseAnimation(entry: entry, monitor: monitor)
+
+        guard let link = controller.layoutRefreshController.layoutState.displayLinksByDisplay[monitor.displayId] else {
+            Issue.record("Expected close animation to create a display link")
+            return
+        }
+
+        #expect(controller.layoutRefreshController.layoutState.displayIdByLink[ObjectIdentifier(link)] == monitor.displayId)
+
+        controller.layoutRefreshController.cleanupForMonitorDisconnect(
+            displayId: monitor.displayId,
+            migrateAnimations: false
+        )
+
+        #expect(controller.layoutRefreshController.layoutState.displayLinksByDisplay[monitor.displayId] == nil)
+        #expect(controller.layoutRefreshController.layoutState.displayIdByLink[ObjectIdentifier(link)] == nil)
+    }
+
+    @Test @MainActor func displayLinkSchedulingIsIdempotentAcrossAnimationEntryPoints() {
+        let controller = makeLayoutPlanTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing monitor or active workspace for display-link scheduling test")
+            return
+        }
+
+        let token = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 121)
+        guard let entry = controller.workspaceManager.entry(for: token) else {
+            Issue.record("Missing managed entry for display-link scheduling test")
+            return
+        }
+
+        var scheduledDisplayIds: [CGDirectDisplayID] = []
+        controller.layoutRefreshController.displayLinkScheduleHookForTests = { displayId in
+            scheduledDisplayIds.append(displayId)
+        }
+        AXWindowService.fastFrameProviderForTests = { _ in
+            CGRect(x: 210, y: 150, width: 730, height: 490)
+        }
+        defer {
+            controller.layoutRefreshController.displayLinkScheduleHookForTests = nil
+            AXWindowService.fastFrameProviderForTests = nil
+        }
+
+        controller.layoutRefreshController.startWindowCloseAnimation(entry: entry, monitor: monitor)
+        controller.layoutRefreshController.startDwindleAnimation(for: workspaceId, monitor: monitor)
+        controller.layoutRefreshController.startScrollAnimation(for: workspaceId)
+
+        #expect(scheduledDisplayIds == [monitor.displayId])
+        #expect(
+            controller.layoutRefreshController.layoutState.scheduledDisplayLinkDisplayIds == [monitor.displayId]
+        )
+
+        controller.layoutRefreshController.cleanupForMonitorDisconnect(
+            displayId: monitor.displayId,
+            migrateAnimations: false
+        )
+
+        #expect(
+            controller.layoutRefreshController.layoutState.scheduledDisplayLinkDisplayIds.isEmpty
+        )
+    }
+
+    @Test @MainActor func executeLayoutPlanDoesNotPersistRestoreSnapshotOnVerificationMismatch() {
+        let controller = makeLayoutPlanTestController()
+        HotPathDebugMetrics.shared.setEnabledForTests(true)
+        HotPathDebugMetrics.shared.reset()
+        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing monitor or active workspace for restore snapshot persistence test")
+            return
+        }
+
+        let token = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 102)
+        let frame = CGRect(x: 140, y: 92, width: 880, height: 612)
+        controller.axManager.frameApplyOverrideForTests = { requests in
+            requests.map { request in
+                AXFrameApplyResult(
+                    requestId: request.requestId,
+                    pid: request.pid,
+                    windowId: request.windowId,
+                    targetFrame: request.frame,
+                    currentFrameHint: request.currentFrameHint,
+                    writeResult: layoutRefreshControllerTestWriteResult(
+                        targetFrame: request.frame,
+                        currentFrameHint: request.currentFrameHint,
+                        observedFrame: nil,
+                        failureReason: .verificationMismatch
+                    )
+                )
+            }
+        }
+        var diff = WorkspaceLayoutDiff()
+        diff.frameChanges = [LayoutFrameChange(token: token, frame: frame, forceApply: false)]
+        let plan = WorkspaceLayoutPlan(
+            workspaceId: workspaceId,
+            monitor: controller.layoutRefreshController.buildMonitorSnapshot(for: monitor),
+            sessionPatch: WorkspaceSessionPatch(workspaceId: workspaceId),
+            diff: diff
+        )
+
+        controller.layoutRefreshController.executeLayoutPlan(plan)
+
+        #expect(controller.axManager.lastAppliedFrame(for: token.windowId) == nil)
+        #expect(HotPathDebugMetrics.shared.snapshot.managedRestoreGeometryCalls == 0)
+        #expect(controller.workspaceManager.managedRestoreSnapshot(for: token) == nil)
+    }
+
+    @Test @MainActor func managedRestoreMaterialStateHintPersistsWorkspaceMoveWithoutFrameApply() {
+        let controller = makeLayoutPlanTestController()
+        HotPathDebugMetrics.shared.setEnabledForTests(true)
+        HotPathDebugMetrics.shared.reset()
+        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let sourceWorkspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id,
+              let targetWorkspaceId = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true)
+        else {
+            Issue.record("Missing workspace fixture for managed restore material-state test")
+            return
+        }
+
+        let token = addLayoutPlanTestWindow(on: controller, workspaceId: sourceWorkspaceId, windowId: 108)
+        let frame = CGRect(x: 160, y: 108, width: 860, height: 600)
+        _ = controller.workspaceManager.setManagedReplacementMetadata(
+            ManagedReplacementMetadata(
+                bundleId: "com.example.material-state",
+                workspaceId: sourceWorkspaceId,
+                mode: .tiling,
+                role: kAXWindowRole as String,
+                subrole: kAXStandardWindowSubrole as String,
+                title: "Material State Window",
+                windowLevel: 0,
+                parentWindowId: nil,
+                frame: frame
+            ),
+            for: token
+        )
+        controller.recordManagedRestoreGeometry(for: token, frame: frame)
+
+        controller.workspaceManager.setWorkspace(for: token, to: targetWorkspaceId)
+        HotPathDebugMetrics.shared.reset()
+
+        var plan = WorkspaceLayoutPlan(
+            workspaceId: targetWorkspaceId,
+            monitor: controller.layoutRefreshController.buildMonitorSnapshot(for: monitor),
+            sessionPatch: WorkspaceSessionPatch(workspaceId: targetWorkspaceId),
+            diff: WorkspaceLayoutDiff()
+        )
+        plan.managedRestoreMaterialStateChanges = [
+            ManagedRestoreMaterialStateChange(
+                token: token,
+                reason: .workspaceMoved
+            )
+        ]
+
+        controller.layoutRefreshController.executeLayoutPlan(plan)
+
+        let metrics = HotPathDebugMetrics.shared.snapshot
+        let snapshot = controller.workspaceManager.managedRestoreSnapshot(for: token)
+        #expect(controller.axManager.lastAppliedFrame(for: token.windowId) == nil)
+        #expect(snapshot?.workspaceId == targetWorkspaceId)
+        #expect(snapshot?.replacementMetadata?.workspaceId == targetWorkspaceId)
+        #expect(metrics.managedRestoreGeometryCalls == 1)
+        #expect(metrics.managedRestoreSnapshotPersistenceAttemptsByReason[.workspaceMoved] == 1)
+        #expect(metrics.managedRestoreSnapshotWritesByReason[.workspaceMoved] == 1)
+        #expect(metrics.managedRestoreSnapshotSemanticNoOpCountByReason[.workspaceMoved, default: 0] == 0)
+    }
+
+    @Test @MainActor func managedRestoreMaterialStateHintUsesCanonicalNiriFrameDuringScrollAnimation() async throws {
+        let controller = makeLayoutPlanTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing workspace fixture for Niri material-state frame regression test")
+            return
+        }
+
+        controller.enableNiriLayout(maxWindowsPerColumn: 1)
+        await waitForLayoutPlanRefreshWork(on: controller)
+        controller.syncMonitorsToNiriEngine()
+
+        let token = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 109)
+        let initialPlans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
+            activeWorkspaces: [workspaceId]
+        )
+        controller.layoutRefreshController.executeLayoutPlans(initialPlans)
+
+        guard let windowNode = controller.niriEngine?.findNode(for: token) as? NiriWindow,
+              let settledFrame = windowNode.frame
+        else {
+            Issue.record("Expected a Niri window node with a canonical frame")
+            return
+        }
+
+        controller.recordManagedRestoreGeometry(for: token, frame: settledFrame)
+
+        let tweenFrame = settledFrame.offsetBy(dx: 72, dy: 48)
+        windowNode.savedHeight = .fixed(333)
+        windowNode.renderedFrame = tweenFrame
+        controller.workspaceManager.withNiriViewportState(for: workspaceId) { state in
+            state.viewOffsetPixels = .spring(
+                SpringAnimation(
+                    from: 0,
+                    to: 120,
+                    startTime: 0,
+                    config: .snappy
+                )
+            )
+        }
+        controller.layoutRefreshController.startScrollAnimation(for: workspaceId)
+
+        var plan = WorkspaceLayoutPlan(
+            workspaceId: workspaceId,
+            monitor: controller.layoutRefreshController.buildMonitorSnapshot(for: monitor),
+            sessionPatch: WorkspaceSessionPatch(workspaceId: workspaceId),
+            diff: WorkspaceLayoutDiff()
+        )
+        plan.managedRestoreMaterialStateChanges = [
+            ManagedRestoreMaterialStateChange(
+                token: token,
+                reason: .niriStateChanged
+            )
+        ]
+
+        controller.layoutRefreshController.executeLayoutPlan(plan)
+
+        let snapshot = controller.workspaceManager.managedRestoreSnapshot(for: token)
+        #expect(snapshot?.frame == settledFrame)
+        #expect(snapshot?.frame != tweenFrame)
+        #expect(snapshot?.niriState?.windowSizing.savedHeight == .fixed(333))
+    }
+
+    @Test @MainActor func activateNodeRelayoutPersistsManagedRestoreSnapshotWithoutFrameConfirmation() async throws {
+        let controller = makeLayoutPlanTestController()
+        HotPathDebugMetrics.shared.setEnabledForTests(true)
+        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing workspace fixture for Niri activate-node restore regression test")
+            return
+        }
+
+        controller.enableNiriLayout(maxWindowsPerColumn: 1)
+        await waitForLayoutPlanRefreshWork(on: controller)
+        controller.syncMonitorsToNiriEngine()
+
+        let firstToken = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 130)
+        let secondToken = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 131)
+        let initialPlans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
+            activeWorkspaces: [workspaceId]
+        )
+        controller.layoutRefreshController.executeLayoutPlans(initialPlans)
+
+        guard let engine = controller.niriEngine,
+              let firstNode = engine.findNode(for: firstToken),
+              let secondNode = engine.findNode(for: secondToken)
+        else {
+            Issue.record("Expected Niri nodes before activate-node restore regression test")
+            return
+        }
+
+        _ = controller.workspaceManager.commitWorkspaceSelection(
+            nodeId: firstNode.id,
+            focusedToken: firstToken,
+            in: workspaceId,
+            onMonitor: controller.workspaceManager.monitorId(for: workspaceId)
+        )
+        controller.axManager.suppressFrameWrites([(secondToken.pid, secondToken.windowId)])
+        _ = controller.workspaceManager.clearManagedRestoreSnapshot(for: secondToken)
+        controller.axManager.frameApplyOverrideForTests = { requests in
+            requests.map { request in
+                AXFrameApplyResult(
+                    requestId: request.requestId,
+                    pid: request.pid,
+                    windowId: request.windowId,
+                    targetFrame: request.frame,
+                    currentFrameHint: request.currentFrameHint,
+                    writeResult: .skipped(
+                        targetFrame: request.frame,
+                        currentFrameHint: request.currentFrameHint,
+                        failureReason: .cancelled
+                    )
+                )
+            }
+        }
+        HotPathDebugMetrics.shared.reset()
+
+        controller.workspaceManager.withNiriViewportState(for: workspaceId) { state in
+            controller.niriLayoutHandler.activateNode(
+                secondNode,
+                in: workspaceId,
+                state: &state,
+                options: .init(
+                    activateWindow: false,
+                    ensureVisible: false,
+                    updateTimestamp: false,
+                    axFocus: false,
+                    startAnimation: false
+                )
+            )
+        }
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+
+        let snapshot = controller.workspaceManager.managedRestoreSnapshot(for: secondToken)
+        let metrics = HotPathDebugMetrics.shared.snapshot
+        #expect(controller.axManager.lastAppliedFrame(for: secondToken.windowId) == nil)
+        #expect(snapshot?.token == secondToken)
+        #expect(snapshot?.niriState?.nodeId == secondNode.id)
+        #expect(metrics.managedRestoreGeometryCallsByReason[.niriStateChanged] == 1)
+        #expect(metrics.managedRestoreSnapshotPersistenceAttemptsByReason[.niriStateChanged] == 1)
+        #expect(metrics.managedRestoreSnapshotWritesByReason[.niriStateChanged] == 1)
+        #expect(metrics.managedRestoreSnapshotSemanticNoOpCountByReason[.niriStateChanged, default: 0] == 0)
+    }
+
+    @Test @MainActor func midAnimationFullscreenEntryDoesNotPersistTweenFrame() {
+        let controller = makeLayoutPlanTestController()
+        HotPathDebugMetrics.shared.setEnabledForTests(true)
+        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing monitor or active workspace for mid-animation fullscreen regression test")
+            return
+        }
+
+        let token = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 110)
+        let targetFrame = CGRect(x: 120, y: 80, width: 900, height: 640)
+        let tweenFrame = CGRect(x: 188, y: 112, width: 832, height: 588)
+
+        controller.axManager.applyFramesParallel([(token.pid, token.windowId, targetFrame)])
+        #expect(controller.workspaceManager.managedRestoreSnapshot(for: token)?.frame == targetFrame)
+
+        controller.workspaceManager.setLayoutReason(.nativeFullscreen, for: token)
+        HotPathDebugMetrics.shared.reset()
+
+        var diff = WorkspaceLayoutDiff()
+        diff.frameChanges = [LayoutFrameChange(token: token, frame: tweenFrame, forceApply: false)]
+
+        let plan = WorkspaceLayoutPlan(
+            workspaceId: workspaceId,
+            monitor: controller.layoutRefreshController.buildMonitorSnapshot(for: monitor),
+            sessionPatch: WorkspaceSessionPatch(workspaceId: workspaceId),
+            diff: diff
+        )
+
+        controller.layoutRefreshController.executeLayoutPlan(plan)
+
+        #expect(controller.axManager.lastAppliedFrame(for: token.windowId) == targetFrame)
+        #expect(controller.workspaceManager.managedRestoreSnapshot(for: token)?.frame == targetFrame)
+        #expect(HotPathDebugMetrics.shared.snapshot.managedRestoreGeometryCalls == 0)
     }
 
     @Test @MainActor func nativeFullscreenRestoreStatePersistsUntilLayoutPlanCommit() {
@@ -224,7 +658,7 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
         #expect(controller.axManager.lastAppliedFrame(for: 112) == frozenFrame)
     }
 
-    @Test @MainActor func executeLayoutPlanPreservesHiddenStateOnHideAndClearsItOnShow() {
+    @Test @MainActor func executeLayoutPlanPreservesHiddenStateOnHideAndClearsItOnShow() async {
         let controller = makeLayoutPlanTestController()
         guard let monitor = controller.workspaceManager.monitors.first,
               let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
@@ -244,6 +678,23 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
         )
         let visibleFrame = CGRect(x: 240, y: monitor.visibleFrame.minY + 80, width: 640, height: 420)
         controller.axManager.applyFramesParallel([(token.pid, token.windowId, visibleFrame)])
+        var framesByWindowId = [token.windowId: visibleFrame]
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        AXWindowService.fastFrameProviderForTests = { axRef in framesByWindowId[axRef.windowId] }
+        AXWindowService.setFrameResultProviderForTests = { axRef, frame, currentFrameHint in
+            framesByWindowId[axRef.windowId] = frame
+            return layoutRefreshControllerTestWriteResult(
+                targetFrame: frame,
+                currentFrameHint: currentFrameHint,
+                observedFrame: frame,
+                failureReason: nil
+            )
+        }
+        defer {
+            AXWindowService.fastFrameProviderForTests = nil
+            AXWindowService.setFrameResultProviderForTests = nil
+            axHooksLease.release()
+        }
 
         var hideDiff = WorkspaceLayoutDiff()
         let hiddenFrame = CGRect(
@@ -583,7 +1034,7 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
         #expect(origin.y < fixture.secondaryMonitor.visibleFrame.minY)
     }
 
-    @Test @MainActor func hideInactiveWorkspacesMarksSecondaryWorkspaceWindowHiddenOnVerticalOverride() {
+    @Test @MainActor func hideInactiveWorkspacesMarksSecondaryWorkspaceWindowHiddenOnVerticalOverride() async {
         let primaryMonitor = makeLayoutPlanTestMonitor(
             displayId: 100,
             name: "Primary"
@@ -622,11 +1073,22 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
         controller.axManager.applyFramesParallel(
             [(pid: token.pid, windowId: token.windowId, frame: visibleFrame)]
         )
-        AXWindowService.fastFrameProviderForTests = { axRef in
-            axRef.windowId == token.windowId ? visibleFrame : nil
+        var framesByWindowId = [token.windowId: visibleFrame]
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        AXWindowService.fastFrameProviderForTests = { axRef in framesByWindowId[axRef.windowId] }
+        AXWindowService.setFrameResultProviderForTests = { axRef, frame, currentFrameHint in
+            framesByWindowId[axRef.windowId] = frame
+            return layoutRefreshControllerTestWriteResult(
+                targetFrame: frame,
+                currentFrameHint: currentFrameHint,
+                observedFrame: frame,
+                failureReason: nil
+            )
         }
         defer {
             AXWindowService.fastFrameProviderForTests = nil
+            AXWindowService.setFrameResultProviderForTests = nil
+            axHooksLease.release()
         }
 
         controller.layoutRefreshController.hideInactiveWorkspacesSync()
@@ -1104,6 +1566,9 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
     }
 
     @Test @MainActor func restoreScratchpadWindowKeepsHiddenStateUntilAsyncRevealCompletes() async throws {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
         let controller = makeLayoutPlanTestController()
         guard let monitor = controller.workspaceManager.monitors.first,
               let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
@@ -1189,7 +1654,10 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
         #expect(controller.axManager.lastAppliedFrame(for: token.windowId) == floatingFrame)
     }
 
-    @Test @MainActor func windowCloseAnimationUsesExactSnappyConfigAndSettlesToExpectedFrame() {
+    @Test @MainActor func windowCloseAnimationUsesExactSnappyConfigAndSettlesToExpectedFrame() async {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
         let controller = makeLayoutPlanTestController()
         guard let monitor = controller.workspaceManager.monitors.first,
               let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
@@ -1295,6 +1763,9 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
     }
 
     @Test @MainActor func restoreScratchpadWindowVerificationMismatchCompletesAfterDelayedVerification() async {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
         let controller = makeLayoutPlanTestController()
         guard let monitor = controller.workspaceManager.monitors.first,
               let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
@@ -1360,15 +1831,19 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
         controller.layoutRefreshController.restoreScratchpadWindow(entry, monitor: monitor)
         observedFrame = floatingFrame
 
-        let completedReveal = await waitForConditionForTests {
+        let completedReveal = await waitForConditionForTests(timeoutNanoseconds: 10_000_000_000) {
             controller.workspaceManager.hiddenState(for: token) == nil
                 && controller.axManager.lastAppliedFrame(for: token.windowId) == floatingFrame
         }
 
         #expect(completedReveal)
+        #expect(controller.workspaceManager.managedRestoreSnapshot(for: token)?.frame == floatingFrame)
     }
 
     @Test @MainActor func restoreScratchpadWindowReadbackFailureCompletesAfterDelayedVerification() async {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
         let controller = makeLayoutPlanTestController()
         guard let monitor = controller.workspaceManager.monitors.first,
               let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
@@ -1434,12 +1909,13 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
         controller.layoutRefreshController.restoreScratchpadWindow(entry, monitor: monitor)
         observedFrame = floatingFrame
 
-        let completedReveal = await waitForConditionForTests {
+        let completedReveal = await waitForConditionForTests(timeoutNanoseconds: 10_000_000_000) {
             controller.workspaceManager.hiddenState(for: token) == nil
                 && controller.axManager.lastAppliedFrame(for: token.windowId) == floatingFrame
         }
 
         #expect(completedReveal)
+        #expect(controller.workspaceManager.managedRestoreSnapshot(for: token)?.frame == floatingFrame)
     }
 
     @Test @MainActor func restoreScratchpadWindowFailurePreservesHiddenStateAndRetryCanSucceed() {
@@ -1982,20 +2458,25 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
 
         let workspaceVisibleFrame = CGRect(x: 180, y: 180, width: 640, height: 420)
         let scratchpadVisibleFrame = CGRect(x: 320, y: 220, width: 680, height: 440)
-        controller.axManager.applyFramesParallel([(workspaceToken.pid, workspaceToken.windowId, workspaceVisibleFrame)])
-        controller.axManager.applyFramesParallel([(scratchpadToken.pid, scratchpadToken.windowId, scratchpadVisibleFrame)])
-        AXWindowService.fastFrameProviderForTests = { axRef in
-            switch axRef.windowId {
-            case workspaceToken.windowId:
-                workspaceVisibleFrame
-            case scratchpadToken.windowId:
-                scratchpadVisibleFrame
-            default:
-                nil
-            }
+        var framesByWindowId = [
+            workspaceToken.windowId: workspaceVisibleFrame,
+            scratchpadToken.windowId: scratchpadVisibleFrame
+        ]
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        AXWindowService.fastFrameProviderForTests = { axRef in framesByWindowId[axRef.windowId] }
+        AXWindowService.setFrameResultProviderForTests = { axRef, frame, currentFrameHint in
+            framesByWindowId[axRef.windowId] = frame
+            return layoutRefreshControllerTestWriteResult(
+                targetFrame: frame,
+                currentFrameHint: currentFrameHint,
+                observedFrame: frame,
+                failureReason: nil
+            )
         }
         defer {
             AXWindowService.fastFrameProviderForTests = nil
+            AXWindowService.setFrameResultProviderForTests = nil
+            axHooksLease.release()
         }
 
         guard let workspaceEntry = controller.workspaceManager.entry(for: workspaceToken),
@@ -2021,10 +2502,8 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
         #expect(controller.layoutRefreshController.lastAppliedHideOrigin(for: workspaceToken) != nil)
         #expect(controller.layoutRefreshController.lastAppliedHideOrigin(for: scratchpadToken) != nil)
 
-        controller.axManager.applyFramesParallel([
-            (workspaceToken.pid, workspaceToken.windowId, CGRect(x: -1400, y: 180, width: 640, height: 420)),
-            (scratchpadToken.pid, scratchpadToken.windowId, CGRect(x: -1500, y: 220, width: 680, height: 440)),
-        ])
+        framesByWindowId[workspaceToken.windowId] = CGRect(x: -1400, y: 180, width: 640, height: 420)
+        framesByWindowId[scratchpadToken.windowId] = CGRect(x: -1500, y: 220, width: 680, height: 440)
 
         controller.layoutRefreshController.unhideWindow(workspaceEntry, monitor: monitor)
         controller.layoutRefreshController.restoreScratchpadWindow(scratchpadEntry, monitor: monitor)
@@ -2035,6 +2514,167 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
         }
 
         #expect(clearedHiddenOrigins)
+    }
+
+    @Test @MainActor func failedBatchHideDoesNotFinalizeNativeFullscreenRestoreForUnverifiedToken() async {
+        let controller = makeLayoutPlanTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing monitor or workspace for native fullscreen finalize gating test")
+            return
+        }
+
+        let successToken = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 616)
+        let failureToken = controller.workspaceManager.addWindow(
+            makeUnavailableLayoutPlanTestWindow(windowId: 617),
+            pid: 617,
+            windowId: 617,
+            to: workspaceId,
+            mode: .tiling
+        )
+        let successVisibleFrame = CGRect(x: 160, y: 140, width: 640, height: 420)
+        let failureVisibleFrame = CGRect(x: 840, y: 140, width: 640, height: 420)
+        var framesByWindowId = [
+            successToken.windowId: successVisibleFrame,
+            failureToken.windowId: failureVisibleFrame
+        ]
+        let failingWindowIds: Set<Int> = [failureToken.windowId]
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        AXWindowService.fastFrameProviderForTests = { axRef in framesByWindowId[axRef.windowId] }
+        AXWindowService.setFrameResultProviderForTests = { axRef, frame, currentFrameHint in
+            if failingWindowIds.contains(axRef.windowId) {
+                return layoutRefreshControllerTestWriteResult(
+                    targetFrame: frame,
+                    currentFrameHint: currentFrameHint,
+                    observedFrame: framesByWindowId[axRef.windowId],
+                    failureReason: .verificationMismatch
+                )
+            }
+
+            framesByWindowId[axRef.windowId] = frame
+            return layoutRefreshControllerTestWriteResult(
+                targetFrame: frame,
+                currentFrameHint: currentFrameHint,
+                observedFrame: frame,
+                failureReason: nil
+            )
+        }
+        defer {
+            AXWindowService.fastFrameProviderForTests = nil
+            AXWindowService.setFrameResultProviderForTests = nil
+            axHooksLease.release()
+        }
+
+        for (token, frame) in [(successToken, successVisibleFrame), (failureToken, failureVisibleFrame)] {
+            let restoreSnapshot = WorkspaceManager.NativeFullscreenRecord.RestoreSnapshot(
+                frame: frame,
+                topologyProfile: controller.workspaceManager.topologyProfile
+            )
+            _ = controller.workspaceManager.requestNativeFullscreenEnter(
+                token,
+                in: workspaceId,
+                restoreSnapshot: restoreSnapshot
+            )
+            _ = controller.workspaceManager.markNativeFullscreenSuspended(
+                token,
+                restoreSnapshot: restoreSnapshot
+            )
+            _ = controller.workspaceManager.requestNativeFullscreenExit(token, initiatedByCommand: true)
+            _ = controller.workspaceManager.beginNativeFullscreenRestore(for: token)
+        }
+
+        var diff = WorkspaceLayoutDiff()
+        diff.visibilityChanges = [
+            .hide(
+                LayoutHideRequest(
+                    token: successToken,
+                    side: .right,
+                    hiddenFrame: CGRect(x: monitor.visibleFrame.maxX + 24, y: 140, width: 640, height: 420)
+                )
+            ),
+            .hide(
+                LayoutHideRequest(
+                    token: failureToken,
+                    side: .right,
+                    hiddenFrame: CGRect(x: monitor.visibleFrame.maxX + 48, y: 140, width: 640, height: 420)
+                )
+            )
+        ]
+        diff.borderMode = .none
+
+        var plan = WorkspaceLayoutPlan(
+            workspaceId: workspaceId,
+            monitor: controller.layoutRefreshController.buildMonitorSnapshot(for: monitor),
+            sessionPatch: WorkspaceSessionPatch(workspaceId: workspaceId),
+            diff: diff
+        )
+        plan.nativeFullscreenRestoreFinalizeTokens = [successToken, failureToken]
+
+        controller.layoutRefreshController.executeLayoutPlan(plan)
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+
+        #expect(controller.workspaceManager.nativeFullscreenRestoreContext(for: successToken) == nil)
+        #expect(controller.workspaceManager.nativeFullscreenRestoreContext(for: failureToken) != nil)
+    }
+
+    @Test @MainActor func alreadyHiddenBatchHideStillFinalizesNativeFullscreenRestore() async {
+        let controller = makeLayoutPlanTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing monitor or workspace for already-hidden native fullscreen finalize test")
+            return
+        }
+
+        let token = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 618)
+        let hiddenFrame = CGRect(x: monitor.visibleFrame.maxX + 24, y: 160, width: 640, height: 420)
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        AXWindowService.fastFrameProviderForTests = { _ in hiddenFrame }
+        defer {
+            AXWindowService.fastFrameProviderForTests = nil
+            axHooksLease.release()
+        }
+
+        let restoreSnapshot = WorkspaceManager.NativeFullscreenRecord.RestoreSnapshot(
+            frame: hiddenFrame,
+            topologyProfile: controller.workspaceManager.topologyProfile
+        )
+        _ = controller.workspaceManager.requestNativeFullscreenEnter(
+            token,
+            in: workspaceId,
+            restoreSnapshot: restoreSnapshot
+        )
+        _ = controller.workspaceManager.markNativeFullscreenSuspended(
+            token,
+            restoreSnapshot: restoreSnapshot
+        )
+        _ = controller.workspaceManager.requestNativeFullscreenExit(token, initiatedByCommand: true)
+        _ = controller.workspaceManager.beginNativeFullscreenRestore(for: token)
+
+        var diff = WorkspaceLayoutDiff()
+        diff.visibilityChanges = [
+            .hide(
+                LayoutHideRequest(
+                    token: token,
+                    side: .right,
+                    hiddenFrame: hiddenFrame
+                )
+            )
+        ]
+        diff.borderMode = .none
+
+        var plan = WorkspaceLayoutPlan(
+            workspaceId: workspaceId,
+            monitor: controller.layoutRefreshController.buildMonitorSnapshot(for: monitor),
+            sessionPatch: WorkspaceSessionPatch(workspaceId: workspaceId),
+            diff: diff
+        )
+        plan.nativeFullscreenRestoreFinalizeTokens = [token]
+
+        controller.layoutRefreshController.executeLayoutPlan(plan)
+
+        #expect(controller.workspaceManager.nativeFullscreenRestoreContext(for: token) == nil)
     }
 
     @Test @MainActor func hideWindowWithoutResolvedGeometryDoesNotMarkWindowHidden() {
@@ -2070,5 +2710,73 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
         )
 
         #expect(controller.workspaceManager.hiddenState(for: token) == nil)
+    }
+
+    @Test @MainActor func immediateRelayoutDefersFrameApplicationToScrollAnimationTick() async {
+        let controller = makeLayoutPlanTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing monitor or active workspace for scroll-animation handoff test")
+            return
+        }
+
+        controller.enableNiriLayout(maxWindowsPerColumn: 1)
+        await waitForLayoutPlanRefreshWork(on: controller)
+        controller.syncMonitorsToNiriEngine()
+
+        let token = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 620)
+        var applyRequestCounts: [Int] = []
+        controller.axManager.frameApplyOverrideForTests = { requests in
+            applyRequestCounts.append(requests.count)
+            return requests.map { request in
+                AXFrameApplyResult(
+                    requestId: request.requestId,
+                    pid: request.pid,
+                    windowId: request.windowId,
+                    targetFrame: request.frame,
+                    currentFrameHint: request.currentFrameHint,
+                    writeResult: AXFrameWriteResult(
+                        targetFrame: request.frame,
+                        observedFrame: request.frame,
+                        writeOrder: AXWindowService.frameWriteOrder(
+                            currentFrame: request.currentFrameHint,
+                            targetFrame: request.frame
+                        ),
+                        sizeError: .success,
+                        positionError: .success,
+                        failureReason: nil
+                    )
+                )
+            }
+        }
+
+        controller.workspaceManager.withNiriViewportState(for: workspaceId) { state in
+            state.viewOffsetPixels = .spring(
+                SpringAnimation(
+                    from: 0,
+                    to: 120,
+                    startTime: 0,
+                    config: .snappy
+                )
+            )
+        }
+        controller.layoutRefreshController.startScrollAnimation(for: workspaceId)
+
+        controller.layoutRefreshController.requestImmediateRelayout(
+            reason: .layoutCommand,
+            affectedWorkspaceIds: [workspaceId]
+        )
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+
+        #expect(applyRequestCounts.isEmpty)
+        #expect(controller.axManager.lastAppliedFrame(for: token.windowId) == nil)
+        #expect(controller.niriLayoutHandler.scrollAnimationByDisplay[monitor.displayId] == workspaceId)
+
+        controller.niriLayoutHandler.tickScrollAnimation(targetTime: 1, displayId: monitor.displayId)
+
+        #expect(applyRequestCounts.count == 1)
+        #expect(applyRequestCounts[0] > 0)
+        #expect(controller.axManager.lastAppliedFrame(for: token.windowId) != nil)
     }
 }

@@ -11,6 +11,7 @@ final class WMRuntime {
     let hiddenBarController: HiddenBarController
     let controller: WMController
     private let effectExecutor: any EffectExecutor
+    private let traceMode: WMRuntimeTraceMode
     private(set) var snapshot: WMRuntimeSnapshot
     private(set) var recentTrace: [WMRuntimeTraceRecord] = []
     private var nextEventId: UInt64 = 1
@@ -36,10 +37,12 @@ final class WMRuntime {
         platform: WMPlatform = .live,
         hiddenBarController: HiddenBarController? = nil,
         windowFocusOperations: WindowFocusOperations? = nil,
-        effectExecutor: (any EffectExecutor)? = nil
+        effectExecutor: (any EffectExecutor)? = nil,
+        traceMode: WMRuntimeTraceMode = .default
     ) {
         self.settings = settings
         self.platform = platform
+        self.traceMode = traceMode
         let resolvedHiddenBarController = hiddenBarController ?? HiddenBarController(settings: settings)
         self.hiddenBarController = resolvedHiddenBarController
         let workspaceManager = WorkspaceManager(settings: settings)
@@ -67,6 +70,7 @@ final class WMRuntime {
     }
 
     func start() {
+        HotPathDebugMetrics.shared.reset()
         applyCurrentConfiguration()
     }
 
@@ -181,9 +185,9 @@ final class WMRuntime {
 
         refreshSnapshotState()
         appendTrace(
-            eventSummary: String(describing: event),
-            decisionSummary: String(describing: result.decision),
-            actionSummaries: result.plan.actions.map { String(describing: $0) }
+            eventSummary: traceEventSummary(for: event),
+            decisionSummary: traceDecisionSummary(for: result.decision),
+            actionSummaries: traceActionSummaries(for: result.plan.actions)
         )
         return result
     }
@@ -219,16 +223,19 @@ final class WMRuntime {
     }
 
     private func appendTrace(
-        eventSummary: String,
-        decisionSummary: String?,
-        actionSummaries: [String]
+        eventSummary: @autoclosure () -> String,
+        decisionSummary: @autoclosure () -> String?,
+        actionSummaries: @autoclosure () -> [String]
     ) {
+        HotPathDebugMetrics.shared.recordRuntimeTraceAppendAttempt()
+        guard traceMode.isEnabled else { return }
+
         let record = WMRuntimeTraceRecord(
             eventId: nextEventId,
             timestamp: Date(),
-            eventSummary: eventSummary,
-            decisionSummary: decisionSummary,
-            actionSummaries: actionSummaries,
+            eventSummary: eventSummary(),
+            decisionSummary: decisionSummary(),
+            actionSummaries: actionSummaries(),
             focusedToken: snapshot.reconcile.focusSession.focusedToken,
             pendingFocusedToken: snapshot.reconcile.focusSession.pendingManagedFocus.token,
             activeRefreshCycleId: snapshot.orchestration.refresh.activeRefresh?.cycleId,
@@ -238,6 +245,39 @@ final class WMRuntime {
         recentTrace.append(record)
         if recentTrace.count > Self.maxTraceRecordCount {
             recentTrace.removeFirst(recentTrace.count - Self.maxTraceRecordCount)
+        }
+    }
+
+    private func traceEventSummary(for event: OrchestrationEvent) -> String {
+        switch traceMode {
+        case .disabled:
+            return ""
+        case .summary:
+            return event.summary
+        case .detailed:
+            return String(describing: event)
+        }
+    }
+
+    private func traceDecisionSummary(for decision: OrchestrationDecision) -> String {
+        switch traceMode {
+        case .disabled:
+            return ""
+        case .summary:
+            return decision.summary
+        case .detailed:
+            return String(describing: decision)
+        }
+    }
+
+    private func traceActionSummaries(for actions: [OrchestrationPlan.Action]) -> [String] {
+        switch traceMode {
+        case .disabled:
+            return []
+        case .summary:
+            return actions.map(\.summary)
+        case .detailed:
+            return actions.map { String(describing: $0) }
         }
     }
 }

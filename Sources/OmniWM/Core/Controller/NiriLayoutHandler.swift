@@ -49,6 +49,10 @@ private func hasPendingNiriAnimationWork(
         return true
     }
 
+    func hasScrollAnimationRunning(in workspaceId: WorkspaceDescriptor.ID) -> Bool {
+        scrollAnimationByDisplay.values.contains(workspaceId)
+    }
+
     func tickScrollAnimation(targetTime: CFTimeInterval, displayId: CGDirectDisplayID) {
         guard let wsId = scrollAnimationByDisplay[displayId] else { return }
         guard let controller, let engine = controller.niriEngine else {
@@ -288,7 +292,6 @@ private func hasPendingNiriAnimationWork(
             workingArea: area,
             animationTime: animationTime
         )
-        recordManagedRestoreGeometry(windows: snapshot.windows, frames: frames)
 
         let diff = layoutDiff(
             windows: snapshot.windows,
@@ -305,12 +308,14 @@ private func hasPendingNiriAnimationWork(
             canRestoreHiddenWorkspaceWindows: snapshot.isActiveWorkspace
         )
 
-        return WorkspaceLayoutPlan(
+        var plan = WorkspaceLayoutPlan(
             workspaceId: snapshot.workspaceId,
             monitor: snapshot.monitor,
             sessionPatch: WorkspaceSessionPatch(workspaceId: snapshot.workspaceId),
             diff: diff
         )
+        plan.persistManagedRestoreSnapshots = false
+        return plan
     }
 
     private func buildRelayoutPlan(
@@ -362,6 +367,7 @@ private func hasPendingNiriAnimationWork(
             rememberedFocusToken: topologySync.rememberedFocusToken,
             newWindowToken: topologySync.newWindowToken,
             viewportNeedsRecalc: topologySync.viewportNeedsRecalc,
+            topologyDidApply: topologySync.topologyDidApply,
             snapshot: snapshot,
             restoreContexts: restoreContexts,
             suppressAnimationDirectives: hasNativeFullscreenRestoreCycle
@@ -372,6 +378,7 @@ private func hasPendingNiriAnimationWork(
         var viewportNeedsRecalc: Bool
         var rememberedFocusToken: WindowToken?
         var newWindowToken: WindowToken?
+        var topologyDidApply: Bool
     }
 
     private func syncTopology(
@@ -411,7 +418,8 @@ private func hasPendingNiriAnimationWork(
             return TopologySyncResult(
                 viewportNeedsRecalc: false,
                 rememberedFocusToken: nil,
-                newWindowToken: nil
+                newWindowToken: nil,
+                topologyDidApply: false
             )
         }
 
@@ -501,7 +509,8 @@ private func hasPendingNiriAnimationWork(
         return TopologySyncResult(
             viewportNeedsRecalc: abs(state.viewOffsetPixels.current() - offsetBefore) > 1,
             rememberedFocusToken: rememberedFocusToken,
-            newWindowToken: newWindowToken
+            newWindowToken: newWindowToken,
+            topologyDidApply: plan.didApply
         )
     }
 
@@ -512,6 +521,7 @@ private func hasPendingNiriAnimationWork(
         rememberedFocusToken: WindowToken?,
         newWindowToken: WindowToken?,
         viewportNeedsRecalc: Bool,
+        topologyDidApply: Bool,
         snapshot: NiriWorkspaceSnapshot,
         restoreContexts: [WindowToken: NativeFullscreenRestoreContext] = [:],
         suppressAnimationDirectives: Bool = false
@@ -539,7 +549,6 @@ private func hasPendingNiriAnimationWork(
 
         let restoreFrameOverrides = restoreContexts.compactMapValues(\.restoreFrame)
         let resolvedFrames = frames.merging(restoreFrameOverrides) { _, restoreFrame in restoreFrame }
-        recordManagedRestoreGeometry(windows: snapshot.windows, frames: resolvedFrames)
 
         let hasColumnAnimations = suppressAnimationDirectives
             ? false
@@ -608,7 +617,59 @@ private func hasPendingNiriAnimationWork(
             windows: snapshot.windows,
             frames: resolvedFrames
         )
+        plan.managedRestoreMaterialStateChanges = managedRestoreMaterialStateChanges(
+            snapshot: snapshot,
+            rememberedFocusToken: rememberedFocusToken,
+            viewportNeedsRecalc: viewportNeedsRecalc,
+            topologyDidApply: topologyDidApply
+        )
+        plan.persistManagedRestoreSnapshots = false
+        plan.skipFrameApplicationForAnimation = snapshot.useScrollAnimationPath
+            && hasScrollAnimationRunning(in: snapshot.workspaceId)
         return plan
+    }
+
+    private func managedRestoreMaterialStateChanges(
+        snapshot: NiriWorkspaceSnapshot,
+        rememberedFocusToken: WindowToken?,
+        viewportNeedsRecalc: Bool,
+        topologyDidApply: Bool
+    ) -> [ManagedRestoreMaterialStateChange] {
+        var changes: [ManagedRestoreMaterialStateChange] = []
+        var seenTokens: Set<WindowToken> = []
+
+        if topologyDidApply {
+            for window in snapshot.windows where !window.isNativeFullscreenSuspended {
+                guard seenTokens.insert(window.token).inserted else { continue }
+                changes.append(
+                    ManagedRestoreMaterialStateChange(
+                        token: window.token,
+                        reason: .topologyChanged
+                    )
+                )
+            }
+        }
+
+        if snapshot.useScrollAnimationPath,
+           viewportNeedsRecalc,
+           let candidateToken = rememberedFocusToken
+           ?? snapshot.pendingFocusedToken
+           ?? snapshot.confirmedFocusedToken
+           ?? snapshot.preferredFocusToken,
+           snapshot.windows.contains(where: {
+               $0.token == candidateToken && !$0.isNativeFullscreenSuspended
+           }),
+           seenTokens.insert(candidateToken).inserted
+        {
+            changes.append(
+                ManagedRestoreMaterialStateChange(
+                    token: candidateToken,
+                    reason: .niriStateChanged
+                )
+            )
+        }
+
+        return changes
     }
 
     private func layoutDiff(
@@ -722,17 +783,6 @@ private func hasPendingNiriAnimationWork(
         }
 
         return diff
-    }
-
-    private func recordManagedRestoreGeometry(
-        windows: [LayoutWindowSnapshot],
-        frames: [WindowToken: CGRect]
-    ) {
-        guard let controller else { return }
-        for window in windows where !window.isNativeFullscreenSuspended {
-            guard let frame = frames[window.token] else { continue }
-            controller.recordManagedRestoreGeometry(for: window.token, frame: frame)
-        }
     }
 
     func updateTabbedColumnOverlays() {
@@ -898,7 +948,10 @@ private func hasPendingNiriAnimationWork(
 
             engine.toggleFullscreen(windowNode, motion: motion, state: &state)
 
-            controller.layoutRefreshController.requestImmediateRelayout(reason: .layoutCommand)
+            controller.layoutRefreshController.requestImmediateRelayout(
+                reason: .layoutCommand,
+                affectedWorkspaceIds: [wsId]
+            )
             startScrollAnimationIfNeeded(for: wsId, state: state, engine: engine)
         }
     }
@@ -920,7 +973,10 @@ private func hasPendingNiriAnimationWork(
                 workingFrame: workingFrame,
                 gaps: gaps
             )
-            controller.layoutRefreshController.requestImmediateRelayout(reason: .layoutCommand)
+            controller.layoutRefreshController.requestImmediateRelayout(
+                reason: .layoutCommand,
+                affectedWorkspaceIds: [wsId]
+            )
             startScrollAnimationIfNeeded(for: wsId, state: state, engine: engine)
         }
     }
@@ -941,7 +997,10 @@ private func hasPendingNiriAnimationWork(
                 workingFrame: workingFrame,
                 gaps: gaps
             )
-            controller.layoutRefreshController.requestImmediateRelayout(reason: .layoutCommand)
+            controller.layoutRefreshController.requestImmediateRelayout(
+                reason: .layoutCommand,
+                affectedWorkspaceIds: [wsId]
+            )
             startScrollAnimationIfNeeded(for: wsId, state: state, engine: engine)
         }
     }
@@ -955,7 +1014,10 @@ private func hasPendingNiriAnimationWork(
                 workingAreaWidth: workingFrame.width,
                 gaps: gaps
             )
-            controller.layoutRefreshController.requestImmediateRelayout(reason: .layoutCommand)
+            controller.layoutRefreshController.requestImmediateRelayout(
+                reason: .layoutCommand,
+                affectedWorkspaceIds: [wsId]
+            )
             if engine.hasAnyColumnAnimationsRunning(in: wsId) {
                 controller.layoutRefreshController.startScrollAnimation(for: wsId)
             }
@@ -1073,10 +1135,17 @@ private func hasPendingNiriAnimationWork(
             if options.updateTimestamp {
                 engine.updateFocusTimestamp(for: windowNode.id)
             }
+            if !options.layoutRefresh {
+                controller.recordManagedRestoreGeometryIfMaterialStateChanged(
+                    for: CGWindowID(windowNode.token.windowId),
+                    reason: .niriStateChanged
+                )
+            }
         }
 
         if options.layoutRefresh {
             let focusToken = options.axFocus ? (node as? NiriWindow)?.token : nil
+            let materialStateWindowId = (node as? NiriWindow)?.token.windowId
             if let focusToken {
                 _ = controller.workspaceManager.beginManagedFocusRequest(
                     focusToken,
@@ -1085,8 +1154,15 @@ private func hasPendingNiriAnimationWork(
                 )
             }
             controller.layoutRefreshController.requestImmediateRelayout(
-                reason: .layoutCommand
+                reason: .layoutCommand,
+                affectedWorkspaceIds: [workspaceId]
             ) { [weak controller] in
+                if let materialStateWindowId {
+                    controller?.recordManagedRestoreGeometryIfMaterialStateChanged(
+                        for: CGWindowID(materialStateWindowId),
+                        reason: .niriStateChanged
+                    )
+                }
                 if let focusToken {
                     controller?.focusWindow(focusToken)
                 }
@@ -1364,8 +1440,7 @@ struct NodeActivationOptions {
         state: ViewportState,
         oldFrames: [WindowToken: CGRect]
     ) -> Bool {
-        let scale = NSScreen.screens.first(where: { $0.displayId == monitor.displayId })?
-            .backingScaleFactor ?? 2.0
+        let scale = controller.layoutRefreshController.backingScale(for: monitor)
         let workingArea = WorkingAreaContext(
             workingFrame: workingFrame,
             viewFrame: monitor.frame,
@@ -1391,7 +1466,10 @@ struct NodeActivationOptions {
             newFrames: newFrames,
             motion: motion
         )
-        controller.layoutRefreshController.requestImmediateRelayout(reason: .layoutCommand)
+        controller.layoutRefreshController.requestImmediateRelayout(
+            reason: .layoutCommand,
+            affectedWorkspaceIds: [wsId]
+        )
         return hasPendingAnimationWork(state: state)
     }
 
@@ -1399,7 +1477,10 @@ struct NodeActivationOptions {
         state: ViewportState,
         oldFrames: [WindowToken: CGRect]
     ) -> Bool {
-        controller.layoutRefreshController.requestImmediateRelayout(reason: .layoutCommand)
+        controller.layoutRefreshController.requestImmediateRelayout(
+            reason: .layoutCommand,
+            affectedWorkspaceIds: [wsId]
+        )
         let newFrames = engine.captureWindowFrames(in: wsId)
         _ = engine.triggerMoveAnimations(
             in: wsId,
@@ -1411,7 +1492,10 @@ struct NodeActivationOptions {
     }
 
     func commitSimple(state: ViewportState) -> Bool {
-        controller.layoutRefreshController.requestImmediateRelayout(reason: .layoutCommand)
+        controller.layoutRefreshController.requestImmediateRelayout(
+            reason: .layoutCommand,
+            affectedWorkspaceIds: [wsId]
+        )
         return hasPendingAnimationWork(state: state)
     }
 }

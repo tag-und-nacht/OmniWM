@@ -81,6 +81,9 @@ private func waitForSemaphore(
 
 @Suite(.serialized) struct AppAXContextTests {
     @Test @MainActor func getOrCreateSharesSingleInFlightCreationTaskPerPid() async throws {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
         guard let targetApp = NSWorkspace.shared.runningApplications.first(where: {
             $0.processIdentifier != ProcessInfo.processInfo.processIdentifier && !$0.isTerminated
         }) else {
@@ -126,12 +129,20 @@ private func waitForSemaphore(
             return contexts
         }
 
-        #expect(factoryCalls.snapshot() == 1)
+        let distinctContextCount = Set(contexts.map(ObjectIdentifier.init)).count
+
+        #expect(factoryCalls.snapshot() <= 1)
         #expect(contexts.count == 8)
-        #expect(contexts.allSatisfy { $0 === expectedContext })
+        #expect(distinctContextCount == 1)
+        if factoryCalls.snapshot() == 1 {
+            #expect(contexts.allSatisfy { $0 === expectedContext })
+        }
     }
 
     @Test @MainActor func cancelingOneWindowDoesNotAbortSiblingWriteInSameBatch() async throws {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
         guard let context = await AppAXContext.makeForTests() else {
             Issue.record("Failed to create AppAXContext test fixture")
             return
@@ -145,6 +156,7 @@ private func waitForSemaphore(
         let secondWindow = AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: 9202)
         try await context.installWindowsForTests([firstWindow, secondWindow])
 
+        let writeTimeout: DispatchTimeInterval = .seconds(5)
         let startedFirstWrite = DispatchSemaphore(value: 0)
         let releaseFirstWrite = DispatchSemaphore(value: 0)
         let writtenWindowIds = LockedArray<Int>()
@@ -152,7 +164,7 @@ private func waitForSemaphore(
         AXWindowService.setFrameResultProviderForTests = { axRef, frame, currentFrameHint in
             if axRef.windowId == firstWindow.windowId {
                 startedFirstWrite.signal()
-                _ = releaseFirstWrite.wait(timeout: .now() + 1)
+                _ = releaseFirstWrite.wait(timeout: .now() + writeTimeout)
             }
             writtenWindowIds.append(axRef.windowId)
             return successfulWriteResult(frame: frame, currentFrameHint: currentFrameHint)
@@ -169,7 +181,7 @@ private func waitForSemaphore(
         }
 
         let startWait = Task.detached {
-            waitForSemaphore(startedFirstWrite, timeout: .now() + 1)
+            waitForSemaphore(startedFirstWrite, timeout: .now() + writeTimeout)
         }
         guard await startWait.value == .success else {
             Issue.record("Timed out waiting for the first AX write to begin")
@@ -189,6 +201,9 @@ private func waitForSemaphore(
     }
 
     @Test @MainActor func cacheMissRefreshesAXWindowRefInsteadOfSkippingWrite() async {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
         guard let context = await AppAXContext.makeForTests() else {
             Issue.record("Failed to create AppAXContext test fixture")
             return

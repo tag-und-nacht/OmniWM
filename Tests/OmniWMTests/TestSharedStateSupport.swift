@@ -5,6 +5,81 @@ import Foundation
 
 private let testConfigurationDirectoryKey = "__omniwm.test.configurationDirectory"
 
+private actor AXTestHooksLock {
+    static let shared = AXTestHooksLock()
+
+    private var isLocked = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func lock() async {
+        if !isLocked {
+            isLocked = true
+            return
+        }
+
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func unlock() {
+        if let waiter = waiters.first {
+            waiters.removeFirst()
+            waiter.resume()
+        } else {
+            isLocked = false
+        }
+    }
+}
+
+final class AXTestHooksLease: @unchecked Sendable {
+    private let lock = NSLock()
+    private var released = false
+
+    func release() {
+        lock.lock()
+        let shouldRelease = !released
+        released = true
+        lock.unlock()
+
+        guard shouldRelease else { return }
+
+        Task { @MainActor in
+            resetAXTestSharedStateForTests()
+            await AXTestHooksLock.shared.unlock()
+        }
+    }
+}
+
+@MainActor
+func resetAXTestSharedStateForTests() {
+    let contexts = Array(AppAXContext.contexts.values)
+    AppAXContext.contexts.removeAll()
+    for context in contexts {
+        context.destroy()
+    }
+
+    AppAXContext.onWindowDestroyed = nil
+    AppAXContext.onWindowMinimizedChanged = nil
+    AppAXContext.onFocusedWindowChanged = nil
+    AppAXContext.contextFactoryForTests = nil
+
+    AXWindowService.axWindowRefProviderForTests = nil
+    AXWindowService.setFrameResultProviderForTests = nil
+    AXWindowService.fastFrameProviderForTests = nil
+    AXWindowService.titleLookupProviderForTests = nil
+    AXWindowService.timeSourceForTests = nil
+    AXWindowService.clearTitleCacheForTests()
+}
+
+func acquireAXTestHooksLeaseForTests() async -> AXTestHooksLease {
+    await AXTestHooksLock.shared.lock()
+    await MainActor.run {
+        resetAXTestSharedStateForTests()
+    }
+    return AXTestHooksLease()
+}
+
 func configurationDirectoryForTests(defaults: UserDefaults) -> URL {
     if let path = defaults.string(forKey: testConfigurationDirectoryKey) {
         return URL(fileURLWithPath: path, isDirectory: true)
@@ -46,24 +121,14 @@ extension SettingsStore {
 
 @MainActor
 func resetSharedControllerStateForTests() {
-    let contextFactory = AppAXContext.contextFactoryForTests
-    let axWindowRefProvider = AXWindowService.axWindowRefProviderForTests
-    let setFrameResultProvider = AXWindowService.setFrameResultProviderForTests
-    let fastFrameProvider = AXWindowService.fastFrameProviderForTests
-    let titleLookupProvider = AXWindowService.titleLookupProviderForTests
-    let timeSource = AXWindowService.timeSourceForTests
-
     SettingsWindowController.shared.windowForTests?.close()
     AppRulesWindowController.shared.windowForTests?.close()
     SponsorsWindowController.shared.windowForTests?.close()
     UpdateWindowController.shared.windowForTests?.close()
     OwnedWindowRegistry.shared.resetForTests()
+    HotPathDebugMetrics.shared.setEnabledForTests(false)
+    ScreenLookupCache.shared.resetForTests()
+    FrontmostApplicationState.shared.setSnapshotForTests(nil)
 
-    AppAXContext.contextFactoryForTests = contextFactory
-    AXWindowService.axWindowRefProviderForTests = axWindowRefProvider
-    AXWindowService.setFrameResultProviderForTests = setFrameResultProvider
-    AXWindowService.fastFrameProviderForTests = fastFrameProvider
-    AXWindowService.titleLookupProviderForTests = titleLookupProvider
-    AXWindowService.timeSourceForTests = timeSource
-    AXWindowService.clearTitleCacheForTests()
+    resetAXTestSharedStateForTests()
 }

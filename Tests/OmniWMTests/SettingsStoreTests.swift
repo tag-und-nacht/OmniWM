@@ -312,19 +312,85 @@ private func writeSettingsExport(
         #expect(reloaded.mouseWarpAxis == .vertical)
     }
 
-    @Test func persistEffectiveMouseWarpMonitorOrderSeedsConnectedDisplaysWithoutDroppingStoredEntries() {
+    @Test func persistEffectiveMouseWarpMonitorOrderResolvesConnectedDisplaysWithoutMutatingStoredEntries() {
         let defaults = makeTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         let right = makeSettingsTestMonitor(displayId: 2, name: "Right", x: 1920)
         let left = makeSettingsTestMonitor(displayId: 1, name: "Left", x: 0)
 
-        settings.mouseWarpMonitorOrder = ["Disconnected", "Left"]
+        settings.mouseWarpMonitorOrder = [
+            OutputId(displayId: 999, name: "Disconnected"),
+            OutputId(from: left)
+        ]
 
         let resolved = settings.persistEffectiveMouseWarpMonitorOrder(for: [right, left])
 
-        #expect(settings.mouseWarpMonitorOrder == ["Disconnected", "Left", "Right"])
-        #expect(resolved == ["Left", "Right"])
-        #expect(settings.effectiveMouseWarpMonitorOrder(for: [left]) == ["Left"])
+        #expect(settings.mouseWarpMonitorOrder == [
+            OutputId(displayId: 999, name: "Disconnected"),
+            OutputId(from: left)
+        ])
+        #expect(resolved == [left.id, right.id])
+        #expect(settings.effectiveMouseWarpMonitorOrder(for: [left]) == [left.id])
+    }
+
+    @Test func effectiveMouseWarpMonitorOrderKeepsDuplicateNamesDistinctByOutputId() {
+        let defaults = makeTestDefaults()
+        let settings = SettingsStore(defaults: defaults)
+        let left = makeSettingsTestMonitor(displayId: 10, name: "Studio Display", x: 0)
+        let right = makeSettingsTestMonitor(displayId: 20, name: "Studio Display", x: 1920)
+
+        settings.mouseWarpMonitorOrder = [OutputId(from: right), OutputId(from: left)]
+
+        #expect(settings.effectiveMouseWarpMonitorOrder(for: [left, right]) == [right.id, left.id])
+    }
+
+    @Test func rebindMonitorReferencesUpdatesMouseWarpMonitorOrderToReplacementOutputIdentity() {
+        let defaults = makeTestDefaults()
+        let settings = SettingsStore(defaults: defaults)
+        let original = OutputId(displayId: 10, name: "Studio Display")
+        let replacement = makeSettingsTestMonitor(displayId: 20, name: "Studio Display", x: 0)
+
+        settings.mouseWarpMonitorOrder = [original]
+        settings.rebindMonitorReferences(to: [replacement])
+
+        #expect(settings.mouseWarpMonitorOrder == [OutputId(from: replacement)])
+    }
+
+    @Test func rebindMonitorReferencesDoesNotCollapseDuplicateNamedOutputsOntoOneMonitor() {
+        let defaults = makeTestDefaults()
+        let settings = SettingsStore(defaults: defaults)
+        let first = OutputId(displayId: 10, name: "Studio Display")
+        let second = OutputId(displayId: 20, name: "Studio Display")
+        let replacement = makeSettingsTestMonitor(displayId: 30, name: "Studio Display", x: 0)
+
+        settings.mouseWarpMonitorOrder = [first, second]
+        settings.rebindMonitorReferences(to: [replacement])
+
+        #expect(settings.mouseWarpMonitorOrder == [OutputId(from: replacement), second])
+    }
+
+    @Test func commitMouseWarpMonitorOrderPreservesDisconnectedEntriesInPlace() {
+        let defaults = makeTestDefaults()
+        let settings = SettingsStore(defaults: defaults)
+        let left = makeSettingsTestMonitor(displayId: 1, name: "Left", x: 0)
+        let right = makeSettingsTestMonitor(displayId: 2, name: "Right", x: 1920)
+
+        settings.mouseWarpMonitorOrder = [
+            OutputId(from: left),
+            OutputId(displayId: 999, name: "Disconnected"),
+            OutputId(from: right)
+        ]
+
+        settings.commitMouseWarpMonitorOrder(
+            orderedMonitorIds: [right.id, left.id],
+            connectedMonitors: [left, right]
+        )
+
+        #expect(settings.mouseWarpMonitorOrder == [
+            OutputId(from: right),
+            OutputId(displayId: 999, name: "Disconnected"),
+            OutputId(from: left)
+        ])
     }
 }
 
@@ -336,13 +402,19 @@ private func writeSettingsExport(
             persistence: SettingsFilePersistence(directory: directory),
             runtimeState: RuntimeStateStore(directory: directory)
         )
+        var reloadCount = 0
+        settings.onExternalSettingsReloaded = {
+            reloadCount += 1
+        }
 
         var export = settings.toExport()
         export.focusFollowsWindowToMonitor = true
         try writeSettingsExport(export, to: settings.settingsFileURL)
 
-        let reloaded = await waitForConditionForTests {
-            settings.focusFollowsWindowToMonitor == true
+        let reloaded = await waitForConditionForTests(
+            timeoutNanoseconds: 20_000_000_000
+        ) {
+            reloadCount == 1 && settings.focusFollowsWindowToMonitor == true
         }
 
         #expect(reloaded)

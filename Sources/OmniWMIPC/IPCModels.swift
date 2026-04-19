@@ -2172,14 +2172,36 @@ public struct IPCFocusedWindowDecisionQueryResult: Codable, Equatable, Sendable 
 }
 
 public struct IPCReconcileDebugQueryResult: Codable, Equatable, Sendable {
+    private enum CodingKeys: String, CodingKey {
+        case snapshot
+        case trace
+        case traceLimit
+        case hotPathMetrics
+    }
+
     public let snapshot: String
     public let trace: String
     public let traceLimit: Int
+    public let hotPathMetrics: String
 
-    public init(snapshot: String, trace: String, traceLimit: Int) {
+    public init(
+        snapshot: String,
+        trace: String,
+        traceLimit: Int,
+        hotPathMetrics: String = ""
+    ) {
         self.snapshot = snapshot
         self.trace = trace
         self.traceLimit = traceLimit
+        self.hotPathMetrics = hotPathMetrics
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        snapshot = try container.decode(String.self, forKey: .snapshot)
+        trace = try container.decode(String.self, forKey: .trace)
+        traceLimit = try container.decode(Int.self, forKey: .traceLimit)
+        hotPathMetrics = try container.decodeIfPresent(String.self, forKey: .hotPathMetrics) ?? ""
     }
 }
 

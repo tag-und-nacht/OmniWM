@@ -47,6 +47,36 @@ enum WorkspaceBarPosition: String, CaseIterable, Identifiable {
 
 @MainActor
 final class WorkspaceBarManager {
+    fileprivate struct MeasurementCacheKey: Hashable {
+        struct Item: Hashable {
+            let name: String
+            let tiledWindowCount: Int
+            let floatingWindowCount: Int
+            let tiledGroupedWindowCounts: [Int]
+            let floatingGroupedWindowCounts: [Int]
+        }
+
+        let showLabels: Bool
+        let barHeightBits: UInt64
+        let labelFontSizeBits: UInt64
+        let items: [Item]
+
+        init(snapshot: WorkspaceBarSnapshot) {
+            showLabels = snapshot.showLabels
+            barHeightBits = Double(snapshot.barHeight).bitPattern
+            labelFontSizeBits = Double(snapshot.labelFontSize).bitPattern
+            items = snapshot.items.map {
+                Item(
+                    name: $0.name,
+                    tiledWindowCount: $0.tiledWindows.count,
+                    floatingWindowCount: $0.floatingWindows.count,
+                    tiledGroupedWindowCounts: $0.tiledWindows.map(\.windowCount),
+                    floatingGroupedWindowCounts: $0.floatingWindows.map(\.windowCount)
+                )
+            }
+        }
+    }
+
     final class MonitorBarInstance {
         let monitorId: Monitor.ID
         let panel: WorkspaceBarPanel
@@ -57,6 +87,8 @@ final class WorkspaceBarManager {
         var monitor: Monitor
         var lastAppliedFrame: NSRect?
         var screenDisplayId: CGDirectDisplayID?
+        fileprivate var cachedMeasuredWidth: CGFloat?
+        fileprivate var cachedMeasurementKey: MeasurementCacheKey?
 
         init(
             monitor: Monitor,
@@ -332,7 +364,7 @@ final class WorkspaceBarManager {
         snapshot: WorkspaceBarSnapshot,
         instance: MonitorBarInstance
     ) {
-        let fittingWidth = measuredWidth(for: snapshot, using: instance.measurementView)
+        let fittingWidth = measuredWidth(for: snapshot, instance: instance)
         let geometry = WorkspaceBarGeometry.resolve(monitor: monitor, resolved: resolved, isVisible: true)
         let frame = geometry.frame(fittingWidth: fittingWidth, monitor: monitor, resolved: resolved)
 
@@ -344,11 +376,22 @@ final class WorkspaceBarManager {
 
     private func measuredWidth(
         for snapshot: WorkspaceBarSnapshot,
-        using measurementView: NSHostingView<WorkspaceBarMeasurementView>
+        instance: MonitorBarInstance
     ) -> CGFloat {
-        measurementView.rootView = WorkspaceBarMeasurementView(snapshot: snapshot)
-        measurementView.layoutSubtreeIfNeeded()
-        return measurementView.fittingSize.width
+        let measurementKey = MeasurementCacheKey(snapshot: snapshot)
+        if instance.cachedMeasurementKey == measurementKey,
+           let cachedMeasuredWidth = instance.cachedMeasuredWidth
+        {
+            return cachedMeasuredWidth
+        }
+
+        HotPathDebugMetrics.shared.recordWorkspaceBarMeasurement()
+        instance.measurementView.rootView = WorkspaceBarMeasurementView(snapshot: snapshot)
+        instance.measurementView.layoutSubtreeIfNeeded()
+        let measuredWidth = instance.measurementView.fittingSize.width
+        instance.cachedMeasurementKey = measurementKey
+        instance.cachedMeasuredWidth = measuredWidth
+        return measuredWidth
     }
 
     private func makeSnapshot(

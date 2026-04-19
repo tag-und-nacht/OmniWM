@@ -71,6 +71,11 @@ final class SkyLight {
         UnsafePointer<UInt32>,
         Int32
     ) -> Int32
+    private typealias UnrequestNotificationsForWindowsFunc = @convention(c) (
+        Int32,
+        UnsafePointer<UInt32>,
+        Int32
+    ) -> Int32
 
     typealias NotifyCallback = @convention(c) (
         UInt32,
@@ -113,6 +118,7 @@ final class SkyLight {
     private let registerConnectionNotifyProc: RegisterConnectionNotifyProcFunc?
     private let unregisterConnectionNotifyProc: UnregisterConnectionNotifyProcFunc?
     private let requestNotificationsForWindows: RequestNotificationsForWindowsFunc?
+    private let unrequestNotificationsForWindows: UnrequestNotificationsForWindowsFunc?
     private let registerNotifyProc: RegisterNotifyProcFunc?
     private let unregisterNotifyProcFunc: UnregisterNotifyProcFunc?
     private let newWindow: NewWindowFunc?
@@ -210,6 +216,9 @@ final class SkyLight {
         unregisterConnectionNotifyProc = resolveOptional("SLSUnregisterConnectionNotifyProc", as: UnregisterConnectionNotifyProcFunc.self)
             ?? resolveOptional("SLSRemoveConnectionNotifyProc", as: UnregisterConnectionNotifyProcFunc.self)
         requestNotificationsForWindows = resolveOptional("SLSRequestNotificationsForWindows", as: RequestNotificationsForWindowsFunc.self)
+        unrequestNotificationsForWindows = resolveOptional("SLSUnrequestNotificationsForWindows", as: UnrequestNotificationsForWindowsFunc.self)
+            ?? resolveOptional("SLSRemoveNotificationsForWindows", as: UnrequestNotificationsForWindowsFunc.self)
+            ?? resolveOptional("SLSCancelNotificationsForWindows", as: UnrequestNotificationsForWindowsFunc.self)
         registerNotifyProc = resolveOptional("SLSRegisterNotifyProc", as: RegisterNotifyProcFunc.self)
         unregisterNotifyProcFunc = resolveOptional("SLSUnregisterNotifyProc", as: UnregisterNotifyProcFunc.self)
             ?? resolveOptional("SLSRemoveNotifyProc", as: UnregisterNotifyProcFunc.self)
@@ -483,6 +492,23 @@ final class SkyLight {
         }
         let result = windowIds.withUnsafeBufferPointer { buffer in
             requestNotificationsForWindows(cid, buffer.baseAddress!, Int32(windowIds.count))
+        }
+        return result == 0
+    }
+
+    func unsubscribeFromWindowNotifications(_ windowIds: [UInt32]) -> Bool? {
+        guard !windowIds.isEmpty else {
+            return true
+        }
+        guard let unrequestNotificationsForWindows else {
+            return nil
+        }
+        let cid = getMainConnectionID()
+        guard cid != 0 else {
+            return false
+        }
+        let result = windowIds.withUnsafeBufferPointer { buffer in
+            unrequestNotificationsForWindows(cid, buffer.baseAddress!, Int32(windowIds.count))
         }
         return result == 0
     }

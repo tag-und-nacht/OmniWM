@@ -162,6 +162,14 @@ private func axManagerTestWriteResult(
 
         let token = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 912)
         let targetFrame = CGRect(x: 160, y: 96, width: 900, height: 580)
+        let originalOnFrameConfirmed = controller.axManager.onFrameConfirmed
+        var confirmedFrames: [CGRect] = []
+        var confirmResults: [FrameConfirmResult] = []
+        controller.axManager.onFrameConfirmed = { pid, windowId, frame, result in
+            confirmedFrames.append(frame)
+            confirmResults.append(result)
+            originalOnFrameConfirmed?(pid, windowId, frame, result)
+        }
 
         var attemptCount = 0
         controller.axManager.frameApplyOverrideForTests = { requests in
@@ -186,6 +194,8 @@ private func axManagerTestWriteResult(
         controller.axManager.applyFramesParallel([(token.pid, token.windowId, targetFrame)])
 
         var observerResults: [AXFrameApplyResult] = []
+        confirmedFrames.removeAll()
+        confirmResults.removeAll()
         controller.axManager.applyFramesParallel(
             [(token.pid, token.windowId, targetFrame)],
             terminalObserver: { observerResults.append($0) }
@@ -194,10 +204,288 @@ private func axManagerTestWriteResult(
         #expect(attemptCount == 1)
         #expect(observerResults.count == 1)
         #expect(observerResults.first?.confirmedFrame == targetFrame)
+        #expect(confirmedFrames == [targetFrame])
+        #expect(confirmResults == [.cachedNoOp])
         #expect(controller.axManager.lastAppliedFrame(for: token.windowId) == targetFrame)
     }
 
+    @Test @MainActor func verifiedNoOpFramePersistsOnceThroughOnFrameConfirmed() {
+        let controller = makeLayoutPlanTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing monitor or active workspace for AXManager no-op persistence test")
+            return
+        }
+
+        let token = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 914)
+        let staleFrame = CGRect(x: 104, y: 72, width: 640, height: 420)
+        let targetFrame = CGRect(x: 180, y: 90, width: 800, height: 520)
+
+        controller.axManager.confirmFrameWrite(for: token.windowId, frame: targetFrame)
+        _ = controller.workspaceManager.setManagedRestoreSnapshot(
+            ManagedWindowRestoreSnapshot(
+                token: token,
+                workspaceId: workspaceId,
+                frame: staleFrame,
+                topologyProfile: controller.workspaceManager.topologyProfile,
+                niriState: nil,
+                replacementMetadata: nil
+            ),
+            for: token
+        )
+
+        let originalOnFrameConfirmed = controller.axManager.onFrameConfirmed
+        var confirmedFrames: [CGRect] = []
+        var confirmResults: [FrameConfirmResult] = []
+        controller.axManager.onFrameConfirmed = { pid, windowId, frame, result in
+            confirmedFrames.append(frame)
+            confirmResults.append(result)
+            originalOnFrameConfirmed?(pid, windowId, frame, result)
+        }
+
+        controller.axManager.applyFramesParallel([(token.pid, token.windowId, targetFrame)])
+
+        #expect(confirmedFrames == [targetFrame])
+        #expect(confirmResults == [.cachedNoOp])
+        #expect(controller.workspaceManager.managedRestoreSnapshot(for: token)?.frame == targetFrame)
+    }
+
+    @Test @MainActor func cachedNoOpFrameConfirmShortCircuitsManagedRestoreSnapshotBuild() {
+        let controller = makeLayoutPlanTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing monitor or active workspace for AXManager cached no-op short-circuit test")
+            return
+        }
+
+        let token = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 915)
+        let targetFrame = CGRect(x: 220, y: 110, width: 860, height: 540)
+        _ = controller.workspaceManager.setManagedReplacementMetadata(
+            ManagedReplacementMetadata(
+                bundleId: "com.example.cached-noop",
+                workspaceId: workspaceId,
+                mode: .tiling,
+                role: kAXWindowRole as String,
+                subrole: kAXStandardWindowSubrole as String,
+                title: "Cached No-Op",
+                windowLevel: 8,
+                parentWindowId: nil,
+                frame: targetFrame
+            ),
+            for: token
+        )
+        controller.recordManagedRestoreGeometry(for: token, frame: targetFrame)
+        controller.axManager.confirmFrameWrite(for: token.windowId, frame: targetFrame)
+
+        HotPathDebugMetrics.shared.setEnabledForTests(true)
+        HotPathDebugMetrics.shared.reset()
+        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
+
+        controller.axManager.applyFramesParallel([(token.pid, token.windowId, targetFrame)])
+
+        let snapshot = HotPathDebugMetrics.shared.snapshot
+        #expect(snapshot.managedRestoreSnapshotFromCachedNoOp == 1)
+        #expect(snapshot.managedRestoreSnapshotFromConfirmedWrite == 0)
+        #expect(snapshot.managedRestoreSnapshotShortCircuit == 1)
+        #expect(snapshot.managedRestoreSnapshotPersistenceAttempts == 0)
+        #expect(snapshot.managedRestoreSnapshotWrites == 0)
+        #expect(snapshot.managedRestoreSnapshotSemanticNoOpCount == 1)
+        #expect(controller.workspaceManager.managedRestoreSnapshot(for: token)?.frame == targetFrame)
+    }
+
+    @Test @MainActor func confirmedWriteFrameConfirmShortCircuitsManagedRestoreSnapshotBuild() {
+        let controller = makeLayoutPlanTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing monitor or active workspace for AXManager confirmed-write short-circuit test")
+            return
+        }
+
+        let token = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 916)
+        let targetFrame = CGRect(x: 240, y: 128, width: 840, height: 520)
+        _ = controller.workspaceManager.setManagedReplacementMetadata(
+            ManagedReplacementMetadata(
+                bundleId: "com.example.confirmed-write",
+                workspaceId: workspaceId,
+                mode: .tiling,
+                role: kAXWindowRole as String,
+                subrole: kAXStandardWindowSubrole as String,
+                title: "Confirmed Write",
+                windowLevel: 9,
+                parentWindowId: nil,
+                frame: targetFrame
+            ),
+            for: token
+        )
+        controller.recordManagedRestoreGeometry(for: token, frame: targetFrame)
+
+        HotPathDebugMetrics.shared.setEnabledForTests(true)
+        HotPathDebugMetrics.shared.reset()
+        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
+
+        controller.axManager.frameApplyOverrideForTests = { requests in
+            requests.map { request in
+                AXFrameApplyResult(
+                    requestId: request.requestId,
+                    pid: request.pid,
+                    windowId: request.windowId,
+                    targetFrame: request.frame,
+                    currentFrameHint: request.currentFrameHint,
+                    writeResult: axManagerTestWriteResult(
+                        targetFrame: request.frame,
+                        currentFrameHint: request.currentFrameHint,
+                        observedFrame: request.frame,
+                        failureReason: nil
+                    )
+                )
+            }
+        }
+
+        controller.axManager.applyFramesParallel([(token.pid, token.windowId, targetFrame)])
+
+        let snapshot = HotPathDebugMetrics.shared.snapshot
+        #expect(snapshot.managedRestoreSnapshotFromCachedNoOp == 0)
+        #expect(snapshot.managedRestoreSnapshotFromConfirmedWrite == 1)
+        #expect(snapshot.managedRestoreSnapshotShortCircuit == 1)
+        #expect(snapshot.managedRestoreSnapshotPersistenceAttempts == 0)
+        #expect(snapshot.managedRestoreSnapshotWrites == 0)
+        #expect(snapshot.managedRestoreSnapshotSemanticNoOpCount == 1)
+        #expect(controller.workspaceManager.managedRestoreSnapshot(for: token)?.frame == targetFrame)
+    }
+
+    @Test @MainActor func managedRestoreFastPathCacheClearsWhenWindowIsRemoved() {
+        let controller = makeLayoutPlanTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing monitor or active workspace for fast-path cache removal test")
+            return
+        }
+
+        let token = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 917)
+        let targetFrame = CGRect(x: 260, y: 144, width: 820, height: 500)
+        _ = controller.workspaceManager.setManagedReplacementMetadata(
+            ManagedReplacementMetadata(
+                bundleId: "com.example.cache-remove",
+                workspaceId: workspaceId,
+                mode: .tiling,
+                role: kAXWindowRole as String,
+                subrole: kAXStandardWindowSubrole as String,
+                title: "Cache Remove",
+                windowLevel: 10,
+                parentWindowId: nil,
+                frame: targetFrame
+            ),
+            for: token
+        )
+        controller.recordManagedRestoreGeometry(for: token, frame: targetFrame)
+
+        #expect(controller.managedRestoreFastPathCacheWindowIdsForTests().contains(token.windowId))
+
+        _ = controller.workspaceManager.removeWindow(pid: token.pid, windowId: token.windowId)
+
+        #expect(!controller.managedRestoreFastPathCacheWindowIdsForTests().contains(token.windowId))
+    }
+
+    @Test @MainActor func managedRestoreFastPathCacheInvalidatesOnWindowRekey() {
+        let controller = makeLayoutPlanTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing monitor or active workspace for fast-path cache rekey test")
+            return
+        }
+
+        let token = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 918)
+        let targetFrame = CGRect(x: 280, y: 156, width: 800, height: 480)
+        _ = controller.workspaceManager.setManagedReplacementMetadata(
+            ManagedReplacementMetadata(
+                bundleId: "com.example.cache-rekey",
+                workspaceId: workspaceId,
+                mode: .tiling,
+                role: kAXWindowRole as String,
+                subrole: kAXStandardWindowSubrole as String,
+                title: "Cache Rekey",
+                windowLevel: 11,
+                parentWindowId: nil,
+                frame: targetFrame
+            ),
+            for: token
+        )
+        controller.recordManagedRestoreGeometry(for: token, frame: targetFrame)
+
+        #expect(controller.managedRestoreFastPathCacheWindowIdsForTests().contains(token.windowId))
+
+        let rekeyedToken = WindowToken(pid: token.pid, windowId: 919)
+        #expect(
+            controller.workspaceManager.rekeyWindow(
+                from: token,
+                to: rekeyedToken,
+                newAXRef: makeLayoutPlanTestWindow(windowId: rekeyedToken.windowId)
+            ) != nil
+        )
+
+        let cacheWindowIdsAfterRekey = controller.managedRestoreFastPathCacheWindowIdsForTests()
+        #expect(!cacheWindowIdsAfterRekey.contains(token.windowId))
+        #expect(!cacheWindowIdsAfterRekey.contains(rekeyedToken.windowId))
+
+        controller.recordManagedRestoreGeometry(for: rekeyedToken, frame: targetFrame)
+
+        #expect(controller.managedRestoreFastPathCacheWindowIdsForTests().contains(rekeyedToken.windowId))
+    }
+
+    @Test @MainActor func testOverrideFlatteningOnlyRunsWhenOverrideIsInstalled() {
+        let controller = makeLayoutPlanTestController()
+        HotPathDebugMetrics.shared.setEnabledForTests(true)
+        HotPathDebugMetrics.shared.reset()
+        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing monitor or active workspace for AXManager override flattening test")
+            return
+        }
+
+        let token = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 913)
+        let targetFrame = CGRect(x: 180, y: 90, width: 800, height: 520)
+
+        controller.axManager.frameApplyOverrideForTests = nil
+        controller.axManager.applyFramesParallel([(token.pid, token.windowId, targetFrame)])
+
+        #expect(HotPathDebugMetrics.shared.snapshot.axFrameApplyOverrideBatchCount == 0)
+        #expect(HotPathDebugMetrics.shared.snapshot.axFrameApplyOverrideFlattenedRequestCount == 0)
+
+        controller.axManager.frameApplyOverrideForTests = { requests in
+            requests.map { request in
+                AXFrameApplyResult(
+                    requestId: request.requestId,
+                    pid: request.pid,
+                    windowId: request.windowId,
+                    targetFrame: request.frame,
+                    currentFrameHint: request.currentFrameHint,
+                    writeResult: axManagerTestWriteResult(
+                        targetFrame: request.frame,
+                        currentFrameHint: request.currentFrameHint,
+                        observedFrame: request.frame,
+                        failureReason: nil
+                    )
+                )
+            }
+        }
+
+        controller.axManager.applyFramesParallel([(token.pid, token.windowId, targetFrame)])
+
+        #expect(HotPathDebugMetrics.shared.snapshot.axFrameApplyOverrideBatchCount == 1)
+        #expect(HotPathDebugMetrics.shared.snapshot.axFrameApplyOverrideFlattenedRequestCount == 1)
+    }
+
     @Test @MainActor func laterTrackedWriteDoesNotConsumeSupersededObserver() async throws {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
         let controller = makeLayoutPlanTestController()
         guard let monitor = controller.workspaceManager.monitors.first,
               let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
@@ -220,6 +508,7 @@ private func axManagerTestWriteResult(
 
         let firstFrame = CGRect(x: 180, y: 100, width: 880, height: 560)
         let secondFrame = CGRect(x: 260, y: 140, width: 760, height: 500)
+        let writeTimeout: DispatchTimeInterval = .seconds(3)
         let startedFirstWrite = DispatchSemaphore(value: 0)
         let releaseFirstWrite = DispatchSemaphore(value: 0)
         let startedSecondWrite = DispatchSemaphore(value: 0)
@@ -228,10 +517,10 @@ private func axManagerTestWriteResult(
         AXWindowService.setFrameResultProviderForTests = { _, frame, currentFrameHint in
             if frame == firstFrame {
                 startedFirstWrite.signal()
-                _ = releaseFirstWrite.wait(timeout: .now() + 1)
+                _ = releaseFirstWrite.wait(timeout: .now() + writeTimeout)
             } else if frame == secondFrame {
                 startedSecondWrite.signal()
-                _ = releaseSecondWrite.wait(timeout: .now() + 1)
+                _ = releaseSecondWrite.wait(timeout: .now() + writeTimeout)
             }
 
             return axManagerTestWriteResult(
@@ -255,7 +544,7 @@ private func axManagerTestWriteResult(
         )
 
         let sawFirstStart = await Task.detached {
-            waitForSemaphoreForTests(startedFirstWrite, timeout: .now() + 1) == .success
+            waitForSemaphoreForTests(startedFirstWrite, timeout: .now() + writeTimeout) == .success
         }.value
         #expect(sawFirstStart)
 
@@ -267,14 +556,17 @@ private func axManagerTestWriteResult(
         releaseFirstWrite.signal()
 
         let sawSecondStart = await Task.detached {
-            waitForSemaphoreForTests(startedSecondWrite, timeout: .now() + 1) == .success
+            waitForSemaphoreForTests(startedSecondWrite, timeout: .now() + writeTimeout) == .success
         }.value
         #expect(sawSecondStart)
 
         releaseSecondWrite.signal()
 
-        let observedSecondTerminalResult = await waitForConditionForTests {
+        let observedSecondTerminalResult = await waitForConditionForTests(
+            timeoutNanoseconds: 3_000_000_000
+        ) {
             secondObserverResults.count == 1
+                && controller.axManager.lastAppliedFrame(for: token.windowId) == secondFrame
         }
 
         #expect(observedSecondTerminalResult)

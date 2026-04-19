@@ -748,7 +748,10 @@ final class MouseEventHandler {
                 controller.workspaceManager.withNiriViewportState(for: wsId, mutate)
             }
         ) {
-            controller.layoutRefreshController.requestImmediateRelayout(reason: .interactiveGesture)
+            controller.layoutRefreshController.requestImmediateRelayout(
+                reason: .interactiveGesture,
+                affectedWorkspaceIds: [wsId]
+            )
         }
     }
 
@@ -775,7 +778,10 @@ final class MouseEventHandler {
                     )
                 }
                 if didEnd {
-                    controller.layoutRefreshController.requestImmediateRelayout(reason: .interactiveGesture)
+                    controller.layoutRefreshController.requestImmediateRelayout(
+                        reason: .interactiveGesture,
+                        affectedWorkspaceIds: [wsId]
+                    )
                 }
             }
 
@@ -805,7 +811,10 @@ final class MouseEventHandler {
                 )
             }
             if hadInteractiveResize {
-                controller.layoutRefreshController.requestImmediateRelayout(reason: .interactiveGesture)
+                controller.layoutRefreshController.requestImmediateRelayout(
+                    reason: .interactiveGesture,
+                    affectedWorkspaceIds: [wsId]
+                )
             }
         }
 
@@ -1103,7 +1112,10 @@ final class MouseEventHandler {
                 }
             }
         }
-        controller.layoutRefreshController.requestImmediateRelayout(reason: .interactiveGesture)
+        controller.layoutRefreshController.requestImmediateRelayout(
+            reason: .interactiveGesture,
+            affectedWorkspaceIds: [wsId]
+        )
 
         if let handle = targetWindowHandle {
             controller.focusWindow(handle)
@@ -1150,7 +1162,10 @@ final class MouseEventHandler {
             didCancel = true
         }
         if didCancel {
-            controller.layoutRefreshController.requestImmediateRelayout(reason: .interactiveGesture)
+            controller.layoutRefreshController.requestImmediateRelayout(
+                reason: .interactiveGesture,
+                affectedWorkspaceIds: [wsId]
+            )
         }
     }
 

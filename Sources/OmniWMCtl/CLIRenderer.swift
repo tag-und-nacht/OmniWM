@@ -478,6 +478,7 @@ enum CLIRenderer {
     private static func formattedReconcileDebug(_ payload: IPCReconcileDebugQueryResult) -> String {
         let snapshot = payload.snapshot.isEmpty ? "snapshot empty" : payload.snapshot
         let trace = payload.trace.isEmpty ? "trace empty" : payload.trace
+        let hotPathMetrics = payload.hotPathMetrics.isEmpty ? "hot path metrics unavailable" : payload.hotPathMetrics
 
         return """
         SNAPSHOT
@@ -487,6 +488,10 @@ enum CLIRenderer {
         TRACE (last \(payload.traceLimit))
         ---------------
         \(trace)
+
+        HOT PATH METRICS
+        ----------------
+        \(hotPathMetrics)
         """
     }
 

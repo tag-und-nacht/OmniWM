@@ -50,7 +50,13 @@ private func makeConfiguredMouseWarpTestFixture(
     recorder: WarpEffectRecorder
 ) {
     let settings = SettingsStore(defaults: makeMouseWarpTestDefaults())
-    settings.mouseWarpMonitorOrder = monitorOrder
+    var remainingByName = Dictionary(grouping: monitors, by: \.name)
+    settings.mouseWarpMonitorOrder = monitorOrder.compactMap { name in
+        guard var matches = remainingByName[name], !matches.isEmpty else { return nil }
+        let monitor = matches.removeFirst()
+        remainingByName[name] = matches
+        return OutputId(from: monitor)
+    }
     settings.mouseWarpAxis = axis
     settings.mouseWarpMargin = 2
 
@@ -64,7 +70,7 @@ private func makeConfiguredMouseWarpTestFixture(
         settings: settings,
         windowFocusOperations: operations
     )
-    controller.lockScreenObserver.frontmostApplicationProvider = { nil }
+    controller.lockScreenObserver.frontmostSnapshotProvider = { nil }
     controller.workspaceManager.applyMonitorConfigurationChange(monitors)
 
     let recorder = WarpEffectRecorder()
@@ -330,7 +336,7 @@ private func expectPointApproximatelyEqual(
         #expect(fixture.recorder.postedPoints.isEmpty)
     }
 
-    @Test @MainActor func policySeedsDefaultOrderBeforeWarpingFreshMultiMonitorSetup() {
+    @Test @MainActor func policyUsesEffectiveOrderBeforeWarpingFreshMultiMonitorSetup() {
         let fixture = makeMouseWarpTestFixture()
         defer { fixture.handler.cleanup() }
 
@@ -351,7 +357,7 @@ private func expectPointApproximatelyEqual(
             y: fixture.rightMonitor.frame.midY
         ))
 
-        #expect(fixture.controller.settings.mouseWarpMonitorOrder == ["Left", "Right"])
+        #expect(fixture.controller.settings.mouseWarpMonitorOrder.isEmpty)
         #expect(fixture.recorder.warpedPoints.last == expectedPoint)
     }
 
@@ -746,6 +752,75 @@ private func expectPointApproximatelyEqual(
             let expectedPoint = ScreenCoordinateSpace.toWindowServer(point: CGPoint(x: 1923, y: expectedY))
             expectPointApproximatelyEqual(fixture.recorder.warpedPoints.last, to: expectedPoint, tolerance: 0.5)
         }
+    }
+
+    @Test @MainActor func horizontalModeUsesLastValidMonitorWhenCursorLeavesThroughNonOverlappingBand() {
+        let leftMonitor = makeMouseWarpTestMonitor(displayId: 1, name: "Left", x: 0, y: 0, width: 1920, height: 1080)
+        let rightMonitor = makeMouseWarpTestMonitor(
+            displayId: 2,
+            name: "Right",
+            x: 1920,
+            y: 400,
+            width: 1920,
+            height: 1080
+        )
+        let fixture = makeConfiguredMouseWarpTestFixture(
+            monitors: [leftMonitor, rightMonitor],
+            monitorOrder: ["Left", "Right"],
+            axis: .horizontal
+        )
+        defer { fixture.handler.cleanup() }
+
+        fixture.handler.resetDebugStateForTests()
+        fixture.handler.state.lastMonitorId = leftMonitor.id
+
+        let location = CGPoint(x: leftMonitor.frame.maxX + 24, y: 100)
+        fixture.handler.receiveTapMouseWarpMoved(at: location)
+        fixture.handler.flushPendingWarpEventsForTests()
+
+        let expectedPoint = ScreenCoordinateSpace.toWindowServer(point: CGPoint(
+            x: rightMonitor.frame.minX + CGFloat(fixture.controller.settings.mouseWarpMargin) + 1,
+            y: ratioMappedY(
+                sourceY: location.y,
+                sourceFrame: leftMonitor.frame,
+                targetFrame: rightMonitor.frame
+            )
+        ))
+
+        #expect(fixture.handler.state.lastMonitorId == rightMonitor.id)
+        expectPointApproximatelyEqual(fixture.recorder.warpedPoints.last, to: expectedPoint, tolerance: 0.5)
+    }
+
+    @Test @MainActor func duplicateNamedMonitorsWarpToExplicitOutputIdDestination() {
+        let leftMonitor = makeMouseWarpTestMonitor(displayId: 1, name: "Studio Display", x: 0, y: 0)
+        let rightMonitor = makeMouseWarpTestMonitor(displayId: 2, name: "Studio Display", x: 1920, y: 0)
+        let fixture = makeConfiguredMouseWarpTestFixture(
+            monitors: [leftMonitor, rightMonitor],
+            monitorOrder: ["Studio Display", "Studio Display"],
+            axis: .horizontal
+        )
+        defer { fixture.handler.cleanup() }
+
+        fixture.controller.settings.mouseWarpMonitorOrder = [
+            OutputId(from: leftMonitor),
+            OutputId(from: rightMonitor)
+        ]
+
+        let location = CGPoint(
+            x: leftMonitor.frame.maxX - CGFloat(fixture.controller.settings.mouseWarpMargin) + 1,
+            y: leftMonitor.frame.midY
+        )
+        fixture.handler.resetDebugStateForTests()
+        fixture.handler.receiveTapMouseWarpMoved(at: location)
+        fixture.handler.flushPendingWarpEventsForTests()
+
+        let expectedPoint = ScreenCoordinateSpace.toWindowServer(point: CGPoint(
+            x: rightMonitor.frame.minX + CGFloat(fixture.controller.settings.mouseWarpMargin) + 1,
+            y: rightMonitor.frame.midY
+        ))
+
+        #expect(fixture.handler.state.lastMonitorId == rightMonitor.id)
+        #expect(fixture.recorder.warpedPoints.last == expectedPoint)
     }
 
     @Test @MainActor func crossMonitorWarpDriveBothHardwareAndSyntheticEventAtSamePoint() {

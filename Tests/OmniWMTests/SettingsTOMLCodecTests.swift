@@ -110,6 +110,19 @@ import Testing
         #expect(decoded.workspaceConfigurations == export.workspaceConfigurations)
     }
 
+    @Test func roundTripsNonEmptyMouseWarpMonitorOrder() throws {
+        var export = SettingsExport.defaults()
+        export.mouseWarpMonitorOrder = [
+            OutputId(displayId: 11, name: "Studio Display"),
+            OutputId(displayId: 22, name: "LG UltraFine")
+        ]
+
+        let data = try SettingsTOMLCodec.encode(export)
+        let decoded = try SettingsTOMLCodec.decode(data)
+
+        #expect(decoded.mouseWarpMonitorOrder == export.mouseWarpMonitorOrder)
+    }
+
     @Test func roundTripsAppRulesWithMixedOptionalFields() throws {
         var export = SettingsExport.defaults()
         export.appRules = [

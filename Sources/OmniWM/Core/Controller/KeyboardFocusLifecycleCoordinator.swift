@@ -18,6 +18,15 @@ extension KeyboardFocusTarget: Equatable {
     }
 }
 
+extension KeyboardFocusTarget: CustomStringConvertible {
+    var description: String {
+        if isManaged {
+            return "token=\(token)"
+        }
+        return "pid=\(pid) wid=\(windowId)"
+    }
+}
+
 struct ManagedFocusRequest: Equatable {
     let requestId: UInt64
     var token: WindowToken

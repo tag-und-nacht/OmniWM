@@ -45,7 +45,8 @@ private func makeRuntimeTestSettings() -> SettingsStore {
         let recorder = RuntimeFocusOperationRecorder()
         let runtime = WMRuntime(
             settings: makeRuntimeTestSettings(),
-            windowFocusOperations: makeRuntimeFocusOperations(recorder: recorder)
+            windowFocusOperations: makeRuntimeFocusOperations(recorder: recorder),
+            traceMode: .summary
         )
         let controller = runtime.controller
         let monitor = makeLayoutPlanTestMonitor()
@@ -73,7 +74,7 @@ private func makeRuntimeTestSettings() -> SettingsStore {
 
     @Test @MainActor func runtimeTracksRefreshPlanningAndCompletion() async {
         resetSharedControllerStateForTests()
-        let runtime = WMRuntime(settings: makeRuntimeTestSettings())
+        let runtime = WMRuntime(settings: makeRuntimeTestSettings(), traceMode: .summary)
         let controller = runtime.controller
         controller.workspaceManager.applyMonitorConfigurationChange([makeLayoutPlanTestMonitor()])
         controller.layoutRefreshController.debugHooks.onVisibilityRefresh = { _ in
@@ -97,7 +98,7 @@ private func makeRuntimeTestSettings() -> SettingsStore {
     @Test @MainActor func runtimeOwnsAppliedConfigurationSnapshots() {
         resetSharedControllerStateForTests()
         let settings = makeRuntimeTestSettings()
-        let runtime = WMRuntime(settings: settings)
+        let runtime = WMRuntime(settings: settings, traceMode: .summary)
         let controller = runtime.controller
 
         let originalValue = runtime.configuration.focusFollowsMouse
@@ -113,5 +114,29 @@ private func makeRuntimeTestSettings() -> SettingsStore {
         #expect(controller.focusFollowsMouseEnabled == updatedValue)
         #expect(runtime.recentTrace.last?.eventSummary == "configuration_applied")
         #expect(runtime.recentTrace.last?.actionSummaries.first?.contains("ffm=\(updatedValue)") == true)
+    }
+
+    @Test @MainActor func runtimeLeavesTraceBufferEmptyWhenTracingIsDisabled() {
+        resetSharedControllerStateForTests()
+        let runtime = WMRuntime(settings: makeRuntimeTestSettings(), traceMode: .disabled)
+        let controller = runtime.controller
+        let monitor = makeLayoutPlanTestMonitor()
+        controller.workspaceManager.applyMonitorConfigurationChange([monitor])
+
+        guard let workspaceId = controller.workspaceManager.workspaceId(for: "1", createIfMissing: false) else {
+            Issue.record("Expected workspace for disabled runtime trace test")
+            return
+        }
+
+        let token = controller.workspaceManager.addWindow(
+            makeLayoutPlanTestWindow(windowId: 654),
+            pid: getpid(),
+            windowId: 654,
+            to: workspaceId
+        )
+
+        controller.focusWindow(token)
+
+        #expect(runtime.recentTrace.isEmpty)
     }
 }

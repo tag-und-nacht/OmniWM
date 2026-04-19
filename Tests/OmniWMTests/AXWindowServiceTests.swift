@@ -228,7 +228,10 @@ import Testing
 }
 
 @Suite @MainActor struct AXWindowTitleCacheTests {
-    @Test func titleCacheReusesLookupWithinTTL() {
+    @Test func titleCacheReusesLookupWithinTTL() async {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
         AXWindowService.clearTitleCacheForTests()
         defer {
             AXWindowService.titleLookupProviderForTests = nil
@@ -249,7 +252,10 @@ import Testing
         #expect(lookups == [12])
     }
 
-    @Test func titleCacheRefreshesAfterTTLExpires() {
+    @Test func titleCacheRefreshesAfterTTLExpires() async {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
         AXWindowService.clearTitleCacheForTests()
         defer {
             AXWindowService.titleLookupProviderForTests = nil
@@ -271,7 +277,10 @@ import Testing
         #expect(lookupCount == 2)
     }
 
-    @Test func titleCacheStoresNilResultsWithinTTL() {
+    @Test func titleCacheStoresNilResultsWithinTTL() async {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
         AXWindowService.clearTitleCacheForTests()
         defer {
             AXWindowService.titleLookupProviderForTests = nil
@@ -292,7 +301,10 @@ import Testing
         #expect(lookupCount == 1)
     }
 
-    @Test func explicitTitleInvalidationForcesReload() {
+    @Test func explicitTitleInvalidationForcesReload() async {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
         AXWindowService.clearTitleCacheForTests()
         defer {
             AXWindowService.titleLookupProviderForTests = nil

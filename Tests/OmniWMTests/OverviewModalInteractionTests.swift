@@ -92,6 +92,32 @@ private func activatePreparedOverviewSelection(
     overview.completeCloseTransition(targetWindow: expectedHandle)
 }
 
+@MainActor
+private func syncOverviewNiriState(
+    on controller: WMController,
+    workspaceIds: [WorkspaceDescriptor.ID]
+) {
+    guard let engine = controller.niriEngine else { return }
+
+    for workspaceId in workspaceIds {
+        let handles = controller.workspaceManager.entries(in: workspaceId).map(\.handle)
+        let selectedNodeId = controller.workspaceManager.niriViewportState(for: workspaceId).selectedNodeId
+        let focusedHandle = controller.workspaceManager.lastFocusedHandle(in: workspaceId)
+        _ = engine.syncWindows(
+            handles,
+            in: workspaceId,
+            selectedNodeId: selectedNodeId,
+            focusedHandle: focusedHandle
+        )
+
+        let resolvedSelection = focusedHandle.flatMap { engine.findNode(for: $0)?.id }
+            ?? engine.validateSelection(selectedNodeId, in: workspaceId)
+        controller.workspaceManager.withNiriViewportState(for: workspaceId) { state in
+            state.selectedNodeId = resolvedSelection
+        }
+    }
+}
+
 @Suite @MainActor struct OverviewInputHandlerTests {
     @Test func plainTypingUpdatesSearchQuery() {
         let wmController = makeLayoutPlanTestController()
@@ -163,6 +189,66 @@ private func activatePreparedOverviewSelection(
 }
 
 @Suite @MainActor struct OverviewControllerModalTests {
+    @Test func crossWorkspaceDragActionScopesOverviewRelayoutToSourceAndTargetWorkspaces() async {
+        let fixture = makeTwoMonitorLayoutPlanTestController()
+        let controller = fixture.controller
+        controller.settings.defaultLayoutType = .niri
+        controller.enableNiriLayout(maxWindowsPerColumn: 2)
+        await waitForLayoutPlanRefreshWork(on: controller)
+
+        let sourceHandle = addOverviewTestWindow(
+            on: controller,
+            workspaceId: fixture.primaryWorkspaceId,
+            windowId: 8_401,
+            pid: 5_401,
+            appName: "Source"
+        )
+        let targetHandle = addOverviewTestWindow(
+            on: controller,
+            workspaceId: fixture.secondaryWorkspaceId,
+            windowId: 8_402,
+            pid: 5_402,
+            appName: "Target"
+        )
+        _ = controller.workspaceManager.rememberFocus(sourceHandle, in: fixture.primaryWorkspaceId)
+        _ = controller.workspaceManager.rememberFocus(targetHandle, in: fixture.secondaryWorkspaceId)
+        syncOverviewNiriState(
+            on: controller,
+            workspaceIds: [fixture.primaryWorkspaceId, fixture.secondaryWorkspaceId]
+        )
+
+        var enqueuedRefreshes: [ScheduledRefresh] = []
+        controller.layoutRefreshController.debugHooks.onRefreshEnqueued = { refresh in
+            enqueuedRefreshes.append(refresh)
+        }
+        controller.layoutRefreshController.debugHooks.onRelayout = { _, _ in
+            true
+        }
+
+        let overview = OverviewController(
+            wmController: controller,
+            motionPolicy: controller.motionPolicy
+        )
+        overview.performDragActionForTests(
+            handle: sourceHandle,
+            workspaceId: fixture.primaryWorkspaceId,
+            target: .niriWindowInsert(
+                workspaceId: fixture.secondaryWorkspaceId,
+                targetHandle: targetHandle,
+                position: .before
+            )
+        )
+        await waitForLayoutPlanRefreshWork(on: controller)
+
+        guard let refresh = enqueuedRefreshes.last(where: { $0.reason == .overviewMutation }) else {
+            Issue.record("Missing scoped overview mutation refresh")
+            return
+        }
+
+        #expect(refresh.kind == .immediateRelayout)
+        #expect(refresh.affectedWorkspaceIds == [fixture.primaryWorkspaceId, fixture.secondaryWorkspaceId])
+    }
+
     @Test func prepareOpenStateSeedsSelectionFromFocusedWindow() async {
         let recorder = OverviewSessionRecorder()
         let wmController = makeLayoutPlanTestController()

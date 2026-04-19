@@ -21,7 +21,9 @@ final class MenuAnywhereController: NSObject, NSMenuDelegate {
     func showNativeMenu() {
         cleanupActiveMenu()
 
-        guard let app = NSWorkspace.shared.frontmostApplication else { return }
+        guard let app = FrontmostApplicationState.shared.runningApplication,
+              !app.isTerminated
+        else { return }
         currentApp = app
 
         guard let menuBar = menuExtractor.getMenuBar(for: app.processIdentifier) else { return }

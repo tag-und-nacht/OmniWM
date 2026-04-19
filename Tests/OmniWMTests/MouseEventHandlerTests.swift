@@ -58,7 +58,7 @@ private func makeMouseEventTestController(
         settings.workspaceConfigurations = workspaceConfigurations
     }
     let controller = WMController(settings: settings, windowFocusOperations: operations)
-    controller.lockScreenObserver.frontmostApplicationProvider = { nil }
+    controller.lockScreenObserver.frontmostSnapshotProvider = { nil }
     let frame = CGRect(x: 0, y: 0, width: 1920, height: 1080)
     let monitor = Monitor(
         id: Monitor.ID(displayId: 1),
@@ -800,7 +800,7 @@ private func prepareMouseResizeFixture(
         await controller.layoutRefreshController.waitForRefreshWorkForTests()
         controller.syncMonitorsToNiriEngine()
         controller.setFocusFollowsMouse(true)
-        controller.settings.mouseWarpMonitorOrder = ["Primary", "Secondary"]
+        controller.settings.mouseWarpMonitorOrder = [OutputId(from: primaryMonitor), OutputId(from: secondaryMonitor)]
         controller.settings.mouseWarpAxis = .horizontal
         controller.settings.mouseWarpMargin = 2
 
@@ -818,7 +818,7 @@ private func prepareMouseResizeFixture(
             Issue.record("Failed to activate workspaces for cross-monitor focus-follow test")
             return
         }
-        _ = controller.workspaceManager.setInteractionMonitor(secondaryMonitor.id)
+        _ = controller.workspaceManager.setInteractionMonitor(primaryMonitor.id)
 
         let firstToken = controller.workspaceManager.addWindow(
             makeMouseEventTestWindow(windowId: 961),
@@ -883,12 +883,21 @@ private func prepareMouseResizeFixture(
             y: targetFrame.midY
         )))
         #expect(warpedPoints == [expectedWarpPoint])
+        #expect(controller.workspaceManager.interactionMonitorId == secondaryMonitor.id)
         #expect(controller.workspaceManager.focusedHandle == secondHandle)
         #expect(controller.workspaceManager.pendingFocusedHandle == firstHandle)
         #expect(
             controller.workspaceManager.niriViewportState(for: secondaryWorkspaceId).selectedNodeId
                 == engine.findNode(for: firstHandle)?.id
         )
+
+        controller.setFocusFollowsMouse(false)
+        controller.mouseEventHandler.state.currentHoveredEdges = []
+        controller.mouseEventHandler.dispatchMouseMoved(
+            at: CGPoint(x: targetFrame.maxX - 1, y: targetFrame.midY)
+        )
+
+        #expect(controller.mouseEventHandler.state.currentHoveredEdges == [.right])
     }
 
     @Test @MainActor func focusFollowsMouseActivatesHoveredDwindleWindow() async {
@@ -931,18 +940,42 @@ private func prepareMouseResizeFixture(
         _ = controller.workspaceManager.setManagedFocus(firstHandle, in: workspaceId, onMonitor: monitor.id)
         controller.layoutRefreshController.requestImmediateRelayout(reason: .workspaceTransition)
         await controller.layoutRefreshController.waitForRefreshWorkForTests()
+        engine.tickAnimations(at: controller.animationClock.now() + 10.0, in: workspaceId)
 
         guard let hoveredFrame = engine.findNode(for: secondToken)?.cachedFrame else {
             Issue.record("Missing Dwindle frame for hover focus-follow test")
             return
         }
 
-        controller.mouseEventHandler.dispatchMouseMoved(
-            at: CGPoint(x: hoveredFrame.midX, y: hoveredFrame.midY)
-        )
+        let hoverInsetX = min(12, hoveredFrame.width / 4)
+        let hoverInsetY = min(12, hoveredFrame.height / 4)
+        let hoverCandidates = [
+            CGPoint(x: hoveredFrame.midX, y: hoveredFrame.midY),
+            CGPoint(x: hoveredFrame.minX + hoverInsetX, y: hoveredFrame.midY),
+            CGPoint(x: hoveredFrame.maxX - hoverInsetX, y: hoveredFrame.midY),
+            CGPoint(x: hoveredFrame.midX, y: hoveredFrame.minY + hoverInsetY),
+            CGPoint(x: hoveredFrame.midX, y: hoveredFrame.maxY - hoverInsetY),
+        ]
+        guard let hoverPoint = hoverCandidates.first(where: {
+            hoveredFrame.contains($0)
+                && engine.hitTestFocusableWindow(
+                    point: $0,
+                    in: workspaceId,
+                    at: controller.animationClock.now()
+                ) == secondToken
+        }) else {
+            Issue.record("Failed to resolve a Dwindle hover point for the unfocused window")
+            return
+        }
+
+        controller.mouseEventHandler.dispatchMouseMoved(at: hoverPoint)
         await controller.layoutRefreshController.waitForRefreshWorkForTests()
+        let queuedFocus = await waitForConditionForTests {
+            controller.workspaceManager.pendingFocusedHandle == secondHandle
+        }
 
         #expect(controller.workspaceManager.focusedHandle == firstHandle)
+        #expect(queuedFocus)
         #expect(controller.workspaceManager.pendingFocusedHandle == secondHandle)
         #expect(engine.selectedNode(in: workspaceId)?.windowToken == secondToken)
 

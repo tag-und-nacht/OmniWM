@@ -50,7 +50,10 @@ private func reportWorkspaceSessionKernelBridgeFailure(_ message: String) {
 
 @MainActor
 final class WorkspaceManager {
+    static let managedRestoreSnapshotFrameTolerance: CGFloat = 0.5
+
     static let staleUnavailableNativeFullscreenTimeout: TimeInterval = 15
+    static var forceTopologyReconcileFailureForTests = false
 
     enum NativeFullscreenTransition: Equatable {
         case enterRequested
@@ -108,12 +111,14 @@ final class WorkspaceManager {
         get { workspaceStore.monitors }
         set {
             workspaceStore.monitors = newValue
+            cachedTopologyProfile = TopologyProfile(monitors: newValue)
             rebuildMonitorIndexes()
         }
     }
 
     private var _monitorsById: [Monitor.ID: Monitor] = [:]
     private var _monitorsByName: [String: [Monitor]] = [:]
+    private var cachedTopologyProfile: TopologyProfile
     private let settings: SettingsStore
 
     private var workspacesById: [WorkspaceDescriptor.ID: WorkspaceDescriptor] {
@@ -188,13 +193,17 @@ final class WorkspaceManager {
 
     var onGapsChanged: (() -> Void)?
     var onSessionStateChanged: (() -> Void)?
+    var onWindowRemoved: ((WindowToken) -> Void)?
+    var onWindowRekeyed: ((WindowToken, WindowToken) -> Void)?
 
     init(settings: SettingsStore) {
         self.settings = settings
         let discoveredMonitors = Monitor.current()
+        let initialMonitors = discoveredMonitors.isEmpty ? [Monitor.fallback()] : discoveredMonitors
         workspaceStore = WorkspaceStore(
-            monitors: discoveredMonitors.isEmpty ? [Monitor.fallback()] : discoveredMonitors
+            monitors: initialMonitors
         )
+        cachedTopologyProfile = TopologyProfile(monitors: initialMonitors)
         restoreState = RestoreState(settings: settings)
         settings.rebindMonitorReferences(to: monitors)
         rebuildMonitorIndexes()
@@ -227,7 +236,7 @@ final class WorkspaceManager {
             }
 
         return ReconcileSnapshot(
-            topologyProfile: TopologyProfile(monitors: monitors),
+            topologyProfile: topologyProfile,
             focusSession: focusSessionSnapshot(),
             windows: windowSnapshots
         )
@@ -312,6 +321,7 @@ final class WorkspaceManager {
         let originalOrientationSettings = settings.monitorOrientationSettings
         let originalNiriSettings = settings.monitorNiriSettings
         let originalDwindleSettings = settings.monitorDwindleSettings
+        let originalMouseWarpMonitorOrder = settings.mouseWarpMonitorOrder
         settings.rebindMonitorReferences(to: normalizedMonitors)
         let topologyPlan = WorkspaceSessionKernel.reconcileTopology(
             manager: self,
@@ -332,6 +342,9 @@ final class WorkspaceManager {
             }
             if settings.monitorDwindleSettings != originalDwindleSettings {
                 settings.monitorDwindleSettings = originalDwindleSettings
+            }
+            if settings.mouseWarpMonitorOrder != originalMouseWarpMonitorOrder {
+                settings.mouseWarpMonitorOrder = originalMouseWarpMonitorOrder
             }
         }
         let event = WMEvent.topologyChanged(
@@ -727,7 +740,7 @@ final class WorkspaceManager {
 
         return PersistedRestoreIntent(
             workspaceName: workspaceName,
-            topologyProfile: TopologyProfile(monitors: monitors),
+            topologyProfile: topologyProfile,
             preferredMonitor: preferredMonitor,
             floatingFrame: restoreIntent.floatingFrame,
             normalizedFloatingOrigin: restoreIntent.normalizedFloatingOrigin,
@@ -820,7 +833,7 @@ final class WorkspaceManager {
     }
 
     var topologyProfile: TopologyProfile {
-        TopologyProfile(monitors: monitors)
+        cachedTopologyProfile
     }
 
     @discardableResult
@@ -1012,9 +1025,9 @@ final class WorkspaceManager {
         for token: WindowToken
     ) -> Bool {
         guard windows.entry(for: token) != nil else { return false }
-        let previousSnapshot = windows.managedRestoreSnapshot(for: token)
+        guard shouldPersistManagedRestoreSnapshot(snapshot, for: token) else { return false }
         windows.setManagedRestoreSnapshot(snapshot, for: token)
-        return previousSnapshot != snapshot
+        return true
     }
 
     @discardableResult
@@ -1022,6 +1035,19 @@ final class WorkspaceManager {
         guard windows.managedRestoreSnapshot(for: token) != nil else { return false }
         windows.setManagedRestoreSnapshot(nil, for: token)
         return true
+    }
+
+    func shouldPersistManagedRestoreSnapshot(
+        _ snapshot: ManagedWindowRestoreSnapshot,
+        for token: WindowToken
+    ) -> Bool {
+        guard let previousSnapshot = windows.managedRestoreSnapshot(for: token) else {
+            return true
+        }
+        return !previousSnapshot.isSemanticallyEquivalent(
+            to: snapshot,
+            frameTolerance: Self.managedRestoreSnapshotFrameTolerance
+        )
     }
 
     private func nativeFullscreenRestoreSnapshot(
@@ -2275,6 +2301,8 @@ final class WorkspaceManager {
         newAXRef: AXWindowRef,
         managedReplacementMetadata: ManagedReplacementMetadata? = nil
     ) -> WindowModel.Entry? {
+        let previousRestoreSnapshot = windows.managedRestoreSnapshot(for: oldToken)
+            ?? windows.managedRestoreSnapshot(for: newToken)
         guard let entry = windows.rekeyWindow(
             from: oldToken,
             to: newToken,
@@ -2289,6 +2317,17 @@ final class WorkspaceManager {
         {
             record.currentToken = newToken
             upsertNativeFullscreenRecord(record)
+        }
+
+        if let updatedRestoreSnapshot = entry.managedRestoreSnapshot,
+           previousRestoreSnapshot != updatedRestoreSnapshot
+        {
+            HotPathDebugMetrics.shared.recordManagedRestoreSnapshotPersistenceAttempt(
+                reason: .replacementRekeyed
+            )
+            HotPathDebugMetrics.shared.recordManagedRestoreSnapshotWrite(
+                reason: .replacementRekeyed
+            )
         }
 
         recordReconcileEvent(
@@ -2316,6 +2355,10 @@ final class WorkspaceManager {
 
         if focusChanged || scratchpadChanged {
             notifySessionStateChanged()
+        }
+
+        if oldToken != newToken {
+            onWindowRekeyed?(oldToken, newToken)
         }
 
         return entry
@@ -2647,6 +2690,7 @@ final class WorkspaceManager {
         _ = removeNativeFullscreenRecord(containing: entry.token)
         handleWindowRemoved(entry.token, in: entry.workspaceId)
         _ = windows.removeWindow(key: entry.token)
+        onWindowRemoved?(entry.token)
         return entry
     }
 
@@ -2814,7 +2858,9 @@ final class WorkspaceManager {
     private func nativeFullscreenCapturedReplacementMetadata(
         for record: NativeFullscreenRecord
     ) -> ManagedReplacementMetadata? {
-        record.restoreSnapshot?.replacementMetadata
+        managedReplacementMetadata(for: record.currentToken)
+            ?? managedReplacementMetadata(for: record.originalToken)
+            ?? record.restoreSnapshot?.replacementMetadata
             ?? managedRestoreSnapshot(for: record.originalToken)?.replacementMetadata
             ?? managedRestoreSnapshot(for: record.currentToken)?.replacementMetadata
     }
@@ -3674,6 +3720,9 @@ private extension WorkspaceManager {
             manager: WorkspaceManager,
             newMonitors: [Monitor]
         ) -> TopologyTransitionPlan? {
+            if WorkspaceManager.forceTopologyReconcileFailureForTests {
+                return nil
+            }
             let previousMonitors = previousMonitorSnapshots(manager: manager)
             let disconnectedCacheEntries = disconnectedCacheEntries(manager: manager)
             guard let result = invoke(
@@ -4262,44 +4311,37 @@ private extension WorkspaceManager {
         }
 
         private static func encode(uuid: UUID) -> omniwm_uuid {
-            let tuple = uuid.uuid
-            let highBytes: [UInt8] = [
-                tuple.0, tuple.1, tuple.2, tuple.3,
-                tuple.4, tuple.5, tuple.6, tuple.7
-            ]
-            let lowBytes: [UInt8] = [
-                tuple.8, tuple.9, tuple.10, tuple.11,
-                tuple.12, tuple.13, tuple.14, tuple.15
-            ]
-            return omniwm_uuid(
-                high: packUUIDWord(highBytes),
-                low: packUUIDWord(lowBytes)
-            )
+            let t = uuid.uuid
+            let high =
+                UInt64(t.0) << 56 | UInt64(t.1) << 48 | UInt64(t.2) << 40 | UInt64(t.3) << 32 |
+                UInt64(t.4) << 24 | UInt64(t.5) << 16 | UInt64(t.6) << 8 | UInt64(t.7)
+            let low =
+                UInt64(t.8) << 56 | UInt64(t.9) << 48 | UInt64(t.10) << 40 | UInt64(t.11) << 32 |
+                UInt64(t.12) << 24 | UInt64(t.13) << 16 | UInt64(t.14) << 8 | UInt64(t.15)
+            return omniwm_uuid(high: high, low: low)
         }
 
         private static func decode(uuid: omniwm_uuid) -> UUID {
-            let highBytes = unpackUUIDWord(uuid.high)
-            let lowBytes = unpackUUIDWord(uuid.low)
+            let h = uuid.high
+            let l = uuid.low
             return UUID(uuid: (
-                highBytes[0], highBytes[1], highBytes[2], highBytes[3],
-                highBytes[4], highBytes[5], highBytes[6], highBytes[7],
-                lowBytes[0], lowBytes[1], lowBytes[2], lowBytes[3],
-                lowBytes[4], lowBytes[5], lowBytes[6], lowBytes[7]
+                UInt8(truncatingIfNeeded: h >> 56),
+                UInt8(truncatingIfNeeded: h >> 48),
+                UInt8(truncatingIfNeeded: h >> 40),
+                UInt8(truncatingIfNeeded: h >> 32),
+                UInt8(truncatingIfNeeded: h >> 24),
+                UInt8(truncatingIfNeeded: h >> 16),
+                UInt8(truncatingIfNeeded: h >> 8),
+                UInt8(truncatingIfNeeded: h),
+                UInt8(truncatingIfNeeded: l >> 56),
+                UInt8(truncatingIfNeeded: l >> 48),
+                UInt8(truncatingIfNeeded: l >> 40),
+                UInt8(truncatingIfNeeded: l >> 32),
+                UInt8(truncatingIfNeeded: l >> 24),
+                UInt8(truncatingIfNeeded: l >> 16),
+                UInt8(truncatingIfNeeded: l >> 8),
+                UInt8(truncatingIfNeeded: l)
             ))
-        }
-
-        private static func packUUIDWord(_ bytes: [UInt8]) -> UInt64 {
-            precondition(bytes.count == 8)
-            return bytes.reduce(into: UInt64.zero) { word, byte in
-                word = (word << 8) | UInt64(byte)
-            }
-        }
-
-        private static func unpackUUIDWord(_ word: UInt64) -> [UInt8] {
-            (0 ..< 8).map { shift in
-                let bitShift = UInt64((7 - shift) * 8)
-                return UInt8(truncatingIfNeeded: word >> bitShift)
-            }
         }
 
         private static func zeroUUID() -> omniwm_uuid {

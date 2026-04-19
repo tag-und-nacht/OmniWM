@@ -395,7 +395,10 @@ final class WindowActionHandler {
                 rememberedFocusToken: token
             )
         )
-        controller.layoutRefreshController.commitWorkspaceTransition(reason: .workspaceTransition) { [weak controller] in
+        controller.layoutRefreshController.commitWorkspaceTransition(
+            affectedWorkspaces: [workspaceId],
+            reason: .workspaceTransition
+        ) { [weak controller] in
             controller?.focusWindow(token)
         }
         return true
@@ -516,7 +519,10 @@ final class WindowActionHandler {
                 rememberedFocusToken: rememberedFocusToken ?? token
             )
         )
-        controller.layoutRefreshController.requestImmediateRelayout(reason: .layoutCommand) { [weak controller] in
+        controller.layoutRefreshController.requestImmediateRelayout(
+            reason: .layoutCommand,
+            affectedWorkspaceIds: [workspaceId]
+        ) { [weak controller] in
             controller?.focusWindow(token)
         }
         if startNiriScrollAnimation {
@@ -543,7 +549,10 @@ final class WindowActionHandler {
         guard let result = controller.workspaceManager.focusWorkspace(named: name) else { return false }
 
         let focusedToken = controller.resolveAndSetWorkspaceFocusToken(for: result.workspace.id)
-        controller.layoutRefreshController.commitWorkspaceTransition(reason: .workspaceTransition) { [weak controller] in
+        controller.layoutRefreshController.commitWorkspaceTransition(
+            affectedWorkspaces: [result.workspace.id],
+            reason: .workspaceTransition
+        ) { [weak controller] in
             if let focusedToken {
                 controller?.focusWindow(focusedToken)
             }

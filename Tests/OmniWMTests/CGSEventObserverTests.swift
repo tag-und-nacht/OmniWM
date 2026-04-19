@@ -200,4 +200,65 @@ private func waitUntilCGSEvents(
         #expect(snapshot.drainRuns == 1)
         #expect(snapshot.drainedEvents == 3)
     }
+
+    @Test @MainActor func releasingReferenceCountedSubscriptionDropsOwnershipWhenUnsubscribeIsUnavailable() {
+        let observer = CGSEventObserver.shared
+        var requests: [[UInt32]] = []
+        var unrequests: [[UInt32]] = []
+
+        observer.resetDebugStateForTests()
+        observer.windowNotificationRequestHandlerForTests = { windowIds in
+            requests.append(windowIds)
+            return true
+        }
+        observer.windowNotificationUnrequestHandlerForTests = { windowIds in
+            unrequests.append(windowIds)
+            return nil
+        }
+        defer { observer.resetDebugStateForTests() }
+
+        #expect(observer.retainWindowNotificationSubscriptions([501]))
+
+        let releasedWindowIds = observer.releaseWindowNotificationSubscriptions([501])
+        let stateAfterRelease = observer.windowNotificationStateForTests()
+
+        #expect(releasedWindowIds == [501])
+        #expect(requests == [[501]])
+        #expect(unrequests == [[501]])
+        #expect(stateAfterRelease.requestedWindowIds == [501])
+        #expect(stateAfterRelease.retainedWindowSubscriptionCounts.isEmpty)
+
+        #expect(observer.retainWindowNotificationSubscriptions([501]))
+        #expect(requests == [[501]])
+        #expect(observer.windowNotificationStateForTests().retainedWindowSubscriptionCounts == [501: 1])
+    }
+
+    @Test @MainActor func successfulUnderlyingUnsubscribeClearsStickyRequestState() {
+        let observer = CGSEventObserver.shared
+        var requests: [[UInt32]] = []
+        var unrequests: [[UInt32]] = []
+
+        observer.resetDebugStateForTests()
+        observer.windowNotificationRequestHandlerForTests = { windowIds in
+            requests.append(windowIds)
+            return true
+        }
+        observer.windowNotificationUnrequestHandlerForTests = { windowIds in
+            unrequests.append(windowIds)
+            return true
+        }
+        defer { observer.resetDebugStateForTests() }
+
+        #expect(observer.retainWindowNotificationSubscriptions([601]))
+        #expect(observer.releaseWindowNotificationSubscriptions([601]) == [601])
+
+        let stateAfterRelease = observer.windowNotificationStateForTests()
+        #expect(requests == [[601]])
+        #expect(unrequests == [[601]])
+        #expect(stateAfterRelease.requestedWindowIds.isEmpty)
+        #expect(stateAfterRelease.retainedWindowSubscriptionCounts.isEmpty)
+
+        #expect(observer.retainWindowNotificationSubscriptions([601]))
+        #expect(requests == [[601], [601]])
+    }
 }

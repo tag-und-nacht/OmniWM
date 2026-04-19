@@ -24,6 +24,7 @@ import QuartzCore
 
     struct RefreshDebugHooks {
         var onFullRescan: ((RefreshReason) async throws -> Bool)?
+        var onRefreshEnqueued: ((ScheduledRefresh) -> Void)?
         var onRelayout: ((RefreshReason, RefreshRoute) async -> Bool)?
         var onVisibilityRefresh: ((RefreshReason) async -> Bool)?
         var onWindowRemoval: ((RefreshReason, [WindowRemovalPayload]) -> Bool)?
@@ -115,6 +116,8 @@ import QuartzCore
         var isIncrementalRefreshInProgress: Bool = false
         var isFullEnumerationInProgress: Bool = false
         var displayLinksByDisplay: [CGDirectDisplayID: CADisplayLink] = [:]
+        var displayIdByLink: [ObjectIdentifier: CGDirectDisplayID] = [:]
+        var scheduledDisplayLinkDisplayIds: Set<CGDirectDisplayID> = []
         var refreshRateByDisplay: [CGDirectDisplayID: Double] = [:]
         var closingAnimationsByDisplay: [CGDirectDisplayID: [Int: ClosingAnimation]] = [:]
         var screenChangeObserver: NSObjectProtocol?
@@ -133,6 +136,7 @@ import QuartzCore
     private var workspaceInactiveHideRetryCountByWindowId: [Int: Int] = [:]
     private var workspaceInactiveHideAwaitingFreshFrameWindowIds: Set<Int> = []
     private let refreshScheduler = RefreshScheduler()
+    var displayLinkScheduleHookForTests: ((CGDirectDisplayID) -> Void)?
 
     func fastFrame(for token: WindowToken, axRef: AXWindowRef) -> CGRect? {
         activeFrameContext?.fastFrame(for: token, axRef: axRef)
@@ -153,6 +157,7 @@ import QuartzCore
     }
 
     func setup() {
+        ScreenLookupCache.shared.refresh()
         detectRefreshRates()
         layoutState.screenChangeObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
@@ -167,23 +172,47 @@ import QuartzCore
 
     private func getOrCreateDisplayLink(for displayId: CGDirectDisplayID) -> CADisplayLink? {
         if let existing = layoutState.displayLinksByDisplay[displayId] {
+            layoutState.displayIdByLink[ObjectIdentifier(existing)] = displayId
             return existing
         }
 
-        guard let screen = NSScreen.screens.first(where: { $0.displayId == displayId }) else {
+        guard let screen = ScreenLookupCache.shared.screen(for: displayId) else {
             return nil
         }
         let link = screen.displayLink(target: self, selector: #selector(displayLinkFired(_:)))
-        layoutState.displayLinksByDisplay[displayId] = link
+        cacheDisplayLink(link, for: displayId)
         return link
     }
 
+    private func cacheDisplayLink(_ link: CADisplayLink, for displayId: CGDirectDisplayID) {
+        layoutState.displayLinksByDisplay[displayId] = link
+        layoutState.displayIdByLink[ObjectIdentifier(link)] = displayId
+    }
+
+    @discardableResult
+    private func removeCachedDisplayLink(for displayId: CGDirectDisplayID) -> CADisplayLink? {
+        guard let link = layoutState.displayLinksByDisplay.removeValue(forKey: displayId) else {
+            return nil
+        }
+        layoutState.displayIdByLink.removeValue(forKey: ObjectIdentifier(link))
+        layoutState.scheduledDisplayLinkDisplayIds.remove(displayId)
+        return link
+    }
+
+    private func scheduleDisplayLinkIfNeeded(for displayId: CGDirectDisplayID) {
+        guard let displayLink = getOrCreateDisplayLink(for: displayId) else { return }
+        guard layoutState.scheduledDisplayLinkDisplayIds.insert(displayId).inserted else { return }
+        displayLink.add(to: .main, forMode: .common)
+        displayLinkScheduleHookForTests?(displayId)
+    }
+
     private func handleScreenParametersChanged() {
+        ScreenLookupCache.shared.refresh()
         detectRefreshRates()
     }
 
     func cleanupForMonitorDisconnect(displayId: CGDirectDisplayID, migrateAnimations: Bool) {
-        if let link = layoutState.displayLinksByDisplay.removeValue(forKey: displayId) {
+        if let link = removeCachedDisplayLink(for: displayId) {
             link.invalidate()
         }
 
@@ -217,8 +246,8 @@ import QuartzCore
     }
 
     @objc private func displayLinkFired(_ displayLink: CADisplayLink) {
-        guard let displayId = layoutState.displayLinksByDisplay.first(where: { $0.value === displayLink })?.key
-        else { return }
+        HotPathDebugMetrics.shared.recordDisplayLinkTick()
+        guard let displayId = layoutState.displayIdByLink[ObjectIdentifier(displayLink)] else { return }
 
         niriHandler.tickScrollAnimation(targetTime: displayLink.targetTimestamp, displayId: displayId)
         dwindleHandler.tickDwindleAnimation(targetTime: displayLink.targetTimestamp, displayId: displayId)
@@ -238,10 +267,7 @@ import QuartzCore
         }
 
         guard niriHandler.registerScrollAnimation(workspaceId, on: targetDisplayId) else { return }
-
-        if let displayLink = getOrCreateDisplayLink(for: targetDisplayId) {
-            displayLink.add(to: .main, forMode: .common)
-        }
+        scheduleDisplayLinkIfNeeded(for: targetDisplayId)
     }
 
     func stopScrollAnimation(for displayId: CGDirectDisplayID) {
@@ -263,10 +289,7 @@ import QuartzCore
 
         guard dwindleHandler.registerDwindleAnimation(workspaceId, monitor: monitor, on: targetDisplayId)
         else { return }
-
-        if let displayLink = getOrCreateDisplayLink(for: targetDisplayId) {
-            displayLink.add(to: .main, forMode: .common)
-        }
+        scheduleDisplayLinkIfNeeded(for: targetDisplayId)
     }
 
     func startWindowCloseAnimation(entry: WindowModel.Entry, monitor: Monitor) {
@@ -298,10 +321,7 @@ import QuartzCore
             animation: animation
         )
         layoutState.closingAnimationsByDisplay[monitor.displayId] = animations
-
-        if let displayLink = getOrCreateDisplayLink(for: monitor.displayId) {
-            displayLink.add(to: .main, forMode: .common)
-        }
+        scheduleDisplayLinkIfNeeded(for: monitor.displayId)
     }
 
     func stopDwindleAnimation(for displayId: CGDirectDisplayID) {
@@ -327,7 +347,7 @@ import QuartzCore
            layoutState.closingAnimationsByDisplay[displayId].map(\.isEmpty) ?? true
         {
             // Idle display links must not remain cached after teardown.
-            if let link = layoutState.displayLinksByDisplay.removeValue(forKey: displayId) {
+            if let link = removeCachedDisplayLink(for: displayId) {
                 link.invalidate()
             }
         }
@@ -434,14 +454,26 @@ import QuartzCore
         // active/inactive classification. Without this, windows on a newly-active
         // workspace are still marked inactive from the previous cycle, causing their
         // frame writes to be silently skipped and leaving blank gaps on screen.
+        let visibilityWorkspaceEntries: [(workspace: WorkspaceDescriptor, entries: [WindowModel.Entry])]?
         if let visibility = plan.effects.visibility {
-            rebuildInactiveWorkspaceWindowSet(activeWorkspaceIds: visibility.activeWorkspaceIds)
+            let workspaceEntries = workspaceEntriesSnapshot(on: controller)
+            rebuildInactiveWorkspaceWindowSet(
+                activeWorkspaceIds: visibility.activeWorkspaceIds,
+                workspaceEntries: workspaceEntries
+            )
+            visibilityWorkspaceEntries = workspaceEntries
+        } else {
+            visibilityWorkspaceEntries = nil
         }
 
         executeLayoutPlans(plan.workspacePlans)
 
         if let visibility = plan.effects.visibility {
-            hideInactiveWorkspaces(activeWorkspaceIds: visibility.activeWorkspaceIds)
+            hideInactiveWorkspaces(
+                activeWorkspaceIds: visibility.activeWorkspaceIds,
+                workspaceEntries: visibilityWorkspaceEntries,
+                rebuildInactiveWorkspaceWindowSet: false
+            )
         }
 
         if !plan.effects.nativeFullscreenRestoreWorkspaceIds.isEmpty,
@@ -809,6 +841,7 @@ import QuartzCore
 
         do {
             var plan = try await buildRelayoutExecutionPlan(
+                refresh: refresh,
                 useScrollAnimationPath: useScrollAnimationPath,
                 recoverFocus: recoverFocus,
                 affectedWorkspaceIds: refresh.affectedWorkspaceIds
@@ -965,10 +998,9 @@ import QuartzCore
         refreshScheduler.clearPostLayoutActions()
         controller?.runtime?.resetRefreshOrchestration()
 
-        for (_, link) in layoutState.displayLinksByDisplay {
-            link.invalidate()
+        for displayId in Array(layoutState.displayLinksByDisplay.keys) {
+            removeCachedDisplayLink(for: displayId)?.invalidate()
         }
-        layoutState.displayLinksByDisplay.removeAll()
         niriHandler.scrollAnimationByDisplay.removeAll()
         dwindleHandler.dwindleAnimationByDisplay.removeAll()
         layoutState.closingAnimationsByDisplay.removeAll()
@@ -1038,6 +1070,7 @@ import QuartzCore
     }
 
     private func buildRelayoutExecutionPlan(
+        refresh: ScheduledRefresh,
         useScrollAnimationPath: Bool,
         recoverFocus: Bool,
         affectedWorkspaceIds: Set<WorkspaceDescriptor.ID>
@@ -1072,7 +1105,10 @@ import QuartzCore
 
         var effects = RefreshExecutionEffects()
         effects.visibility = .init(activeWorkspaceIds: activeWorkspaceIds)
-        effects.requestWorkspaceBarRefresh = true
+        effects.requestWorkspaceBarRefresh = shouldRequestWorkspaceBarRefresh(
+            for: refresh,
+            workspacePlans: workspacePlans
+        )
         effects.updateTabbedOverlays = updateTabbedOverlays
         effects.nativeFullscreenRestoreWorkspaceIds = nativeFullscreenRestoreWorkspaceIds(
             from: workspacePlans
@@ -1087,6 +1123,46 @@ import QuartzCore
         }
 
         return RefreshExecutionPlan(workspacePlans: workspacePlans, effects: effects)
+    }
+
+    private func shouldRequestWorkspaceBarRefresh(
+        for refresh: ScheduledRefresh,
+        workspacePlans: [WorkspaceLayoutPlan]
+    ) -> Bool {
+        switch refresh.reason {
+        case .workspaceTransition,
+             .appActivationTransition,
+             .overviewMutation,
+             .axWindowCreated,
+             .windowRuleReevaluation:
+            return true
+
+        case .layoutCommand:
+            // Focus handoffs attach a post-layout action; geometry-only commands do not.
+            if !refresh.postLayoutAttachmentIds.isEmpty {
+                return true
+            }
+
+            return workspacePlans.contains { plan in
+                plan.animationDirectives.contains { directive in
+                    if case .activateWindow = directive {
+                        return true
+                    }
+                    return false
+                }
+            }
+
+        case .layoutConfigChanged,
+             .monitorSettingsChanged,
+             .gapsChanged,
+             .workspaceLayoutToggled,
+             .axWindowChanged,
+             .interactiveGesture:
+            return false
+
+        default:
+            return false
+        }
     }
 
     private func buildWindowRemovalExecutionPlan(
@@ -1554,6 +1630,7 @@ import QuartzCore
         shouldDropWhileBusy: Bool = false
     ) {
         recordRefreshRequest(refresh.reason)
+        debugHooks.onRefreshEnqueued?(refresh)
         if let runtime = controller?.runtime {
             _ = runtime.requestRefresh(
                 .init(
@@ -1731,7 +1808,7 @@ import QuartzCore
     }
 
     func backingScale(for monitor: Monitor) -> CGFloat {
-        NSScreen.screens.first(where: { $0.displayId == monitor.displayId })?.backingScaleFactor ?? 2.0
+        ScreenLookupCache.shared.backingScale(for: monitor.displayId)
     }
 
     private func workspaceEntriesSnapshot(
@@ -1742,28 +1819,11 @@ import QuartzCore
         }
     }
 
-    private func rebuildInactiveWorkspaceWindowSet(activeWorkspaceIds: Set<WorkspaceDescriptor.ID>) {
+    private func rebuildInactiveWorkspaceWindowSet(
+        activeWorkspaceIds: Set<WorkspaceDescriptor.ID>,
+        workspaceEntries: [(workspace: WorkspaceDescriptor, entries: [WindowModel.Entry])]
+    ) {
         guard let controller else { return }
-        var allEntries: [(workspaceId: WorkspaceDescriptor.ID, windowId: Int)] = []
-        for workspace in controller.workspaceManager.workspaces {
-            for entry in controller.workspaceManager.entries(in: workspace.id) {
-                allEntries.append((workspace.id, entry.windowId))
-            }
-        }
-        controller.axManager.updateInactiveWorkspaceWindows(
-            allEntries: allEntries,
-            activeWorkspaceIds: activeWorkspaceIds
-        )
-    }
-
-    func hideInactiveWorkspaces(activeWorkspaceIds: Set<WorkspaceDescriptor.ID>) {
-        guard let controller else { return }
-        let workspaceEntries = workspaceEntriesSnapshot(on: controller)
-
-        // Rebuild the workspace-level frame suppression set (live check in applyFramesParallel).
-        // Note: this is also called earlier in executeRefreshExecutionPlan to unblock frame
-        // writes for newly-active workspaces. The rebuild here keeps the set consistent with
-        // the snapshot used for the hide pass below.
         var allEntries: [(workspaceId: WorkspaceDescriptor.ID, windowId: Int)] = []
         allEntries.reserveCapacity(workspaceEntries.reduce(into: 0) { $0 += $1.entries.count })
         for snapshot in workspaceEntries {
@@ -1775,12 +1835,28 @@ import QuartzCore
             allEntries: allEntries,
             activeWorkspaceIds: activeWorkspaceIds
         )
+    }
+
+    func hideInactiveWorkspaces(
+        activeWorkspaceIds: Set<WorkspaceDescriptor.ID>,
+        workspaceEntries: [(workspace: WorkspaceDescriptor, entries: [WindowModel.Entry])]? = nil,
+        rebuildInactiveWorkspaceWindowSet shouldRebuildInactiveWorkspaceWindowSet: Bool = true
+    ) {
+        guard let controller else { return }
+        let resolvedWorkspaceEntries = workspaceEntries ?? workspaceEntriesSnapshot(on: controller)
+
+        if shouldRebuildInactiveWorkspaceWindowSet {
+            rebuildInactiveWorkspaceWindowSet(
+                activeWorkspaceIds: activeWorkspaceIds,
+                workspaceEntries: resolvedWorkspaceEntries
+            )
+        }
 
         // Bulk cancel in-flight frame jobs for all inactive workspace windows upfront,
         // before the per-window hide loop, to prevent AX batch races with SkyLight moves.
         var inactiveWindowJobs: [(pid: pid_t, windowId: Int)] = []
         let hiddenPlacementMonitors = controller.workspaceManager.monitors.map(HiddenPlacementMonitorContext.init)
-        for snapshot in workspaceEntries where !activeWorkspaceIds.contains(snapshot.workspace.id) {
+        for snapshot in resolvedWorkspaceEntries where !activeWorkspaceIds.contains(snapshot.workspace.id) {
             for entry in snapshot.entries {
                 inactiveWindowJobs.append((entry.handle.pid, entry.windowId))
             }
@@ -1790,7 +1866,7 @@ import QuartzCore
         }
 
         let preferredSides = preferredHideSides(for: controller.workspaceManager.monitors)
-        for snapshot in workspaceEntries where !activeWorkspaceIds.contains(snapshot.workspace.id) {
+        for snapshot in resolvedWorkspaceEntries where !activeWorkspaceIds.contains(snapshot.workspace.id) {
             guard let monitor = controller.workspaceManager.monitor(for: snapshot.workspace.id) else { continue }
             let preferredSide = preferredSides[monitor.id] ?? .right
             hideWorkspace(
@@ -1853,12 +1929,14 @@ import QuartzCore
         let verifyEpsilon: CGFloat = 1.0
         for plan in plans {
             if let observedOrigin = observedWindowOrigin(plan.entry),
-               abs(observedOrigin.x - plan.origin.x) > verifyEpsilon
-               || abs(observedOrigin.y - plan.origin.y) > verifyEpsilon
+               abs(observedOrigin.x - plan.origin.x) <= verifyEpsilon,
+               abs(observedOrigin.y - plan.origin.y) <= verifyEpsilon
             {
-                let fallbackFrame = CGRect(origin: plan.origin, size: plan.frameSize)
-                _ = AXWindowService.setFrame(plan.entry.axRef, frame: fallbackFrame)
+                continue
             }
+
+            let fallbackFrame = CGRect(origin: plan.origin, size: plan.frameSize)
+            _ = AXWindowService.setFrame(plan.entry.axRef, frame: fallbackFrame)
         }
     }
 
@@ -1868,8 +1946,10 @@ import QuartzCore
 
         var verifiedTokens: Set<WindowToken> = []
         verifiedTokens.reserveCapacity(plans.count)
-        for plan in plans where verifyAppliedHideOrigin(for: plan.entry, expectedOrigin: plan.origin) {
-            verifiedTokens.insert(plan.entry.token)
+        for plan in plans {
+            if verifyAppliedHideOrigin(for: plan.entry, expectedOrigin: plan.origin) {
+                verifiedTokens.insert(plan.entry.token)
+            }
         }
         return verifiedTokens
     }
@@ -2205,12 +2285,11 @@ import QuartzCore
         expectedOrigin: CGPoint
     ) -> Bool {
         let verifyEpsilon: CGFloat = 1.0
-        let candidateOrigins: [CGPoint] = [
+        let candidateOrigins = [
             observedWindowOrigin(entry),
             controller?.axManager.lastAppliedFrame(for: entry.windowId)?.origin,
             (try? AXWindowService.frame(entry.axRef))?.origin,
         ].compactMap { $0 }
-
         return candidateOrigins.contains { observedOrigin in
             abs(observedOrigin.x - expectedOrigin.x) <= verifyEpsilon
                 && abs(observedOrigin.y - expectedOrigin.y) <= verifyEpsilon
@@ -2484,7 +2563,11 @@ import QuartzCore
 
         clearHiddenRecord(for: pendingTransaction.token)
         if let confirmedFrame {
-            controller.axManager.confirmFrameWrite(for: pendingTransaction.windowId, frame: confirmedFrame)
+            controller.axManager.confirmFrameWrite(
+                for: pendingTransaction.windowId,
+                pid: pendingTransaction.pid,
+                frame: confirmedFrame
+            )
         }
         for action in pendingTransaction.postSuccessActions {
             action()
@@ -2950,7 +3033,6 @@ final class LayoutDiffExecutor {
                 continue
             }
             guard entry.layoutReason != .nativeFullscreen else { continue }
-            controller.recordManagedRestoreGeometry(for: change.token, frame: change.frame)
             if pendingRevealTokens.contains(change.token) {
                 controller.axManager.forceApplyNextFrame(for: entry.windowId)
             }
@@ -2967,7 +3049,11 @@ final class LayoutDiffExecutor {
             }
         }
 
-        if !frameUpdates.isEmpty {
+        var appliedFrameTokens: Set<WindowToken> = []
+        if !plan.skipFrameApplicationForAnimation && !frameUpdates.isEmpty {
+            appliedFrameTokens.formUnion(
+                frameUpdates.map { WindowToken(pid: $0.pid, windowId: $0.windowId) }
+            )
             let terminalObserver: AXManager.FrameApplicationTerminalObserver? = if nativeFullscreenRestoreFramesByToken
                 .isEmpty
             {
@@ -2984,20 +3070,23 @@ final class LayoutDiffExecutor {
         }
 
         if !revealFrameUpdates.isEmpty {
+            appliedFrameTokens.formUnion(
+                revealFrameUpdates.map { WindowToken(pid: $0.pid, windowId: $0.windowId) }
+            )
             controller.axManager.applyFramesParallel(
                 revealFrameUpdates,
                 terminalObserver: { [weak refreshController] result in
                     refreshController?.completePendingRevealTransaction(with: result)
                     handleNativeFullscreenRestoreTerminalResult(result)
-                    if let confirmedFrame = result.confirmedFrame {
-                        refreshController?.controller?.recordManagedRestoreGeometry(
-                            for: WindowToken(pid: result.pid, windowId: result.windowId),
-                            frame: confirmedFrame
-                        )
-                    }
                 }
             )
         }
+
+        applyManagedRestoreMaterialStateChanges(
+            plan.managedRestoreMaterialStateChanges,
+            excluding: appliedFrameTokens,
+            controller: controller
+        )
 
         switch diff.borderMode {
         case .none:
@@ -3020,6 +3109,25 @@ final class LayoutDiffExecutor {
         return controller.workspaceManager.monitors.first(where: { $0.displayId == snapshot.displayId })
     }
 
+    private func applyManagedRestoreMaterialStateChanges(
+        _ changes: [ManagedRestoreMaterialStateChange],
+        excluding appliedFrameTokens: Set<WindowToken>,
+        controller: WMController
+    ) {
+        guard !changes.isEmpty else { return }
+
+        var seenTokens: Set<WindowToken> = []
+        for change in changes
+            where !appliedFrameTokens.contains(change.token)
+            && seenTokens.insert(change.token).inserted
+        {
+            controller.recordManagedRestoreGeometryIfMaterialStateChanged(
+                for: CGWindowID(change.token.windowId),
+                reason: change.reason
+            )
+        }
+    }
+
     private func applyHiddenEntryUpdates(
         _ hiddenEntries: [(entry: WindowModel.Entry, request: LayoutHideRequest)],
         controller: WMController,
@@ -3030,7 +3138,8 @@ final class LayoutDiffExecutor {
         hiddenJobs.reserveCapacity(hiddenEntries.count)
         var hidePlans: [LayoutRefreshController.WindowPositionPlan] = []
         var hideOriginsToRemember: [(token: WindowToken, origin: CGPoint)] = []
-        var hiddenNativeFullscreenRestoreFinalizeTokens: Set<WindowToken> = []
+        var finalizeTokensAlreadyHidden: Set<WindowToken> = []
+        var finalizeTokensMovable: Set<WindowToken> = []
 
         for (entry, request) in hiddenEntries {
             let nativeFullscreenRestoreFrameHint: CGRect? = if nativeFullscreenRestoreFinalizeTokens
@@ -3063,7 +3172,7 @@ final class LayoutDiffExecutor {
                 hidePlans.append(plan)
                 hideOriginsToRemember.append((token: entry.token, origin: plan.origin))
                 if nativeFullscreenRestoreFinalizeTokens.contains(entry.token) {
-                    hiddenNativeFullscreenRestoreFinalizeTokens.insert(entry.token)
+                    finalizeTokensMovable.insert(entry.token)
                 }
             case let .alreadyHidden(hiddenState, origin):
                 controller.workspaceManager.setHiddenState(
@@ -3077,7 +3186,7 @@ final class LayoutDiffExecutor {
                 hiddenJobs.append((entry.handle.pid, entry.windowId))
                 refreshController.rememberHiddenOrigin(for: entry.token, origin: origin)
                 if nativeFullscreenRestoreFinalizeTokens.contains(entry.token) {
-                    hiddenNativeFullscreenRestoreFinalizeTokens.insert(entry.token)
+                    finalizeTokensAlreadyHidden.insert(entry.token)
                 }
             case .unavailable:
                 continue
@@ -3097,8 +3206,9 @@ final class LayoutDiffExecutor {
                     origin: hideOrigin.origin
                 )
             }
+            finalizeTokensMovable.formIntersection(verifiedHideTokens)
         }
-        for token in hiddenNativeFullscreenRestoreFinalizeTokens {
+        for token in finalizeTokensAlreadyHidden.union(finalizeTokensMovable) {
             _ = controller.workspaceManager.finalizeNativeFullscreenRestore(for: token)
         }
     }

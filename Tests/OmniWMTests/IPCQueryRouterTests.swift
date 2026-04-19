@@ -273,7 +273,10 @@ private func prepareIPCQueryRouterNiriState(
         #expect(result.apps.first?.appName == "Shared App")
     }
 
-    @Test func focusedWindowQueryUsesManagedFocusAndFastMetadata() {
+    @Test func focusedWindowQueryUsesManagedFocusAndFastMetadata() async {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
         let controller = makeLayoutPlanTestController()
         defer {
             AXWindowService.fastFrameProviderForTests = nil
@@ -636,6 +639,7 @@ private func prepareIPCQueryRouterNiriState(
         #expect(result.traceLimit == 5)
         #expect(result.snapshot.contains(String(describing: token)))
         #expect(result.trace.contains("window_mode_changed"))
+        #expect(result.hotPathMetrics.contains("disabled"))
     }
 }
 

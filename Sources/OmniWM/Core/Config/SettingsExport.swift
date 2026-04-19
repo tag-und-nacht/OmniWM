@@ -34,7 +34,7 @@ struct SettingsExport: Codable, Equatable {
     var focusFollowsMouse: Bool
     var moveMouseToFocusedWindow: Bool
     var focusFollowsWindowToMonitor: Bool
-    var mouseWarpMonitorOrder: [String]
+    var mouseWarpMonitorOrder: [OutputId]
     var mouseWarpAxis: String?
     var mouseWarpMargin: Int
     var gapSize: Double

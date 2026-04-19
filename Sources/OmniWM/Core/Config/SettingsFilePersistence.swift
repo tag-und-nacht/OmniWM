@@ -16,7 +16,7 @@ final class SettingsFilePersistence {
         }
     }
 
-    nonisolated static let configVersion = 4
+    nonisolated static let configVersion = 5
     nonisolated static let defaultDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".config/omniwm", isDirectory: true)
     nonisolated static let fileName = "settings.toml"

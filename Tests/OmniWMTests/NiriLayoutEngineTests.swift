@@ -5595,7 +5595,7 @@ private func makeCenteredCrossMonitorFixture(
             Issue.record("Expected visible seeding plan for visibility-transition test")
             return
         }
-        controller.layoutRefreshController.executeLayoutPlans(seededVisiblePlans)
+        await executeAndSettleLayoutPlans(seededVisiblePlans, on: controller)
 
         controller.workspaceManager.withNiriViewportState(for: workspaceId) { state in
             state.viewOffsetPixels = .static(0)
@@ -5610,7 +5610,7 @@ private func makeCenteredCrossMonitorFixture(
         }
 
         #expect(hasHideVisibilityChange(initialPlan.diff.visibilityChanges, token: transitioningToken, side: .right))
-        controller.layoutRefreshController.executeLayoutPlans(initialPlans)
+        await executeAndSettleLayoutPlans(initialPlans, on: controller)
 
         let stableHiddenPlans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
             activeWorkspaces: [workspaceId]
@@ -5636,7 +5636,7 @@ private func makeCenteredCrossMonitorFixture(
 
         #expect(hasShowVisibilityChange(revealPlan.diff.visibilityChanges, token: transitioningToken))
         #expect(!hasHideVisibilityChange(revealPlan.diff.visibilityChanges, token: transitioningToken))
-        controller.layoutRefreshController.executeLayoutPlans(revealPlans)
+        await executeAndSettleLayoutPlans(revealPlans, on: controller)
 
         let stableVisiblePlans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
             activeWorkspaces: [workspaceId]
@@ -6634,13 +6634,13 @@ private func makeCenteredCrossMonitorFixture(
 
         setSelection(activeIndex: 1, visibleStartIndex: 0)
         controller.niriLayoutHandler.focusNeighbor(direction: .right)
-        await waitForLayoutPlanRefreshWork(on: controller)
 
         let firstMoveState = controller.workspaceManager.niriViewportState(for: workspaceId)
         #expect(controller.workspaceManager.preferredFocusToken(in: workspaceId) == windows[2].token)
         #expect(firstMoveState.viewOffsetPixels.isAnimating)
         #expect(abs(viewportStart(for: firstMoveState, columns: columns, gap: gap) - columnStride) < 0.1)
 
+        await waitForLayoutPlanRefreshWork(on: controller)
         settleViewport(on: controller, workspaceId: workspaceId)
         controller.niriLayoutHandler.focusNeighbor(direction: .left)
         await waitForLayoutPlanRefreshWork(on: controller)

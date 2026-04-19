@@ -60,6 +60,45 @@ private func setScratchpadTestFrame(
 }
 
 @Suite(.serialized) struct WMControllerScratchpadTests {
+    @Test @MainActor func assignFocusedWindowToScratchpadScopesImmediateRelayoutToOriginWorkspace() async {
+        let fixture = makeTwoMonitorLayoutPlanTestController()
+        let controller = fixture.controller
+        let token = addLayoutPlanTestWindow(
+            on: controller,
+            workspaceId: fixture.primaryWorkspaceId,
+            windowId: 7_032
+        )
+        setScratchpadTestFrame(
+            on: controller,
+            token: token,
+            frame: CGRect(x: 180, y: 160, width: 620, height: 420)
+        )
+        _ = controller.workspaceManager.setManagedFocus(
+            token,
+            in: fixture.primaryWorkspaceId,
+            onMonitor: fixture.primaryMonitor.id
+        )
+
+        var enqueuedRefreshes: [ScheduledRefresh] = []
+        controller.layoutRefreshController.debugHooks.onRefreshEnqueued = { refresh in
+            enqueuedRefreshes.append(refresh)
+        }
+        controller.layoutRefreshController.debugHooks.onRelayout = { _, _ in
+            true
+        }
+
+        controller.assignFocusedWindowToScratchpad()
+        await waitForLayoutPlanRefreshWork(on: controller)
+
+        guard let refresh = enqueuedRefreshes.last(where: { $0.reason == .layoutCommand }) else {
+            Issue.record("Missing scoped scratchpad relayout")
+            return
+        }
+
+        #expect(refresh.kind == .immediateRelayout)
+        #expect(refresh.affectedWorkspaceIds == [fixture.primaryWorkspaceId])
+    }
+
     @Test @MainActor func assignFocusedWindowToScratchpadHidesTiledWindowAndRejectsSecondAssignment() {
         let controller = makeLayoutPlanTestController()
         guard let monitor = controller.workspaceManager.monitors.first,
@@ -225,6 +264,9 @@ private func setScratchpadTestFrame(
     }
 
     @Test @MainActor func toggleScratchpadWindowFrontsWindowOnlyAfterAsyncRevealSucceeds() async throws {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
         let recorder = ScratchpadFocusRecorder()
         let fixture = makeTwoMonitorLayoutPlanTestController(
             primaryMonitor: makeLayoutPlanPrimaryTestMonitor(name: "Primary"),
@@ -269,10 +311,13 @@ private func setScratchpadTestFrame(
             return
         }
 
+        let writeTimeout: DispatchTimeInterval = .seconds(10)
+        let startedWrite = DispatchSemaphore(value: 0)
         let releaseWrite = DispatchSemaphore(value: 0)
         AXWindowService.setFrameResultProviderForTests = { axRef, frame, currentFrameHint in
             if axRef.windowId == token.windowId {
-                _ = releaseWrite.wait(timeout: .now() + 1)
+                startedWrite.signal()
+                _ = releaseWrite.wait(timeout: .now() + writeTimeout)
             }
 
             return scratchpadTestWriteResult(
@@ -289,7 +334,14 @@ private func setScratchpadTestFrame(
 
         controller.toggleScratchpadWindow()
 
-        let observedPendingReveal = await waitForConditionForTests {
+        let sawWriteStart = await Task.detached {
+            waitForSemaphoreForTests(startedWrite, timeout: .now() + writeTimeout) == .success
+        }.value
+        #expect(sawWriteStart)
+
+        let observedPendingReveal = await waitForConditionForTests(
+            timeoutNanoseconds: 10_000_000_000
+        ) {
             controller.workspaceManager.hiddenState(for: token)?.isScratchpad == true
                 && controller.axManager.hasPendingFrameWrite(for: token.windowId)
         }
@@ -301,7 +353,9 @@ private func setScratchpadTestFrame(
 
         releaseWrite.signal()
 
-        let observedFronting = await waitForConditionForTests {
+        let observedFronting = await waitForConditionForTests(
+            timeoutNanoseconds: 10_000_000_000
+        ) {
             recorder.events.count == 3
         }
 

@@ -70,7 +70,9 @@ typealias CommandPaletteSummonWindowRightHandler =
 
 @MainActor
 struct CommandPaletteEnvironment {
-    var frontmostApplication: () -> NSRunningApplication? = { NSWorkspace.shared.frontmostApplication }
+    var frontmostApplication: () -> NSRunningApplication? = {
+        FrontmostApplicationState.shared.runningApplication
+    }
     var runningApplication: (pid_t) -> NSRunningApplication? = { NSRunningApplication(processIdentifier: $0) }
     var ownBundleIdentifier: () -> String? = { Bundle.main.bundleIdentifier }
     var fetchMenuItems: (pid_t) -> [MenuItemModel] = { MenuAnywhereFetcher().fetchMenuItemsSync(for: $0) }
