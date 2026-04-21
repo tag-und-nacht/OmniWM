@@ -12,9 +12,6 @@ import Testing
         }
 
         let state = FrontmostApplicationState(applicationProvider: { nil })
-        HotPathDebugMetrics.shared.setEnabledForTests(true)
-        HotPathDebugMetrics.shared.reset()
-        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
 
         let activation = Notification(
             name: NSWorkspace.didActivateApplicationNotification,
@@ -33,11 +30,9 @@ import Testing
         #expect(activationSnapshot.pid == app.processIdentifier)
         #expect(activationSnapshot.bundleIdentifier == app.bundleIdentifier)
         #expect(activationSnapshot.isLockScreen == false)
-        #expect(HotPathDebugMetrics.shared.snapshot.frontmostActivationEvents == 1)
 
         #expect(state.clearIfNeeded(from: termination) == true)
         #expect(state.snapshot == nil)
-        #expect(HotPathDebugMetrics.shared.snapshot.frontmostTerminationEvents == 1)
     }
 
     @Test func primeFromWorkspaceUsesInjectedProvider() throws {

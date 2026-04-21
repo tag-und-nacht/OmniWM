@@ -74,9 +74,6 @@ private func makeRecordingPanelFactory(
         let controller = makeLayoutPlanTestController(monitors: [monitor])
         let manager = WorkspaceBarManager()
 
-        HotPathDebugMetrics.shared.setEnabledForTests(true)
-        HotPathDebugMetrics.shared.reset()
-        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
 
         manager.monitorProvider = { [monitor] }
         manager.screenProvider = { _ in nil }
@@ -84,11 +81,9 @@ private func makeRecordingPanelFactory(
         manager.setup(controller: controller, settings: controller.settings)
         defer { manager.cleanup() }
 
-        #expect(HotPathDebugMetrics.shared.snapshot.workspaceBarMeasuredWidthCalls == 1)
 
         manager.update()
 
-        #expect(HotPathDebugMetrics.shared.snapshot.workspaceBarMeasuredWidthCalls == 1)
     }
 
     @Test @MainActor func nonWidthAppearanceChangesReuseCachedMeasurementWidth() {
@@ -96,9 +91,6 @@ private func makeRecordingPanelFactory(
         let controller = makeLayoutPlanTestController(monitors: [monitor])
         let manager = WorkspaceBarManager()
 
-        HotPathDebugMetrics.shared.setEnabledForTests(true)
-        HotPathDebugMetrics.shared.reset()
-        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
 
         manager.monitorProvider = { [monitor] }
         manager.screenProvider = { _ in nil }
@@ -106,12 +98,10 @@ private func makeRecordingPanelFactory(
         manager.setup(controller: controller, settings: controller.settings)
         defer { manager.cleanup() }
 
-        #expect(HotPathDebugMetrics.shared.snapshot.workspaceBarMeasuredWidthCalls == 1)
 
         controller.settings.workspaceBarBackgroundOpacity = 0.35
         manager.updateSettings()
 
-        #expect(HotPathDebugMetrics.shared.snapshot.workspaceBarMeasuredWidthCalls == 1)
     }
 
     @Test @MainActor func groupedWindowBadgeWidthChangeRemeasuresAndExpandsFrame() throws {
@@ -143,9 +133,6 @@ private func makeRecordingPanelFactory(
         let panelStore = RecordingPanelStore()
         let frameRecorder = FrameApplyRecorder()
 
-        HotPathDebugMetrics.shared.setEnabledForTests(true)
-        HotPathDebugMetrics.shared.reset()
-        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
 
         manager.monitorProvider = { [monitor] }
         manager.screenProvider = { _ in nil }
@@ -161,7 +148,6 @@ private func makeRecordingPanelFactory(
         let initialSnapshot = try #require(manager.snapshotForTests(on: monitor.id))
         let initialWorkspaceItem = try #require(initialSnapshot.items.first(where: { $0.id == workspaceId }))
 
-        #expect(HotPathDebugMetrics.shared.snapshot.workspaceBarMeasuredWidthCalls == 1)
         #expect(initialWorkspaceItem.tiledWindows.count == 1)
         #expect(initialWorkspaceItem.tiledWindows.first?.windowCount == 9)
 
@@ -177,7 +163,6 @@ private func makeRecordingPanelFactory(
 
         let updatedSnapshot = try #require(manager.snapshotForTests(on: monitor.id))
         let updatedWorkspaceItem = try #require(updatedSnapshot.items.first(where: { $0.id == workspaceId }))
-        #expect(HotPathDebugMetrics.shared.snapshot.workspaceBarMeasuredWidthCalls == 2)
         #expect(updatedWorkspaceItem.tiledWindows.count == 1)
         #expect(updatedWorkspaceItem.tiledWindows.first?.windowCount == 10)
     }

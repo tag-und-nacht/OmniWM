@@ -280,15 +280,6 @@ final class IPCQueryRouter {
         )
     }
 
-    func reconcileDebugResult(traceLimit: Int = 50) -> IPCReconcileDebugQueryResult {
-        IPCReconcileDebugQueryResult(
-            snapshot: controller.workspaceManager.reconcileSnapshotDump(),
-            trace: controller.workspaceManager.reconcileTraceDump(limit: traceLimit),
-            traceLimit: traceLimit,
-            hotPathMetrics: HotPathDebugMetrics.shared.debugDump()
-        )
-    }
-
     private func workspaceBarWorkspace(from item: WorkspaceBarItem) -> IPCWorkspaceBarWorkspace {
         IPCWorkspaceBarWorkspace(
             id: workspaceIdentifier(item.id),

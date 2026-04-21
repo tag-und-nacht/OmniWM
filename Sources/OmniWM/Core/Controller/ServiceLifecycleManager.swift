@@ -180,8 +180,8 @@ final class ServiceLifecycleManager {
         performPostUpdateActions: Bool = true
     ) {
         guard let controller else { return }
-        // Invalidate border cache so it gets fully recomputed after monitor change
-        // (prevents stale geometry when display ID or coordinate space changes, e.g. KVM switch)
+
+
         controller.hideKeyboardFocusBorder(
             source: .monitorConfigurationChanged,
             reason: "monitor configuration changed"

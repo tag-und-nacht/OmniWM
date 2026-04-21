@@ -203,21 +203,6 @@ private func assertRoundTrip<T: Codable & Equatable>(_ value: T) throws {
             )
         )
         try assertRoundTrip(
-            IPCReconcileDebugQueryResult(
-                snapshot: "focused=nil",
-                trace: "#1 event=system-wake",
-                traceLimit: 50
-            )
-        )
-        let legacyPayload = """
-        {"snapshot":"focused=nil","trace":"#1 event=system-wake","traceLimit":50}
-        """.data(using: .utf8)!
-        let decodedLegacyPayload = try JSONDecoder().decode(
-            IPCReconcileDebugQueryResult.self,
-            from: legacyPayload
-        )
-        #expect(decodedLegacyPayload.hotPathMetrics.isEmpty)
-        try assertRoundTrip(
             IPCQueriesQueryResult(
                 queries: IPCAutomationManifest.queryDescriptors
             )

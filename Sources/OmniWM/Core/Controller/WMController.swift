@@ -24,9 +24,6 @@ enum NativeFullscreenRestoreSeedPath: String {
 
 @MainActor @Observable
 final class WMController {
-    private static let frontingTraceLoggingEnabled =
-        ProcessInfo.processInfo.environment["OMNIWM_DEBUG_SCRATCHPAD_REVEAL"] == "1"
-
     struct WorkspaceBarRefreshDebugState {
         var requestCount: Int = 0
         var scheduledCount: Int = 0
@@ -2200,15 +2197,9 @@ extension WMController {
         windowId: Int,
         axRef: AXWindowRef
     ) {
-        recordFrontingTrace(pid: pid, windowId: windowId)
         windowFocusOperations.activateApp(pid)
         windowFocusOperations.focusSpecificWindow(pid, UInt32(windowId), axRef.element)
         windowFocusOperations.raiseWindow(axRef.element)
-    }
-
-    private func recordFrontingTrace(pid: pid_t, windowId: Int) {
-        guard Self.frontingTraceLoggingEnabled else { return }
-        fputs("[ScratchpadFronting] pid=\(pid) windowId=\(windowId)\n", stderr)
     }
 
     func restoreQuakeTerminalFocus(to target: QuakeTerminalRestoreTarget) {
@@ -2297,13 +2288,6 @@ extension WMController {
                 )
                 let request = focusBridge.activeManagedRequest(requestId: requestId)
                 assert(request?.token == token, "Unexpected focus request id drift for \(token)")
-                recordNiriCreateFocusTrace(
-                    .pendingFocusStarted(
-                        requestId: requestId,
-                        token: token,
-                        workspaceId: workspaceId
-                    )
-                )
             case let .clearManagedFocusState(requestId, token, workspaceId):
                 axEventHandler.clearManagedFocusStateForOrchestration(
                     requestId: requestId,
@@ -2522,17 +2506,9 @@ extension WMController {
         reason: ManagedRestoreTriggerReason = .frameConfirmed,
         frameConfirmResult: FrameConfirmResult? = nil
     ) -> Bool {
-        HotPathDebugMetrics.shared.recordManagedRestoreGeometry(reason: reason)
-        if let frameConfirmResult {
-            HotPathDebugMetrics.shared.recordManagedRestoreSnapshotFrameConfirmResult(
-                frameConfirmResult
-            )
-        }
         guard let entry = workspaceManager.entry(for: token) else { return false }
         guard workspaceManager.layoutReason(for: token) != .nativeFullscreen else { return false }
         if shouldShortCircuitManagedRestoreSnapshot(for: entry, frame: frame) {
-            HotPathDebugMetrics.shared.recordManagedRestoreSnapshotShortCircuit()
-            HotPathDebugMetrics.shared.recordManagedRestoreSnapshotSemanticNoOp(reason: reason)
             return false
         }
         guard let preview = makeManagedRestoreSnapshotPreview(for: entry, frame: frame) else {
@@ -2545,14 +2521,11 @@ extension WMController {
                for: preview.token
            )
         {
-            HotPathDebugMetrics.shared.recordManagedRestoreSnapshotSemanticNoOp(reason: reason)
             return false
         }
 
         let snapshot = makeManagedWindowRestoreSnapshot(from: preview)
-        HotPathDebugMetrics.shared.recordManagedRestoreSnapshotPersistenceAttempt(reason: reason)
         guard workspaceManager.shouldPersistManagedRestoreSnapshot(snapshot, for: token) else {
-            HotPathDebugMetrics.shared.recordManagedRestoreSnapshotSemanticNoOp(reason: reason)
             return false
         }
 
@@ -2565,7 +2538,6 @@ extension WMController {
             topologyProfile: snapshot.topologyProfile,
             replacementMetadata: snapshot.replacementMetadata
         )
-        HotPathDebugMetrics.shared.recordManagedRestoreSnapshotWrite(reason: reason)
         return true
     }
 
@@ -2791,9 +2763,6 @@ extension WMController {
         provisionalMetadata: ManagedReplacementMetadata,
         needsFactRefresh: Bool
     ) -> ManagedReplacementMetadata {
-        HotPathDebugMetrics.shared.recordManagedRestoreReplacementMetadata(
-            didFetchFacts: needsFactRefresh
-        )
         var metadata = provisionalMetadata
         if needsFactRefresh {
             let appInfo = resolvedAppInfo(for: entry.pid)
@@ -3168,7 +3137,6 @@ extension WMController {
         policy: KeyboardFocusBorderRenderPolicy = .direct
     ) -> Bool {
         guard currentKeyboardFocusTargetForRendering()?.token == token else { return false }
-        recordNiriCreateFocusTrace(.borderReapplied(token: token, phase: phase))
         let source: BorderReconcileSource = switch phase {
         case .postLayout:
             .borderReapplyPostLayout
@@ -3195,10 +3163,6 @@ extension WMController {
             policy: .direct,
             source: .focusClear
         )
-    }
-
-    func recordNiriCreateFocusTrace(_ kind: NiriCreateFocusTraceEvent.Kind) {
-        axEventHandler.recordNiriCreateFocusTrace(.init(kind: kind))
     }
 
     var isDiscoveryInProgress: Bool {

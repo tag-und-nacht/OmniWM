@@ -468,14 +468,14 @@ This separation means layout logic can be unit-tested without any macOS UI or ac
 
 **WorkspaceManager** (`Sources/OmniWM/Core/Workspace/WorkspaceManager.swift`)
 
-Owns workspace definitions, the window model, session state, monitor tracking, and the reconcile runtime used for debugging and relaunch restore behavior.
+Owns workspace definitions, the window model, session state, monitor tracking, and relaunch restore behavior.
 
 ```
 WorkspaceManager
 ├── monitors: [Monitor]                     Display geometry
 ├── workspacesById: [ID: WorkspaceDescriptor]   Workspace names & monitor assignments
 ├── windows: WindowModel                    All tracked windows
-├── reconcileTrace / runtimeStore           Replayed runtime snapshot and trace state
+├── runtimeStore                            Normalized runtime state
 ├── restorePlanner                          Restore and rescue planning
 ├── bootPersistedWindowRestoreCatalog       Relaunch restore intents loaded from settings
 ├── session: SessionState                   Ephemeral runtime state
@@ -496,7 +496,7 @@ WorkspaceManager
 └── nativeFullscreenRecords                 Fullscreen transition tracking
 ```
 
-Post-`v0.4.5`, `WorkspaceManager` also owns the reconcile runtime. `RuntimeStore` and `ReconcileTraceRecorder` capture normalized window-management events into a replayable snapshot, exposed through `reconcileSnapshotDump()` and `reconcileTraceDump()` for IPC diagnostics. `PersistedWindowRestoreCatalog` stores relaunch restore intent such as workspace target, preferred monitor, and floating geometry so managed floating windows can be restored or rescued across launches. The pure `StateReducer` decision slice now follows the same leaf-kernel pattern as layout: Swift keeps transaction ownership, trace recording, and runtime-object mutation, while Zig owns the deterministic state-transition solve behind `omniwm_reconcile_plan`.
+Post-`v0.4.5`, `WorkspaceManager` also owns the reconcile runtime. `RuntimeStore` applies normalized window-management events into the current runtime snapshot. `PersistedWindowRestoreCatalog` stores relaunch restore intent such as workspace target, preferred monitor, and floating geometry so managed floating windows can be restored or rescued across launches. The pure `StateReducer` decision slice now follows the same leaf-kernel pattern as layout: Swift keeps transaction ownership and runtime-object mutation, while Zig owns the deterministic state-transition solve behind `omniwm_reconcile_plan`.
 
 Workspace navigation follows the same split. `WorkspaceNavigationHandler` still owns runtime workspace/monitor objects, layout mutation execution, focus execution, and refresh/orchestration wiring, but the deterministic target-selection/session-planning slice now flattens monitor order, workspace order, session focus state, layout tags, and transfer subjects into one `omniwm_workspace_navigation_plan` call. Zig returns a symbolic plan with target/source ids, transfer subject tags, source-focus recovery, follow-focus directives, and affected workspace/monitor sets; Swift applies that plan back onto `WorkspaceManager`, the Niri/Dwindle executors, and the existing focus/refresh systems.
 
@@ -1081,7 +1081,6 @@ OmniWM uses SkyLight (private macOS framework) for low-latency window operations
 |---------|----------|---------|
 | Direct unit tests | Layout engines, animation math, rule evaluation | Create nodes, call `calculateLayout()`, assert frames |
 | DI via closures | Controllers, handlers | `nativeFullscreenStateProvider`, `frameApplyOverrideForTests` |
-| Debug hooks | Refresh pipeline | `RefreshDebugHooks.onFullRescan`, `onRelayout` |
 | In-process IPC | IPC protocol, routing | Create socket pair, send/receive in-process |
 
 **Key test support files:**

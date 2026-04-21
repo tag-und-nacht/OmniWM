@@ -206,13 +206,10 @@ private func waitUntilServiceLifecycleTest(
         lifecycleManager.accessibilityPermissionRequestHandlerForTests = { false }
         controller.axEventHandler.focusedWindowRefProvider = { _ in nil }
         FrontmostApplicationState.shared.setSnapshotForTests(nil)
-        HotPathDebugMetrics.shared.setEnabledForTests(true)
-        HotPathDebugMetrics.shared.reset()
         defer {
             permissionStream.continuation.finish()
             controller.setEnabled(false)
             FrontmostApplicationState.shared.setSnapshotForTests(nil)
-            HotPathDebugMetrics.shared.setEnabledForTests(false)
         }
 
         let pid: pid_t = 42_424
@@ -231,7 +228,6 @@ private func waitUntilServiceLifecycleTest(
 
         await waitUntilServiceLifecycleTest {
             FrontmostApplicationState.shared.snapshot?.pid == pid
-                && HotPathDebugMetrics.shared.snapshot.frontmostActivationEvents == 1
         }
 
         #expect(FrontmostApplicationState.shared.snapshot?.bundleIdentifier == bundleIdentifier)
@@ -240,7 +236,6 @@ private func waitUntilServiceLifecycleTest(
 
         await waitUntilServiceLifecycleTest {
             FrontmostApplicationState.shared.snapshot == nil
-                && HotPathDebugMetrics.shared.snapshot.frontmostTerminationEvents == 1
         }
     }
 

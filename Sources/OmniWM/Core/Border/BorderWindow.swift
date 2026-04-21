@@ -82,11 +82,11 @@ final class BorderWindow {
     private let padding: CGFloat = 8.0
     private let defaultCornerRadius: CGFloat = 9.0
     private let fallbackOrderingLevel: Int32 = 3
-    /// Maximum size delta (in points) that is treated as pixel jitter rather than
-    /// a real resize. During scroll animations the focused frame rounds to
-    /// neighboring physical pixels every tick; without tolerance this fires a
-    /// full `setWindowShape` + CGContext redraw 60 times per second.
-    /// `BorderCoordinator.managedFastPathFrameTolerance` uses the same 1pt budget.
+
+
+
+
+
     private static let sizeJitterTolerance: CGFloat = 1.0
 
     init(config: BorderConfig, operations: Operations = .live) {

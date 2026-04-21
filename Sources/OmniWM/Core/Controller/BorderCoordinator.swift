@@ -114,12 +114,6 @@ struct BorderOwnerState: Equatable {
     var fallbackSubscribedWindowIds: Set<UInt32> = []
 }
 
-enum BorderTraceAction: String, Equatable {
-    case update
-    case hide
-    case ignore
-}
-
 enum BorderReconcileSource: String, Equatable {
     case focusedWindowChanged
     case frontmostAppChanged
@@ -207,9 +201,9 @@ private extension BorderReconcileSource {
         }
     }
 
-    /// True for sources that may change a window's corner radius / shape.
-    /// These events should drop the cached corner radius for the target window
-    /// so the next query refreshes from the window server.
+
+
+
     var invalidatesCornerRadius: Bool {
         switch self {
         case .nativeFullscreenEnter,
@@ -267,18 +261,6 @@ enum BorderReconcileEvent {
         policy: KeyboardFocusBorderRenderPolicy
     )
     case cleanup
-}
-
-struct BorderTraceRecord: Equatable {
-    let timestamp: Date
-    let source: BorderReconcileSource
-    let rawFocus: String?
-    let owner: BorderOwner
-    let action: BorderTraceAction
-    let reason: String
-    let generation: UInt64
-    let frame: CGRect?
-    let orderingDecision: String?
 }
 
 private struct BorderOrderingResolution {
@@ -349,15 +331,12 @@ private extension Duration {
 @MainActor
 final class BorderCoordinator {
     private static let ghosttyBundleId = "com.mitchellh.ghostty"
-    private static let traceLimit = 128
     private static let fallbackLeaseDuration: Duration = .milliseconds(500)
     private static let liveMotionIdleDuration: Duration = .milliseconds(150)
     private static let managedFastPathFrameTolerance: CGFloat = 1.0
     private static let safeOrderingLevels: Set<Int32> = [0, 3, 8]
     private static let visibleAttributeMask: UInt32 = 0x2
     private static let visibleTagMask: UInt64 = 0x0040_0000_0000_0000
-    private static let traceLoggingEnabled =
-        ProcessInfo.processInfo.environment["OMNIWM_DEBUG_BORDER_TRACE"] == "1"
 
     weak var controller: WMController?
     var observedFrameProviderForTests: ((AXWindowRef) -> CGRect?)?
@@ -369,20 +348,14 @@ final class BorderCoordinator {
     var liveMotionIdleDurationForTests: Duration?
 
     private(set) var ownerState = BorderOwnerState()
-    /// Test-facing toggle. Production paths leave this `false`, which causes
-    /// `recordTrace` to skip the per-call `Date()`, formatting, and ring-buffer
-    /// allocation. Set to `true` in test fixtures that read
-    /// `traceSnapshotForTests()`.
-    var traceRingEnabled = false
-    private var trace: [BorderTraceRecord] = []
     private var pendingFallbackLeaseTask: Task<Void, Never>?
     private var pendingLiveMotionResetTask: Task<Void, Never>?
-    /// Per-window cache for `SkyLight.cornerRadius`. The window server lookup is
-    /// expensive enough that it was the dominant cost of `orderingCacheKey` on
-    /// every displayLink tick, defeating the render-decision cache. Corner radius
-    /// only changes on window-shape events (create, fullscreen toggle, destroy),
-    /// so we cache per-windowId and invalidate on those events. Boxed in a struct
-    /// so the absence of an entry is distinguishable from a cached `nil`.
+
+
+
+
+
+
     private var cornerRadiusCache: [Int: CachedCornerRadius] = [:]
 
     private struct CachedCornerRadius {
@@ -433,10 +406,6 @@ final class BorderCoordinator {
         _ = reconcile(event: .cleanup)
     }
 
-    func traceSnapshotForTests() -> [BorderTraceRecord] {
-        trace
-    }
-
     func ownerStateSnapshotForTests() -> BorderOwnerState {
         ownerState
     }
@@ -460,14 +429,6 @@ final class BorderCoordinator {
                 pid: matchingPid,
                 windowId: matchingWindowId
             ) else {
-                recordTrace(
-                    source: source,
-                    action: .ignore,
-                    reason: reason,
-                    rawFocus: controller.currentKeyboardFocusTargetForRendering(),
-                    frame: ownerState.resolvedFrame,
-                    orderingDecision: ownerState.orderingDecision
-                )
                 return false
             }
             clearOwnerAndHide(source: source, reason: reason)
@@ -502,14 +463,6 @@ final class BorderCoordinator {
             clearCornerRadiusCache()
             ownerState.owner = .none
             ownerState.generation &+= 1
-            recordTrace(
-                source: .cleanup,
-                action: .hide,
-                reason: "cleanup",
-                rawFocus: controller.currentKeyboardFocusTargetForRendering(),
-                frame: ownerState.resolvedFrame,
-                orderingDecision: ownerState.orderingDecision
-            )
             controller.borderManager.cleanup()
             return false
         }
@@ -521,7 +474,6 @@ final class BorderCoordinator {
         preferredFrame: CGRect?,
         policy: KeyboardFocusBorderRenderPolicy
     ) -> Bool {
-        HotPathDebugMetrics.shared.recordBorderRenderRequested()
         guard let target else {
             clearOwnerAndHide(source: source, reason: "no focused target")
             return false
@@ -535,8 +487,7 @@ final class BorderCoordinator {
             source: source,
             target: target,
             preferredFrame: preferredFrame,
-            policy: policy,
-            recordRenderRequestedMetrics: true
+            policy: policy
         ) {
         case let .update(context):
             applyRender(context, source: source, reason: "rendered")
@@ -546,26 +497,9 @@ final class BorderCoordinator {
             clearOwnerAndHide(source: source, reason: reason)
             return false
 
-        case let .ignore(reason):
+        case .ignore:
             if previousOwner != nextOwner, previousOwner != .none {
                 controller?.borderManager.hideBorder()
-                recordTrace(
-                    source: source,
-                    action: .hide,
-                    reason: "\(reason) after owner change",
-                    rawFocus: target,
-                    frame: ownerState.resolvedFrame,
-                    orderingDecision: ownerState.orderingDecision
-                )
-            } else {
-                recordTrace(
-                    source: source,
-                    action: .ignore,
-                    reason: reason,
-                    rawFocus: target,
-                    frame: ownerState.resolvedFrame,
-                    orderingDecision: ownerState.orderingDecision
-                )
             }
             return false
         }
@@ -587,14 +521,6 @@ final class BorderCoordinator {
                 guard windowInfo.id == windowId,
                       pid_t(windowInfo.pid) == candidateOwner.pid
                 else {
-                    recordTrace(
-                        source: .cgsFrameChanged,
-                        action: .ignore,
-                        reason: "frame event failed pid/wid validation",
-                        rawFocus: rawTarget,
-                        frame: ownerState.resolvedFrame,
-                        orderingDecision: ownerState.orderingDecision
-                    )
                     return false
                 }
             }
@@ -604,14 +530,6 @@ final class BorderCoordinator {
             }
             target = rawTarget
         } else {
-            recordTrace(
-                source: .cgsFrameChanged,
-                action: .ignore,
-                reason: "stale frame event",
-                rawFocus: controller?.currentKeyboardFocusTargetForRendering(),
-                frame: ownerState.resolvedFrame,
-                orderingDecision: ownerState.orderingDecision
-            )
             return false
         }
 
@@ -624,8 +542,7 @@ final class BorderCoordinator {
             source: .cgsFrameChanged,
             target: target,
             preferredFrame: nil,
-            policy: .direct,
-            recordRenderRequestedMetrics: false
+            policy: .direct
         ) {
         case let .update(context):
             applyRender(context, source: .cgsFrameChanged, reason: "frame changed")
@@ -635,15 +552,7 @@ final class BorderCoordinator {
             clearOwnerAndHide(source: .cgsFrameChanged, reason: reason)
             return false
 
-        case let .ignore(reason):
-            recordTrace(
-                source: .cgsFrameChanged,
-                action: .ignore,
-                reason: reason,
-                rawFocus: target,
-                frame: ownerState.resolvedFrame,
-                orderingDecision: ownerState.orderingDecision
-            )
+        case .ignore:
             return false
         }
     }
@@ -654,14 +563,6 @@ final class BorderCoordinator {
         reason: String
     ) -> Bool {
         guard ownerState.owner.windowIdUInt32 == windowId else {
-            recordTrace(
-                source: source,
-                action: .ignore,
-                reason: "stale teardown event",
-                rawFocus: controller?.currentKeyboardFocusTargetForRendering(),
-                frame: ownerState.resolvedFrame,
-                orderingDecision: ownerState.orderingDecision
-            )
             return false
         }
 
@@ -688,14 +589,6 @@ final class BorderCoordinator {
                 ?? controller?.workspaceManager.focusedToken
                 ?? controller?.workspaceManager.pendingFocusedToken
             guard currentFocusToken == oldToken || currentFocusToken == newToken else {
-                recordTrace(
-                    source: .managedRekey,
-                    action: .ignore,
-                    reason: "rekey did not match current owner",
-                    rawFocus: controller?.currentKeyboardFocusTargetForRendering(),
-                    frame: ownerState.resolvedFrame,
-                    orderingDecision: ownerState.orderingDecision
-                )
                 return false
             }
             currentWorkspaceId = controller?.workspaceManager.entry(for: newToken)?.workspaceId
@@ -703,14 +596,6 @@ final class BorderCoordinator {
         }
 
         guard let resolvedWorkspaceId = workspaceId ?? currentWorkspaceId else {
-            recordTrace(
-                source: .managedRekey,
-                action: .ignore,
-                reason: "rekey workspace unresolved",
-                rawFocus: controller?.currentKeyboardFocusTargetForRendering(),
-                frame: ownerState.resolvedFrame,
-                orderingDecision: ownerState.orderingDecision
-            )
             return false
         }
 
@@ -739,8 +624,7 @@ final class BorderCoordinator {
         source: BorderReconcileSource,
         target: KeyboardFocusTarget,
         preferredFrame: CGRect?,
-        policy: KeyboardFocusBorderRenderPolicy,
-        recordRenderRequestedMetrics: Bool
+        policy: KeyboardFocusBorderRenderPolicy
     ) -> BorderResolutionDecision {
         guard let controller else { return .hide(reason: "controller unavailable") }
 
@@ -825,25 +709,7 @@ final class BorderCoordinator {
             ownerState.resolvedWindowInfo = windowInfoValidation.windowInfo
             ownerState.resolvedWindowInfoValidated = true
             ownerState.lastRenderPolicy = policy
-            if recordRenderRequestedMetrics {
-                HotPathDebugMetrics.shared.recordBorderReconcileCacheOutcome(.fastPathHit)
-            }
             return .update(cachedContext)
-        }
-
-        if let missComponent = fastPathMissComponent(
-            target: target,
-            owner: owner,
-            axRef: axRef,
-            preferredFrame: preferredFrame,
-            policy: policy,
-            orderingCacheKey: currentOrderingCacheKey,
-            reuseManagedCache: reuseManagedCache,
-            windowInfoCacheMatched: windowInfoValidation.cacheKeyMatched
-        ) {
-            if recordRenderRequestedMetrics {
-                HotPathDebugMetrics.shared.recordBorderReconcileCacheMissComponent(missComponent)
-            }
         }
 
         let eligibility = resolveEligibilityState(
@@ -862,11 +728,6 @@ final class BorderCoordinator {
         ownerState.resolvedWindowInfo = windowInfoValidation.windowInfo
         ownerState.resolvedWindowInfoValidated = true
         ownerState.lastRenderPolicy = policy
-        let postFastPathOutcome: BorderReconcileCacheOutcome =
-            eligibility.usedCache ? .eligibilityCacheHit : .fullResolution
-        if recordRenderRequestedMetrics {
-            HotPathDebugMetrics.shared.recordBorderReconcileCacheOutcome(postFastPathOutcome)
-        }
 
         if let resolution = eligibilityDecision(
             source: source,
@@ -1091,12 +952,12 @@ final class BorderCoordinator {
         windowInfoCacheMatched: Bool,
         reuseManagedCache: Bool
     ) -> BorderRenderContext? {
-        // Size-only-moved fast path: during scroll animations the origin
-        // changes every tick but eligibility/ordering/decision are all
-        // frame-independent (they depend on window identity, not position).
-        // Require size equality but allow any origin — the returned
-        // `BorderRenderContext.frame` uses the new `preferredFrame` below,
-        // so the border follows the animated window.
+
+
+
+
+
+
         guard owner.isManaged,
               reuseManagedCache,
               ownerState.owner == owner,
@@ -1332,53 +1193,6 @@ final class BorderCoordinator {
         )
     }
 
-    private func fastPathMissComponent(
-        target: KeyboardFocusTarget,
-        owner: BorderOwner,
-        axRef: AXWindowRef,
-        preferredFrame: CGRect?,
-        policy: KeyboardFocusBorderRenderPolicy,
-        orderingCacheKey: BorderOrderingCacheKey,
-        reuseManagedCache: Bool,
-        windowInfoCacheMatched: Bool
-    ) -> BorderReconcileCacheMissComponent? {
-        guard owner.isManaged else { return nil }
-        guard ownerState.owner == owner,
-              ownerState.cachedAXRef?.windowId == axRef.windowId
-        else {
-            return .owner
-        }
-        guard ownerState.lastRenderPolicy == policy else {
-            return .policy
-        }
-        guard reuseManagedCache,
-              windowInfoCacheMatched
-        else {
-            return .windowInfoKey
-        }
-        guard let preferredFrame,
-              let cachedFrame = ownerState.resolvedFrame,
-              abs(preferredFrame.size.width - cachedFrame.size.width) <= Self.managedFastPathFrameTolerance,
-              abs(preferredFrame.size.height - cachedFrame.size.height) <= Self.managedFastPathFrameTolerance
-        else {
-            return .preferredFrame
-        }
-        guard cachedManagedOrderingResolution(
-            target: target,
-            owner: owner,
-            cacheKey: orderingCacheKey,
-            reuseManagedCache: reuseManagedCache,
-            windowInfoCacheMatched: windowInfoCacheMatched
-        ) != nil,
-              let decision = ownerState.resolvedDecision,
-              decision.disposition != .unmanaged,
-              decision.disposition != .undecided
-        else {
-            return .ordering
-        }
-        return nil
-    }
-
     private func fetchValidatedWindowInfo(for owner: BorderOwner) -> WindowServerInfo? {
         guard let windowId = owner.windowIdUInt32 else { return nil }
         return validatedWindowInfo(
@@ -1522,7 +1336,6 @@ final class BorderCoordinator {
     }
 
     private func clearOwnerAndHide(source: BorderReconcileSource, reason: String) {
-        let rawFocus = controller?.currentKeyboardFocusTargetForRendering()
         let previousOwner = ownerState.owner
         controller?.borderManager.hideBorder()
         ownerState.generation &+= 1
@@ -1531,14 +1344,6 @@ final class BorderCoordinator {
         releaseFallbackSubscription(for: previousOwner)
         clearTransientState(clearFallbackBookkeeping: true)
         ownerState.owner = .none
-        recordTrace(
-            source: source,
-            action: .hide,
-            reason: reason,
-            rawFocus: rawFocus,
-            frame: nil,
-            orderingDecision: nil
-        )
     }
 
     private func clearTransientState(clearFallbackBookkeeping _: Bool) {
@@ -1575,14 +1380,6 @@ final class BorderCoordinator {
             cancelFallbackLease()
         }
 
-        recordTrace(
-            source: source,
-            action: .update,
-            reason: reason,
-            rawFocus: context.target,
-            frame: context.frame,
-            orderingDecision: context.orderingDecision
-        )
     }
 
     private func requestFallbackSubscription(_ windowId: UInt32) {
@@ -1625,14 +1422,6 @@ final class BorderCoordinator {
 
         if ownerState.isLiveMotion {
             refreshFallbackLease()
-            recordTrace(
-                source: .fallbackLeaseExpired,
-                action: .ignore,
-                reason: "lease extended during live motion",
-                rawFocus: controller?.currentKeyboardFocusTargetForRendering(),
-                frame: ownerState.resolvedFrame,
-                orderingDecision: ownerState.orderingDecision
-            )
             return
         }
 
@@ -1645,8 +1434,7 @@ final class BorderCoordinator {
             source: .fallbackLeaseExpired,
             target: target,
             preferredFrame: nil,
-            policy: .direct,
-            recordRenderRequestedMetrics: false
+            policy: .direct
         ) {
         case let .update(context):
             applyRender(context, source: .fallbackLeaseExpired, reason: "fallback lease revalidated")
@@ -1725,55 +1513,6 @@ final class BorderCoordinator {
         case .none:
             return nil
         }
-    }
-
-    private func recordTrace(
-        source: BorderReconcileSource,
-        action: BorderTraceAction,
-        reason: String,
-        rawFocus: KeyboardFocusTarget?,
-        frame: CGRect?,
-        orderingDecision: String?
-    ) {
-        // Hot path: skip all formatting and allocation when nobody will read
-        // the trace. `traceRingEnabled` is opt-in for tests; `traceLoggingEnabled`
-        // is the env-gated stderr logger.
-        guard traceRingEnabled || Self.traceLoggingEnabled else { return }
-
-        let record = BorderTraceRecord(
-            timestamp: Date(),
-            source: source,
-            rawFocus: rawFocusDescription(rawFocus),
-            owner: ownerState.owner,
-            action: action,
-            reason: reason,
-            generation: ownerState.generation,
-            frame: frame,
-            orderingDecision: orderingDecision
-        )
-
-        if trace.count == Self.traceLimit {
-            trace.removeFirst()
-        }
-        trace.append(record)
-
-        if Self.traceLoggingEnabled {
-            let focus = record.rawFocus ?? "nil"
-            let frameString = frame.map(String.init(describing:)) ?? "nil"
-            let ordering = orderingDecision ?? "nil"
-            fputs(
-                "[BorderTrace] source=\(source.rawValue) raw_focus=\(focus) owner=\(String(describing: record.owner)) action=\(action.rawValue) reason=\(reason) generation=\(record.generation) frame=\(frameString) ordering=\(ordering)\n",
-                stderr
-            )
-        }
-    }
-
-    private func rawFocusDescription(_ target: KeyboardFocusTarget?) -> String? {
-        guard let target else { return nil }
-        if target.isManaged {
-            return "token=\(target.token)"
-        }
-        return "pid=\(target.pid) wid=\(target.windowId)"
     }
 
     private func shouldDeferBorderUpdates(for workspaceId: WorkspaceDescriptor.ID) -> Bool {

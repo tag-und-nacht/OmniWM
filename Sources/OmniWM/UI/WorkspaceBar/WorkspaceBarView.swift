@@ -391,7 +391,7 @@ private struct WindowListSheet: View {
                         Spacer()
                         if windowInfo.isFocused {
                             Image(systemName: "checkmark.circle.fill")
-                                .foregroundColor(.accentColor)  // Sheet uses system accent
+                                .foregroundColor(.accentColor)
                         }
                     }
                 }

@@ -3,10 +3,6 @@ import Foundation
 struct ReconcileInvariantViolation: Equatable {
     let code: String
     let message: String
-
-    var traceNote: String {
-        "invariant[\(code)]=\(message)"
-    }
 }
 
 struct ReconcileTxn: Equatable {

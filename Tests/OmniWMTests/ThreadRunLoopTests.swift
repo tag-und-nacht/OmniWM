@@ -88,7 +88,7 @@ private func makeRunInLoopTask(
             }
             Issue.record("Expected pending cancellation to throw")
         } catch is CancellationError {
-            // Expected.
+
         } catch {
             Issue.record("Expected CancellationError, got \(error)")
         }
@@ -107,7 +107,7 @@ private func makeRunInLoopTask(
             _ = try await awaitTaskValue(task)
             Issue.record("Expected runInLoop cancellation to throw")
         } catch is CancellationError {
-            // Expected.
+
         } catch {
             Issue.record("Expected CancellationError, got \(error)")
         }
@@ -124,7 +124,7 @@ private func makeRunInLoopTask(
             _ = try await awaitTaskValue(task)
             Issue.record("Expected runInLoop timeout to throw")
         } catch is RunLoopTimeoutError {
-            // Expected.
+
         } catch {
             Issue.record("Expected RunLoopTimeoutError, got \(error)")
         }

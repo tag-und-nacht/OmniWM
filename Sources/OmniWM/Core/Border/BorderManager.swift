@@ -8,12 +8,12 @@ final class BorderManager {
     private var lastAppliedFrame: CGRect?
     private var lastAppliedWindowId: Int?
     private var lastAppliedOrderingMetadata: BorderOrderingMetadata?
-    /// Window number the surface coordinator is currently tracking. Re-registration
-    /// with the same number does a `Set` copy+unregister+insert per call, which adds
-    /// up on every displayLink tick during scroll animations. The registered
-    /// providers read `lastAppliedFrame` / `config.enabled` dynamically, so we only
-    /// need to re-register when the underlying border window number actually
-    /// changes (or on first registration).
+
+
+
+
+
+
     private var registeredBorderWindowNumber: Int?
     private let surfaceCoordinator = SurfaceCoordinator.shared
     private let borderWindowFactory: @MainActor (BorderConfig) -> BorderWindow

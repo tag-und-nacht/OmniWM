@@ -924,7 +924,6 @@ public enum IPCQueryName: String, Codable, CaseIterable, Equatable, Sendable {
     case subscriptions
     case capabilities
     case focusedWindowDecision = "focused-window-decision"
-    case reconcileDebug = "reconcile-debug"
 }
 
 public struct IPCQuerySelectors: Codable, Equatable, Sendable {
@@ -1572,7 +1571,6 @@ public enum IPCResultKind: String, Codable, Equatable, Sendable {
     case subscriptions
     case capabilities
     case focusedWindowDecision = "focused-window-decision"
-    case reconcileDebug = "reconcile-debug"
     case subscribed
 }
 
@@ -2171,40 +2169,6 @@ public struct IPCFocusedWindowDecisionQueryResult: Codable, Equatable, Sendable 
     }
 }
 
-public struct IPCReconcileDebugQueryResult: Codable, Equatable, Sendable {
-    private enum CodingKeys: String, CodingKey {
-        case snapshot
-        case trace
-        case traceLimit
-        case hotPathMetrics
-    }
-
-    public let snapshot: String
-    public let trace: String
-    public let traceLimit: Int
-    public let hotPathMetrics: String
-
-    public init(
-        snapshot: String,
-        trace: String,
-        traceLimit: Int,
-        hotPathMetrics: String = ""
-    ) {
-        self.snapshot = snapshot
-        self.trace = trace
-        self.traceLimit = traceLimit
-        self.hotPathMetrics = hotPathMetrics
-    }
-
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        snapshot = try container.decode(String.self, forKey: .snapshot)
-        trace = try container.decode(String.self, forKey: .trace)
-        traceLimit = try container.decode(Int.self, forKey: .traceLimit)
-        hotPathMetrics = try container.decodeIfPresent(String.self, forKey: .hotPathMetrics) ?? ""
-    }
-}
-
 public struct IPCResult: Codable, Equatable, Sendable {
     public enum Payload: Equatable, Sendable {
         case pong(IPCPingResult)
@@ -2224,7 +2188,6 @@ public struct IPCResult: Codable, Equatable, Sendable {
         case subscriptions(IPCSubscriptionsQueryResult)
         case capabilities(IPCCapabilitiesQueryResult)
         case focusedWindowDecision(IPCFocusedWindowDecisionQueryResult)
-        case reconcileDebug(IPCReconcileDebugQueryResult)
         case subscribed(IPCSubscribeResult)
     }
 
@@ -2304,10 +2267,6 @@ public struct IPCResult: Codable, Equatable, Sendable {
         self.init(kind: .focusedWindowDecision, payload: .focusedWindowDecision(focusedWindowDecision))
     }
 
-    public init(reconcileDebug: IPCReconcileDebugQueryResult) {
-        self.init(kind: .reconcileDebug, payload: .reconcileDebug(reconcileDebug))
-    }
-
     public init(subscribed: IPCSubscribeResult) {
         self.init(kind: .subscribed, payload: .subscribed(subscribed))
     }
@@ -2358,10 +2317,6 @@ public struct IPCResult: Codable, Equatable, Sendable {
             payload = .focusedWindowDecision(
                 try container.decode(IPCFocusedWindowDecisionQueryResult.self, forKey: .payload)
             )
-        case .reconcileDebug:
-            payload = .reconcileDebug(
-                try container.decode(IPCReconcileDebugQueryResult.self, forKey: .payload)
-            )
         case .subscribed:
             payload = .subscribed(try container.decode(IPCSubscribeResult.self, forKey: .payload))
         }
@@ -2405,8 +2360,6 @@ public struct IPCResult: Codable, Equatable, Sendable {
         case let .capabilities(payload):
             try container.encode(payload, forKey: .payload)
         case let .focusedWindowDecision(payload):
-            try container.encode(payload, forKey: .payload)
-        case let .reconcileDebug(payload):
             try container.encode(payload, forKey: .payload)
         case let .subscribed(payload):
             try container.encode(payload, forKey: .payload)

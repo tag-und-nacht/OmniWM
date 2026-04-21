@@ -48,39 +48,6 @@ struct WMRuntimeSnapshot {
     var configuration: WMRuntimeConfiguration
 }
 
-enum WMRuntimeTraceMode {
-    case disabled
-    case summary
-    case detailed
-
-    static var `default`: Self {
-        let environment = ProcessInfo.processInfo.environment
-        if environment["OMNIWM_DEBUG_RUNTIME_TRACE_VERBOSE"] == "1" {
-            return .detailed
-        }
-        if environment["OMNIWM_DEBUG_RUNTIME_TRACE"] == "1" {
-            return .summary
-        }
-        return .disabled
-    }
-
-    var isEnabled: Bool {
-        self != .disabled
-    }
-}
-
-struct WMRuntimeTraceRecord {
-    let eventId: UInt64
-    let timestamp: Date
-    let eventSummary: String
-    let decisionSummary: String?
-    let actionSummaries: [String]
-    let focusedToken: WindowToken?
-    let pendingFocusedToken: WindowToken?
-    let activeRefreshCycleId: RefreshCycleId?
-    let pendingRefreshCycleId: RefreshCycleId?
-}
-
 struct WMRuntimeConfiguration {
     struct LayoutConfiguration {
         struct Niri {

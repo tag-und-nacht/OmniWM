@@ -61,7 +61,6 @@ final class FrontmostApplicationState {
     func update(pid: pid_t, bundleIdentifier: String?) -> FrontmostSnapshot {
         let snapshot = FrontmostSnapshot(pid: pid, bundleIdentifier: bundleIdentifier)
         self.snapshot = snapshot
-        HotPathDebugMetrics.shared.recordFrontmostActivationEvent()
         return snapshot
     }
 
@@ -78,7 +77,6 @@ final class FrontmostApplicationState {
     func clearIfNeeded(terminatedPid: pid_t) -> Bool {
         guard snapshot?.pid == terminatedPid else { return false }
         snapshot = nil
-        HotPathDebugMetrics.shared.recordFrontmostTerminationEvent()
         return true
     }
 

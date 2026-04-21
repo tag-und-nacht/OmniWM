@@ -871,7 +871,7 @@ private func hasPendingNiriAnimationWork(
         updateTabbedColumnOverlays()
     }
 
-    // MARK: - Layout Capability Commands
+
 
     func focusNeighbor(direction: Direction) {
         guard let controller else { return }
@@ -1024,7 +1024,7 @@ private func hasPendingNiriAnimationWork(
         }
     }
 
-    // MARK: - Layout Engine Configuration
+
 
     func enableNiriLayout(
         maxWindowsPerColumn: Int = 3,
@@ -1094,7 +1094,7 @@ private func hasPendingNiriAnimationWork(
         controller.layoutRefreshController.requestRelayout(reason: .layoutConfigChanged)
     }
 
-    // MARK: - Node Activation & Operation Context
+
 
     func activateNode(
         _ node: NiriNode,

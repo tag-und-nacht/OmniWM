@@ -63,7 +63,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func finishBootstrap(
         configurationDirectory: URL = SettingsFilePersistence.defaultDirectoryURL
     ) {
-        // During active schema churn, boot only from the canonical config files.
+
         let persistence = SettingsFilePersistence(directory: configurationDirectory)
         let runtimeState = RuntimeStateStore(directory: configurationDirectory)
         runtimeStateStore = runtimeState

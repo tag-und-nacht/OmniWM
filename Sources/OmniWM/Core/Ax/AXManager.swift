@@ -54,7 +54,7 @@ final class AXManager {
     private var rekeyedWindowIdsByPreviousId: [Int: Int] = [:]
     private var nextFrameApplicationRequestId: AXFrameRequestId = 1
 
-    /// Window IDs belonging to inactive workspaces — checked LIVE in applyFramesParallel.
+
     private(set) var inactiveWorkspaceWindowIds: Set<Int> = []
 
     init() {
@@ -422,9 +422,6 @@ final class AXManager {
         if let frameApplyOverrideForTests {
             let requestsForTests = framesByPidBuffer.values.flatMap { $0 }
             guard !requestsForTests.isEmpty else { return }
-            HotPathDebugMetrics.shared.recordAXFrameApplyOverrideBatch(
-                requestCount: requestsForTests.count
-            )
             handleFrameApplyResults(frameApplyOverrideForTests(requestsForTests))
             return
         }

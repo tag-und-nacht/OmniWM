@@ -4,8 +4,8 @@ struct RunLoopTimeoutError: Error, Sendable {
     let timeout: Duration
 }
 
-// Coordinates continuation installation and exactly-once resumption across
-// run-loop execution, timeout, and task cancellation.
+
+
 final class RunLoopResumeState<T: Sendable>: @unchecked Sendable {
     private enum State {
         case empty

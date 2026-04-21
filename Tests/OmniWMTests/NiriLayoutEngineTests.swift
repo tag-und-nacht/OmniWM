@@ -3594,8 +3594,8 @@ private func makeCenteredCrossMonitorFixture(
     }
 
     @Test func fullscreenWindowsStayMonitorAnchoredAcrossVisibleColumns() {
-        // Direct engine coverage for fullscreen sizing/restore. The
-        // handler-driven immediate-relayout path is covered separately.
+
+
         for visibleCount in 2 ... 5 {
             let fixture = makeVisibleColumnFixture(visibleCount: visibleCount)
             let expectedFullscreenFrame = fixture.monitor.visibleFrame.roundedToPhysicalPixels(scale: fixture.area.scale)
@@ -5583,8 +5583,8 @@ private func makeCenteredCrossMonitorFixture(
         controller.workspaceManager.withNiriViewportState(for: workspaceId) { state in
             state.selectedNodeId = firstNode.id
             state.activeColumnIndex = 0
-            // Fractional monitor origins can still leave the trailing column
-            // hidden at smaller offsets, so seed from a clearly visible state.
+
+
             state.viewOffsetPixels = .static(200)
         }
 

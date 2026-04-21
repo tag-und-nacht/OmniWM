@@ -60,20 +60,14 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
     @Test @MainActor func backingScaleLookupUsesScreenCacheAfterFirstResolution() {
         let monitor = makeLayoutPlanPrimaryTestMonitor()
         let controller = makeLayoutPlanTestController(monitors: [monitor])
-        HotPathDebugMetrics.shared.setEnabledForTests(true)
         ScreenLookupCache.shared.resetForTests()
         defer {
             ScreenLookupCache.shared.resetForTests()
-            HotPathDebugMetrics.shared.setEnabledForTests(false)
         }
 
         _ = controller.layoutRefreshController.backingScale(for: monitor)
         _ = controller.layoutRefreshController.backingScale(for: monitor)
 
-        let snapshot = HotPathDebugMetrics.shared.snapshot
-        #expect(snapshot.backingScaleRequests == 2)
-        #expect(snapshot.backingScaleCacheHits == 1)
-        #expect(snapshot.backingScaleCacheMisses == 1)
     }
 
     @Test @MainActor func executeLayoutPlanAppliesFrameDiffAndFocusedBorder() {
@@ -237,9 +231,6 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
 
     @Test @MainActor func executeLayoutPlanDoesNotPersistRestoreSnapshotOnVerificationMismatch() {
         let controller = makeLayoutPlanTestController()
-        HotPathDebugMetrics.shared.setEnabledForTests(true)
-        HotPathDebugMetrics.shared.reset()
-        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
         guard let monitor = controller.workspaceManager.monitors.first,
               let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
         else {
@@ -278,15 +269,11 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
         controller.layoutRefreshController.executeLayoutPlan(plan)
 
         #expect(controller.axManager.lastAppliedFrame(for: token.windowId) == nil)
-        #expect(HotPathDebugMetrics.shared.snapshot.managedRestoreGeometryCalls == 0)
         #expect(controller.workspaceManager.managedRestoreSnapshot(for: token) == nil)
     }
 
     @Test @MainActor func managedRestoreMaterialStateHintPersistsWorkspaceMoveWithoutFrameApply() {
         let controller = makeLayoutPlanTestController()
-        HotPathDebugMetrics.shared.setEnabledForTests(true)
-        HotPathDebugMetrics.shared.reset()
-        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
         guard let monitor = controller.workspaceManager.monitors.first,
               let sourceWorkspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id,
               let targetWorkspaceId = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true)
@@ -314,7 +301,6 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
         controller.recordManagedRestoreGeometry(for: token, frame: frame)
 
         controller.workspaceManager.setWorkspace(for: token, to: targetWorkspaceId)
-        HotPathDebugMetrics.shared.reset()
 
         var plan = WorkspaceLayoutPlan(
             workspaceId: targetWorkspaceId,
@@ -331,15 +317,10 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
 
         controller.layoutRefreshController.executeLayoutPlan(plan)
 
-        let metrics = HotPathDebugMetrics.shared.snapshot
         let snapshot = controller.workspaceManager.managedRestoreSnapshot(for: token)
         #expect(controller.axManager.lastAppliedFrame(for: token.windowId) == nil)
         #expect(snapshot?.workspaceId == targetWorkspaceId)
         #expect(snapshot?.replacementMetadata?.workspaceId == targetWorkspaceId)
-        #expect(metrics.managedRestoreGeometryCalls == 1)
-        #expect(metrics.managedRestoreSnapshotPersistenceAttemptsByReason[.workspaceMoved] == 1)
-        #expect(metrics.managedRestoreSnapshotWritesByReason[.workspaceMoved] == 1)
-        #expect(metrics.managedRestoreSnapshotSemanticNoOpCountByReason[.workspaceMoved, default: 0] == 0)
     }
 
     @Test @MainActor func managedRestoreMaterialStateHintUsesCanonicalNiriFrameDuringScrollAnimation() async throws {
@@ -408,8 +389,6 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
 
     @Test @MainActor func activateNodeRelayoutPersistsManagedRestoreSnapshotWithoutFrameConfirmation() async throws {
         let controller = makeLayoutPlanTestController()
-        HotPathDebugMetrics.shared.setEnabledForTests(true)
-        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
         guard let monitor = controller.workspaceManager.monitors.first,
               let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
         else {
@@ -460,7 +439,6 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
                 )
             }
         }
-        HotPathDebugMetrics.shared.reset()
 
         controller.workspaceManager.withNiriViewportState(for: workspaceId) { state in
             controller.niriLayoutHandler.activateNode(
@@ -479,20 +457,13 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
         await controller.layoutRefreshController.waitForRefreshWorkForTests()
 
         let snapshot = controller.workspaceManager.managedRestoreSnapshot(for: secondToken)
-        let metrics = HotPathDebugMetrics.shared.snapshot
         #expect(controller.axManager.lastAppliedFrame(for: secondToken.windowId) == nil)
         #expect(snapshot?.token == secondToken)
         #expect(snapshot?.niriState?.nodeId == secondNode.id)
-        #expect(metrics.managedRestoreGeometryCallsByReason[.niriStateChanged] == 1)
-        #expect(metrics.managedRestoreSnapshotPersistenceAttemptsByReason[.niriStateChanged] == 1)
-        #expect(metrics.managedRestoreSnapshotWritesByReason[.niriStateChanged] == 1)
-        #expect(metrics.managedRestoreSnapshotSemanticNoOpCountByReason[.niriStateChanged, default: 0] == 0)
     }
 
     @Test @MainActor func midAnimationFullscreenEntryDoesNotPersistTweenFrame() {
         let controller = makeLayoutPlanTestController()
-        HotPathDebugMetrics.shared.setEnabledForTests(true)
-        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
         guard let monitor = controller.workspaceManager.monitors.first,
               let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
         else {
@@ -508,7 +479,6 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
         #expect(controller.workspaceManager.managedRestoreSnapshot(for: token)?.frame == targetFrame)
 
         controller.workspaceManager.setLayoutReason(.nativeFullscreen, for: token)
-        HotPathDebugMetrics.shared.reset()
 
         var diff = WorkspaceLayoutDiff()
         diff.frameChanges = [LayoutFrameChange(token: token, frame: tweenFrame, forceApply: false)]
@@ -524,7 +494,6 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
 
         #expect(controller.axManager.lastAppliedFrame(for: token.windowId) == targetFrame)
         #expect(controller.workspaceManager.managedRestoreSnapshot(for: token)?.frame == targetFrame)
-        #expect(HotPathDebugMetrics.shared.snapshot.managedRestoreGeometryCalls == 0)
     }
 
     @Test @MainActor func nativeFullscreenRestoreStatePersistsUntilLayoutPlanCommit() {

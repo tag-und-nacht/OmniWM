@@ -279,19 +279,9 @@ private func axManagerTestWriteResult(
         controller.recordManagedRestoreGeometry(for: token, frame: targetFrame)
         controller.axManager.confirmFrameWrite(for: token.windowId, frame: targetFrame)
 
-        HotPathDebugMetrics.shared.setEnabledForTests(true)
-        HotPathDebugMetrics.shared.reset()
-        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
 
         controller.axManager.applyFramesParallel([(token.pid, token.windowId, targetFrame)])
 
-        let snapshot = HotPathDebugMetrics.shared.snapshot
-        #expect(snapshot.managedRestoreSnapshotFromCachedNoOp == 1)
-        #expect(snapshot.managedRestoreSnapshotFromConfirmedWrite == 0)
-        #expect(snapshot.managedRestoreSnapshotShortCircuit == 1)
-        #expect(snapshot.managedRestoreSnapshotPersistenceAttempts == 0)
-        #expect(snapshot.managedRestoreSnapshotWrites == 0)
-        #expect(snapshot.managedRestoreSnapshotSemanticNoOpCount == 1)
         #expect(controller.workspaceManager.managedRestoreSnapshot(for: token)?.frame == targetFrame)
     }
 
@@ -322,9 +312,6 @@ private func axManagerTestWriteResult(
         )
         controller.recordManagedRestoreGeometry(for: token, frame: targetFrame)
 
-        HotPathDebugMetrics.shared.setEnabledForTests(true)
-        HotPathDebugMetrics.shared.reset()
-        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
 
         controller.axManager.frameApplyOverrideForTests = { requests in
             requests.map { request in
@@ -346,13 +333,6 @@ private func axManagerTestWriteResult(
 
         controller.axManager.applyFramesParallel([(token.pid, token.windowId, targetFrame)])
 
-        let snapshot = HotPathDebugMetrics.shared.snapshot
-        #expect(snapshot.managedRestoreSnapshotFromCachedNoOp == 0)
-        #expect(snapshot.managedRestoreSnapshotFromConfirmedWrite == 1)
-        #expect(snapshot.managedRestoreSnapshotShortCircuit == 1)
-        #expect(snapshot.managedRestoreSnapshotPersistenceAttempts == 0)
-        #expect(snapshot.managedRestoreSnapshotWrites == 0)
-        #expect(snapshot.managedRestoreSnapshotSemanticNoOpCount == 1)
         #expect(controller.workspaceManager.managedRestoreSnapshot(for: token)?.frame == targetFrame)
     }
 
@@ -439,9 +419,6 @@ private func axManagerTestWriteResult(
 
     @Test @MainActor func testOverrideFlatteningOnlyRunsWhenOverrideIsInstalled() {
         let controller = makeLayoutPlanTestController()
-        HotPathDebugMetrics.shared.setEnabledForTests(true)
-        HotPathDebugMetrics.shared.reset()
-        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
         guard let monitor = controller.workspaceManager.monitors.first,
               let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
         else {
@@ -455,8 +432,6 @@ private func axManagerTestWriteResult(
         controller.axManager.frameApplyOverrideForTests = nil
         controller.axManager.applyFramesParallel([(token.pid, token.windowId, targetFrame)])
 
-        #expect(HotPathDebugMetrics.shared.snapshot.axFrameApplyOverrideBatchCount == 0)
-        #expect(HotPathDebugMetrics.shared.snapshot.axFrameApplyOverrideFlattenedRequestCount == 0)
 
         controller.axManager.frameApplyOverrideForTests = { requests in
             requests.map { request in
@@ -478,8 +453,6 @@ private func axManagerTestWriteResult(
 
         controller.axManager.applyFramesParallel([(token.pid, token.windowId, targetFrame)])
 
-        #expect(HotPathDebugMetrics.shared.snapshot.axFrameApplyOverrideBatchCount == 1)
-        #expect(HotPathDebugMetrics.shared.snapshot.axFrameApplyOverrideFlattenedRequestCount == 1)
     }
 
     @Test @MainActor func laterTrackedWriteDoesNotConsumeSupersededObserver() async throws {

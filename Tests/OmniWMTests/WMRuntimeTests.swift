@@ -45,8 +45,7 @@ private func makeRuntimeTestSettings() -> SettingsStore {
         let recorder = RuntimeFocusOperationRecorder()
         let runtime = WMRuntime(
             settings: makeRuntimeTestSettings(),
-            windowFocusOperations: makeRuntimeFocusOperations(recorder: recorder),
-            traceMode: .summary
+            windowFocusOperations: makeRuntimeFocusOperations(recorder: recorder)
         )
         let controller = runtime.controller
         let monitor = makeLayoutPlanTestMonitor()
@@ -69,12 +68,11 @@ private func makeRuntimeTestSettings() -> SettingsStore {
         #expect(runtime.orchestrationSnapshot.focus.activeManagedRequest?.token == token)
         #expect(controller.workspaceManager.pendingFocusedToken == token)
         #expect(recorder.events == [.activate(getpid()), .focus(getpid(), 321), .raise])
-        #expect(runtime.recentTrace.last?.eventSummary.contains("focusRequested") == true)
     }
 
     @Test @MainActor func runtimeTracksRefreshPlanningAndCompletion() async {
         resetSharedControllerStateForTests()
-        let runtime = WMRuntime(settings: makeRuntimeTestSettings(), traceMode: .summary)
+        let runtime = WMRuntime(settings: makeRuntimeTestSettings())
         let controller = runtime.controller
         controller.workspaceManager.applyMonitorConfigurationChange([makeLayoutPlanTestMonitor()])
         controller.layoutRefreshController.debugHooks.onVisibilityRefresh = { _ in
@@ -86,19 +84,17 @@ private func makeRuntimeTestSettings() -> SettingsStore {
 
         #expect(runtime.refreshSnapshot.activeRefresh?.kind == .visibilityRefresh)
         #expect(runtime.refreshSnapshot.activeRefresh?.reason == .appHidden)
-        #expect(runtime.recentTrace.last?.eventSummary.contains("refreshRequested") == true)
 
         await controller.layoutRefreshController.waitForRefreshWorkForTests()
 
         #expect(runtime.refreshSnapshot.activeRefresh == nil)
         #expect(runtime.refreshSnapshot.pendingRefresh == nil)
-        #expect(runtime.recentTrace.contains { $0.eventSummary.contains("refreshCompleted") })
     }
 
     @Test @MainActor func runtimeOwnsAppliedConfigurationSnapshots() {
         resetSharedControllerStateForTests()
         let settings = makeRuntimeTestSettings()
-        let runtime = WMRuntime(settings: settings, traceMode: .summary)
+        let runtime = WMRuntime(settings: settings)
         let controller = runtime.controller
 
         let originalValue = runtime.configuration.focusFollowsMouse
@@ -112,31 +108,5 @@ private func makeRuntimeTestSettings() -> SettingsStore {
 
         #expect(runtime.configuration.focusFollowsMouse == updatedValue)
         #expect(controller.focusFollowsMouseEnabled == updatedValue)
-        #expect(runtime.recentTrace.last?.eventSummary == "configuration_applied")
-        #expect(runtime.recentTrace.last?.actionSummaries.first?.contains("ffm=\(updatedValue)") == true)
-    }
-
-    @Test @MainActor func runtimeLeavesTraceBufferEmptyWhenTracingIsDisabled() {
-        resetSharedControllerStateForTests()
-        let runtime = WMRuntime(settings: makeRuntimeTestSettings(), traceMode: .disabled)
-        let controller = runtime.controller
-        let monitor = makeLayoutPlanTestMonitor()
-        controller.workspaceManager.applyMonitorConfigurationChange([monitor])
-
-        guard let workspaceId = controller.workspaceManager.workspaceId(for: "1", createIfMissing: false) else {
-            Issue.record("Expected workspace for disabled runtime trace test")
-            return
-        }
-
-        let token = controller.workspaceManager.addWindow(
-            makeLayoutPlanTestWindow(windowId: 654),
-            pid: getpid(),
-            windowId: 654,
-            to: workspaceId
-        )
-
-        controller.focusWindow(token)
-
-        #expect(runtime.recentTrace.isEmpty)
     }
 }

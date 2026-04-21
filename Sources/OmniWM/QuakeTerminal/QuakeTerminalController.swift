@@ -67,8 +67,6 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
         let result = ghostty_init(0, nil)
         if result == GHOSTTY_SUCCESS {
             Self.ghosttyInitialized = true
-        } else {
-            print("QuakeTerminal: ghostty_init failed with code \(result)")
         }
     }
 
@@ -77,13 +75,11 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
 
         initializeGhosttyIfNeeded()
         guard Self.ghosttyInitialized else {
-            print("QuakeTerminal: GhosttyKit not initialized")
             return
         }
 
         ghosttyConfig = ghostty_config_new()
         guard ghosttyConfig != nil else {
-            print("QuakeTerminal: Failed to create ghostty config")
             return
         }
 
@@ -140,7 +136,6 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
 
         ghosttyApp = ghostty_app_new(&runtimeConfig, ghosttyConfig)
         guard ghosttyApp != nil else {
-            print("QuakeTerminal: Failed to create ghostty app")
             return
         }
 
@@ -211,7 +206,6 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
             guard newContent != existingContent else { return }
             try newContent.write(to: configFile, atomically: true, encoding: .utf8)
         } catch {
-            print("QuakeTerminal: Failed to update ghostty config: \(error)")
         }
     }
 
@@ -878,7 +872,7 @@ final class QuakeTerminalController: NSObject, NSWindowDelegate, QuakeTerminalTa
         }
     }
 
-    // MARK: - QuakeTerminalTabBarDelegate
+
 
     func tabBarDidSelectTab(at index: Int) {
         switchToTab(at: index)

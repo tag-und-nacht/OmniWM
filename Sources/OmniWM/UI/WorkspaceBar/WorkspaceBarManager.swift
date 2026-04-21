@@ -181,7 +181,7 @@ final class WorkspaceBarManager {
             existingMonitorIds.remove(monitor.id)
             let resolved = settings.resolvedBarSettings(for: monitor)
 
-            // Global workspace-bar settings are defaults; monitor overrides and runtime visibility decide bar ownership.
+
             if !controller.isWorkspaceBarVisible(on: monitor, resolved: resolved) {
                 removeBarForMonitor(monitor.id)
                 continue
@@ -385,7 +385,6 @@ final class WorkspaceBarManager {
             return cachedMeasuredWidth
         }
 
-        HotPathDebugMetrics.shared.recordWorkspaceBarMeasurement()
         instance.measurementView.rootView = WorkspaceBarMeasurementView(snapshot: snapshot)
         instance.measurementView.layoutSubtreeIfNeeded()
         let measuredWidth = instance.measurementView.fittingSize.width

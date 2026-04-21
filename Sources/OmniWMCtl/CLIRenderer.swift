@@ -197,8 +197,6 @@ enum CLIRenderer {
             return formattedCapabilities(payload, format: format)
         case let .focusedWindowDecision(payload):
             return formattedFocusedWindowDecision(payload, format: format)
-        case let .reconcileDebug(payload):
-            return formattedReconcileDebug(payload)
         case let .subscribed(payload):
             return "subscribed: \(payload.channels.map(\.rawValue).joined(separator: ", "))"
         }
@@ -473,26 +471,6 @@ enum CLIRenderer {
         ]
 
         return formatRows(headers: ["FIELD", "VALUE"], rows: rows, format: format)
-    }
-
-    private static func formattedReconcileDebug(_ payload: IPCReconcileDebugQueryResult) -> String {
-        let snapshot = payload.snapshot.isEmpty ? "snapshot empty" : payload.snapshot
-        let trace = payload.trace.isEmpty ? "trace empty" : payload.trace
-        let hotPathMetrics = payload.hotPathMetrics.isEmpty ? "hot path metrics unavailable" : payload.hotPathMetrics
-
-        return """
-        SNAPSHOT
-        --------
-        \(snapshot)
-
-        TRACE (last \(payload.traceLimit))
-        ---------------
-        \(trace)
-
-        HOT PATH METRICS
-        ----------------
-        \(hotPathMetrics)
-        """
     }
 
     private static func formatAppSummary(_ apps: [IPCManagedAppSummary], format: CLIOutputFormat) -> String {

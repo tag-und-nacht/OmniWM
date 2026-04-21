@@ -36,7 +36,7 @@ import Testing
         #expect(output.contains("[[hotkeys]]"))
         #expect(output.contains("[[workspaces]]"))
         #expect(output.contains("[[appRules]]"))
-        // No old flat prefixes leak into the schema.
+
         #expect(output.contains("niriMaxVisibleColumns") == false)
         #expect(output.contains("borderColorRed") == false)
         #expect(output.contains("workspaceBarAccentColorRed") == false)
@@ -272,8 +272,8 @@ import Testing
         let data = try SettingsTOMLCodec.encode(SettingsExport.defaults())
         let output = try #require(String(data: data, encoding: .utf8))
 
-        // TOML grammar requires top-level key-values to appear before any [table] headers.
-        // If this invariant breaks, the file would fail to parse.
+
+
         let versionRange = try #require(output.range(of: "version"))
         let firstTableRange = try #require(output.range(of: "[general]"))
         #expect(versionRange.lowerBound < firstTableRange.lowerBound)

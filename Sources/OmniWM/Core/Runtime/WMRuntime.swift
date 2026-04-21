@@ -3,18 +3,13 @@ import Observation
 
 @MainActor @Observable
 final class WMRuntime {
-    private static let maxTraceRecordCount = 128
-
     let settings: SettingsStore
     let platform: WMPlatform
     let workspaceManager: WorkspaceManager
     let hiddenBarController: HiddenBarController
     let controller: WMController
     private let effectExecutor: any EffectExecutor
-    private let traceMode: WMRuntimeTraceMode
     private(set) var snapshot: WMRuntimeSnapshot
-    private(set) var recentTrace: [WMRuntimeTraceRecord] = []
-    private var nextEventId: UInt64 = 1
 
     var state: WMState {
         snapshot.reconcile
@@ -37,12 +32,10 @@ final class WMRuntime {
         platform: WMPlatform = .live,
         hiddenBarController: HiddenBarController? = nil,
         windowFocusOperations: WindowFocusOperations? = nil,
-        effectExecutor: (any EffectExecutor)? = nil,
-        traceMode: WMRuntimeTraceMode = .default
+        effectExecutor: (any EffectExecutor)? = nil
     ) {
         self.settings = settings
         self.platform = platform
-        self.traceMode = traceMode
         let resolvedHiddenBarController = hiddenBarController ?? HiddenBarController(settings: settings)
         self.hiddenBarController = resolvedHiddenBarController
         let workspaceManager = WorkspaceManager(settings: settings)
@@ -70,7 +63,6 @@ final class WMRuntime {
     }
 
     func start() {
-        HotPathDebugMetrics.shared.reset()
         applyCurrentConfiguration()
     }
 
@@ -82,11 +74,6 @@ final class WMRuntime {
         snapshot.configuration = configuration
         controller.applyConfiguration(configuration)
         refreshSnapshotState()
-        appendTrace(
-            eventSummary: "configuration_applied",
-            decisionSummary: nil,
-            actionSummaries: [configuration.summary]
-        )
     }
 
     func flushState() {
@@ -98,11 +85,6 @@ final class WMRuntime {
     func submit(_ event: WMEvent) -> ReconcileTxn {
         let transaction = workspaceManager.recordReconcileEvent(event)
         refreshSnapshotState()
-        appendTrace(
-            eventSummary: event.summary,
-            decisionSummary: transaction.plan.summary,
-            actionSummaries: transaction.plan.isEmpty ? [] : [transaction.plan.summary]
-        )
         return transaction
     }
 
@@ -158,11 +140,6 @@ final class WMRuntime {
 
     func resetRefreshOrchestration() {
         snapshot.orchestration.refresh = .init()
-        appendTrace(
-            eventSummary: "refresh_reset",
-            decisionSummary: nil,
-            actionSummaries: []
-        )
     }
 
     private func apply(
@@ -184,11 +161,6 @@ final class WMRuntime {
         )
 
         refreshSnapshotState()
-        appendTrace(
-            eventSummary: traceEventSummary(for: event),
-            decisionSummary: traceDecisionSummary(for: result.decision),
-            actionSummaries: traceActionSummaries(for: result.plan.actions)
-        )
         return result
     }
 
@@ -220,64 +192,5 @@ final class WMRuntime {
             isNonManagedFocusActive: workspaceManager.isNonManagedFocusActive,
             isAppFullscreenActive: workspaceManager.isAppFullscreenActive
         )
-    }
-
-    private func appendTrace(
-        eventSummary: @autoclosure () -> String,
-        decisionSummary: @autoclosure () -> String?,
-        actionSummaries: @autoclosure () -> [String]
-    ) {
-        HotPathDebugMetrics.shared.recordRuntimeTraceAppendAttempt()
-        guard traceMode.isEnabled else { return }
-
-        let record = WMRuntimeTraceRecord(
-            eventId: nextEventId,
-            timestamp: Date(),
-            eventSummary: eventSummary(),
-            decisionSummary: decisionSummary(),
-            actionSummaries: actionSummaries(),
-            focusedToken: snapshot.reconcile.focusSession.focusedToken,
-            pendingFocusedToken: snapshot.reconcile.focusSession.pendingManagedFocus.token,
-            activeRefreshCycleId: snapshot.orchestration.refresh.activeRefresh?.cycleId,
-            pendingRefreshCycleId: snapshot.orchestration.refresh.pendingRefresh?.cycleId
-        )
-        nextEventId &+= 1
-        recentTrace.append(record)
-        if recentTrace.count > Self.maxTraceRecordCount {
-            recentTrace.removeFirst(recentTrace.count - Self.maxTraceRecordCount)
-        }
-    }
-
-    private func traceEventSummary(for event: OrchestrationEvent) -> String {
-        switch traceMode {
-        case .disabled:
-            return ""
-        case .summary:
-            return event.summary
-        case .detailed:
-            return String(describing: event)
-        }
-    }
-
-    private func traceDecisionSummary(for decision: OrchestrationDecision) -> String {
-        switch traceMode {
-        case .disabled:
-            return ""
-        case .summary:
-            return decision.summary
-        case .detailed:
-            return String(describing: decision)
-        }
-    }
-
-    private func traceActionSummaries(for actions: [OrchestrationPlan.Action]) -> [String] {
-        switch traceMode {
-        case .disabled:
-            return []
-        case .summary:
-            return actions.map(\.summary)
-        case .detailed:
-            return actions.map { String(describing: $0) }
-        }
     }
 }

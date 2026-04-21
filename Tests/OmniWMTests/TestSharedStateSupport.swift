@@ -126,7 +126,6 @@ func resetSharedControllerStateForTests() {
     SponsorsWindowController.shared.windowForTests?.close()
     UpdateWindowController.shared.windowForTests?.close()
     OwnedWindowRegistry.shared.resetForTests()
-    HotPathDebugMetrics.shared.setEnabledForTests(false)
     ScreenLookupCache.shared.resetForTests()
     FrontmostApplicationState.shared.setSnapshotForTests(nil)
 

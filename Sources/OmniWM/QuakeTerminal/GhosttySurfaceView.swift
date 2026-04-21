@@ -76,7 +76,6 @@ final class GhosttySurfaceView: NSView, @preconcurrency NSTextInputClient {
         config.userdata = userdata
 
         guard let surface = ghostty_surface_new(ghosttyApp, &config) else {
-            print("QuakeTerminal: Failed to create surface")
             return
         }
         self.ghosttySurface = surface

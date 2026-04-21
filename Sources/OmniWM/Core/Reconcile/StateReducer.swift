@@ -150,10 +150,6 @@ enum StateReducer {
         return decodeRestoreIntent(output: rawOutput, monitors: monitors)
     }
 
-    static func replay(_ trace: [ReconcileTraceRecord]) -> [ActionPlan] {
-        trace.map(\.plan)
-    }
-
     private static func encode(event: WMEvent) -> omniwm_reconcile_event {
         switch event {
         case let .windowAdmitted(token, workspaceId, monitorId, mode, _):

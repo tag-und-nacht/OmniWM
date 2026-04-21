@@ -423,7 +423,6 @@ Field tokens are part of the CLI contract. Returned JSON still uses the payload 
 | `apps` | — | — | Managed app summary |
 | `focused-window` | — | — | Focused managed window snapshot |
 | `focused-window-decision` | — | — | Focused window rule/debug decision snapshot |
-| `reconcile-debug` | — | — | Reconcile runtime snapshot and recent trace dump for debugging |
 | `windows` | `--window`, `--workspace`, `--display`, `--focused`, `--visible`, `--floating`, `--scratchpad`, `--app`, `--bundle-id` | window fields | Managed windows |
 | `workspaces` | `--workspace`, `--display`, `--current`, `--visible`, `--focused` | workspace fields | Configured workspaces with occupancy |
 | `displays` | `--display`, `--main`, `--current` | display fields | Connected displays with geometry |
@@ -455,11 +454,7 @@ omniwmctl query capabilities
 # Debug why a window was tiled/floated
 omniwmctl query focused-window-decision
 
-# Dump the reconcile runtime snapshot and recent trace
-omniwmctl query reconcile-debug
 ```
-
-`reconcile-debug` returns diagnostic text fields: `snapshot`, `trace`, and `traceLimit`.
 
 ---
 
@@ -799,7 +794,7 @@ Completions are context-aware: query names, selectors, field names, command path
   "status": "<success|executed|ignored|error|subscribed>",
   "code": null,
   "result": {
-    "kind": "<pong|version|workspace-bar|active-workspace|focused-monitor|apps|focused-window|windows|workspaces|displays|rules|rule-actions|queries|commands|subscriptions|capabilities|focused-window-decision|reconcile-debug|subscribed>",
+    "kind": "<pong|version|workspace-bar|active-workspace|focused-monitor|apps|focused-window|windows|workspaces|displays|rules|rule-actions|queries|commands|subscriptions|capabilities|focused-window-decision|subscribed>",
     "payload": { ... }
   }
 }

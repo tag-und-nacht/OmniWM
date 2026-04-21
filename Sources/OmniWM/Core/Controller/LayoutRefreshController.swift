@@ -51,8 +51,6 @@ import QuartzCore
     weak var controller: WMController?
     static let hiddenWindowEdgeRevealEpsilon: CGFloat = 1.0
     private static let delayedRevealVerificationDelay: Duration = .milliseconds(50)
-    private static let revealTraceLoggingEnabled =
-        ProcessInfo.processInfo.environment["OMNIWM_DEBUG_SCRATCHPAD_REVEAL"] == "1"
 
     enum HideReason {
         case workspaceInactive
@@ -246,7 +244,6 @@ import QuartzCore
     }
 
     @objc private func displayLinkFired(_ displayLink: CADisplayLink) {
-        HotPathDebugMetrics.shared.recordDisplayLinkTick()
         guard let displayId = layoutState.displayIdByLink[ObjectIdentifier(displayLink)] else { return }
 
         niriHandler.tickScrollAnimation(targetTime: displayLink.targetTimestamp, displayId: displayId)
@@ -346,7 +343,7 @@ import QuartzCore
            dwindleHandler.dwindleAnimationByDisplay[displayId] == nil,
            layoutState.closingAnimationsByDisplay[displayId].map(\.isEmpty) ?? true
         {
-            // Idle display links must not remain cached after teardown.
+
             if let link = removeCachedDisplayLink(for: displayId) {
                 link.invalidate()
             }
@@ -449,11 +446,11 @@ import QuartzCore
         activeFrameContext = RefreshFrameContext()
         defer { activeFrameContext = nil }
 
-        // Rebuild the inactive-workspace window set BEFORE executing layout plans
-        // so that applyFramesParallel (inside executeLayoutPlans) uses the correct
-        // active/inactive classification. Without this, windows on a newly-active
-        // workspace are still marked inactive from the previous cycle, causing their
-        // frame writes to be silently skipped and leaving blank gaps on screen.
+
+
+
+
+
         let visibilityWorkspaceEntries: [(workspace: WorkspaceDescriptor, entries: [WindowModel.Entry])]?
         if let visibility = plan.effects.visibility {
             let workspaceEntries = workspaceEntriesSnapshot(on: controller)
@@ -630,14 +627,6 @@ import QuartzCore
                 guard !controller.shouldSuppressManagedFocusRecovery,
                       !controller.workspaceManager.hasPendingNativeFullscreenTransition
                 else { continue }
-                if let workspaceId = controller.workspaceManager.workspace(for: token) {
-                    controller.recordNiriCreateFocusTrace(
-                        .relayoutActivatedWindow(
-                            token: token,
-                            workspaceId: workspaceId
-                        )
-                    )
-                }
                 controller.focusWindow(token)
             case .updateTabbedOverlays:
                 niriHandler.updateTabbedColumnOverlays()
@@ -1138,7 +1127,7 @@ import QuartzCore
             return true
 
         case .layoutCommand:
-            // Focus handoffs attach a post-layout action; geometry-only commands do not.
+
             if !refresh.postLayoutAttachmentIds.isEmpty {
                 return true
             }
@@ -1413,8 +1402,8 @@ import QuartzCore
             controller: controller
         )
         if shouldPreserveMissingWindows {
-            // Native macOS fullscreen moves the app onto its own Space, so visible-window
-            // enumeration temporarily excludes the rest of the managed workspace.
+
+
             for entry in controller.workspaceManager.allEntries() {
                 seenKeys.insert(.init(pid: entry.handle.pid, windowId: entry.windowId))
             }
@@ -1852,8 +1841,8 @@ import QuartzCore
             )
         }
 
-        // Bulk cancel in-flight frame jobs for all inactive workspace windows upfront,
-        // before the per-window hide loop, to prevent AX batch races with SkyLight moves.
+
+
         var inactiveWindowJobs: [(pid: pid_t, windowId: Int)] = []
         let hiddenPlacementMonitors = controller.workspaceManager.monitors.map(HiddenPlacementMonitorContext.init)
         for snapshot in resolvedWorkspaceEntries where !activeWorkspaceIds.contains(snapshot.workspace.id) {
@@ -2501,9 +2490,6 @@ import QuartzCore
             }
         }
 
-        recordRevealTrace(
-            "rekey oldWindowId=\(oldWindowId) newWindowId=\(newWindowId) tokenPid=\(newToken.pid)"
-        )
     }
 
     fileprivate func completePendingRevealTransaction(with result: AXFrameApplyResult) {
@@ -2511,11 +2497,6 @@ import QuartzCore
             return
         }
 
-        recordRevealTrace(
-            "terminal windowId=\(result.windowId) requestId=\(result.requestId) " +
-                "failure=\(String(describing: result.writeResult.failureReason)) " +
-                "confirmed=\(result.confirmedFrame != nil)"
-        )
 
         switch hiddenRevealTerminalOutcome(for: result) {
         case .success:
@@ -2603,9 +2584,6 @@ import QuartzCore
             try? await Task.sleep(for: Self.delayedRevealVerificationDelay)
             guard let self else { return }
             let verifiedFrame = delayedVerifiedRevealFrame(forWindowId: windowId)
-            recordRevealTrace(
-                "delayedVerification windowId=\(windowId) success=\(verifiedFrame != nil)"
-            )
             if let verifiedFrame {
                 finalizePendingRevealTransactionSuccess(
                     forWindowId: windowId,
@@ -2638,11 +2616,6 @@ import QuartzCore
         return observedFrame
     }
 
-    private func recordRevealTrace(_ message: String) {
-        guard Self.revealTraceLoggingEnabled else { return }
-        fputs("[ScratchpadReveal] \(message)\n", stderr)
-    }
-
     private func executeHiddenReveal(
         _ entry: WindowModel.Entry,
         monitor: Monitor,
@@ -2653,9 +2626,6 @@ import QuartzCore
         let frameEntry = [(entry.handle.pid, entry.windowId)]
         switch restoreWindowFromHiddenState(entry, monitor: monitor, hiddenState: hiddenState) {
         case .none:
-            recordRevealTrace(
-                "start windowId=\(entry.windowId) mode=none outcome=noGeometry"
-            )
             if hiddenState.workspaceInactive {
                 clearHiddenRecord(for: entry.token)
                 controller.axManager.unsuppressFrameWrites(frameEntry)
@@ -2664,18 +2634,12 @@ import QuartzCore
                 controller.axManager.suppressFrameWrites(frameEntry)
             }
         case let .positionPlan(plan):
-            recordRevealTrace(
-                "start windowId=\(entry.windowId) mode=positionPlan"
-            )
             applyPositionPlans([plan])
             clearHiddenRecord(for: entry.token)
             controller.axManager.unsuppressFrameWrites(frameEntry)
             onSuccess?()
         case let .asyncFrame(frame):
             if !shouldUsePendingRevealTransaction(for: entry, hiddenState: hiddenState) {
-                recordRevealTrace(
-                    "start windowId=\(entry.windowId) mode=asyncFrame immediate targetFrame=\(NSStringFromRect(frame))"
-                )
                 clearHiddenRecord(for: entry.token)
                 controller.axManager.unsuppressFrameWrites(frameEntry)
                 controller.axManager.forceApplyNextFrame(for: entry.windowId)
@@ -2692,9 +2656,6 @@ import QuartzCore
             ) else {
                 return
             }
-            recordRevealTrace(
-                "start windowId=\(entry.windowId) mode=asyncFrame targetFrame=\(NSStringFromRect(frame))"
-            )
             controller.axManager.unsuppressFrameWrites(frameEntry)
             controller.axManager.forceApplyNextFrame(for: entry.windowId)
             controller.axManager.applyFramesParallel(

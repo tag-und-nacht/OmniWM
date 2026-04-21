@@ -248,8 +248,8 @@ private func makeWindowRuleFacts(
             appFullscreen: false
         )
 
-        // Tile/auto rules defer when AX attributes are unavailable to prevent
-        // tooltips and auxiliary windows from being tiled and destabilizing layout.
+
+
         #expect(decision.disposition == .undecided)
         #expect(decision.deferredReason == .attributeFetchFailed)
     }
@@ -273,7 +273,7 @@ private func makeWindowRuleFacts(
             appFullscreen: false
         )
 
-        // Float rules still apply with degraded AX since they don't affect tiling layout.
+
         #expect(decision.disposition == .floating)
         #expect(decision.source == .userRule(rule.id))
         #expect(decision.deferredReason == nil)
@@ -478,8 +478,8 @@ private func makeWindowRuleFacts(
         #expect(decision.workspaceName == "2")
         #expect(decision.ruleEffects.minWidth == 510)
         #expect(decision.ruleEffects.minHeight == 410)
-        // The built-in rule supplies disposition, but the matched user rule still
-        // owns workspace assignment and sizing metadata.
+
+
         #expect(decision.ruleEffects.matchedRuleId == rule.id)
         if case .builtInRule("defaultFloatingApp") = decision.source {
         } else {

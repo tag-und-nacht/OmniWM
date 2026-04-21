@@ -15,7 +15,6 @@ final class ScreenLookupCache {
     private init() {}
 
     func refresh(screens: [NSScreen] = NSScreen.screens) {
-        HotPathDebugMetrics.shared.recordScreenCacheRefresh()
         entriesByDisplayId = Dictionary(
             uniqueKeysWithValues: screens.compactMap { screen in
                 guard let displayId = screen.displayId else { return nil }
@@ -32,24 +31,20 @@ final class ScreenLookupCache {
 
     func screen(for displayId: CGDirectDisplayID) -> NSScreen? {
         if let entry = entriesByDisplayId[displayId] {
-            HotPathDebugMetrics.shared.recordScreenLookup(hit: true)
             return entry.screen
         }
 
         refresh()
-        HotPathDebugMetrics.shared.recordScreenLookup(hit: false)
         return entriesByDisplayId[displayId]?.screen
     }
 
     func backingScale(for displayId: CGDirectDisplayID, fallback: CGFloat = 2.0) -> CGFloat {
         if let entry = entriesByDisplayId[displayId] {
-            HotPathDebugMetrics.shared.recordBackingScaleLookup(hit: true)
             return entry.backingScale
         }
 
         refresh()
         let resolvedScale = entriesByDisplayId[displayId]?.backingScale
-        HotPathDebugMetrics.shared.recordBackingScaleLookup(hit: false)
         return resolvedScale ?? fallback
     }
 
@@ -168,8 +163,8 @@ extension CGRect {
 
 extension CGRect {
     func distanceSquared(to point: CGPoint) -> CGFloat {
-        // Keep fallback distance calculations aligned with CGRect.contains(_:),
-        // which treats maxX/maxY as exclusive bounds.
+
+
         let maxInclusiveX = maxX > minX ? maxX.nextDown : minX
         let maxInclusiveY = maxY > minY ? maxY.nextDown : minY
         let clampedX = min(max(point.x, minX), maxInclusiveX)

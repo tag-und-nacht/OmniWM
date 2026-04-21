@@ -137,8 +137,7 @@ final class WorkspaceManager {
     private(set) var gaps: Double = 8
     private(set) var outerGaps: LayoutGaps.OuterGaps = .zero
     private var windows: WindowModel { windowRegistry.windows }
-    private let reconcileTrace = ReconcileTraceRecorder()
-    private lazy var runtimeStore = RuntimeStore(traceRecorder: reconcileTrace)
+    private lazy var runtimeStore = RuntimeStore()
     private var restorePlanner: RestorePlanner { restoreState.restorePlanner }
     private var bootPersistedWindowRestoreCatalog: PersistedWindowRestoreCatalog {
         restoreState.bootPersistedWindowRestoreCatalog
@@ -256,22 +255,6 @@ final class WorkspaceManager {
             interactionMonitorId: sessionState.interactionMonitorId,
             previousInteractionMonitorId: sessionState.previousInteractionMonitorId
         )
-    }
-
-    func reconcileTraceSnapshotForTests() -> [ReconcileTraceRecord] {
-        reconcileTrace.snapshot()
-    }
-
-    func replayReconcileTraceForTests() -> [ActionPlan] {
-        StateReducer.replay(reconcileTrace.snapshot())
-    }
-
-    func reconcileSnapshotDump() -> String {
-        ReconcileDebugDump.snapshot(reconcileSnapshot())
-    }
-
-    func reconcileTraceDump(limit: Int? = nil) -> String {
-        ReconcileDebugDump.trace(reconcileTrace.snapshot(), limit: limit)
     }
 
     @discardableResult
@@ -2301,8 +2284,6 @@ final class WorkspaceManager {
         newAXRef: AXWindowRef,
         managedReplacementMetadata: ManagedReplacementMetadata? = nil
     ) -> WindowModel.Entry? {
-        let previousRestoreSnapshot = windows.managedRestoreSnapshot(for: oldToken)
-            ?? windows.managedRestoreSnapshot(for: newToken)
         guard let entry = windows.rekeyWindow(
             from: oldToken,
             to: newToken,
@@ -2317,17 +2298,6 @@ final class WorkspaceManager {
         {
             record.currentToken = newToken
             upsertNativeFullscreenRecord(record)
-        }
-
-        if let updatedRestoreSnapshot = entry.managedRestoreSnapshot,
-           previousRestoreSnapshot != updatedRestoreSnapshot
-        {
-            HotPathDebugMetrics.shared.recordManagedRestoreSnapshotPersistenceAttempt(
-                reason: .replacementRekeyed
-            )
-            HotPathDebugMetrics.shared.recordManagedRestoreSnapshotWrite(
-                reason: .replacementRekeyed
-            )
         }
 
         recordReconcileEvent(

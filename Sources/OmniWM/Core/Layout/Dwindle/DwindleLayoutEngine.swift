@@ -571,7 +571,7 @@ final class DwindleLayoutEngine {
         return frames
     }
 
-    // Canonical cached layout frames, excluding any in-flight animation offsets.
+
     func currentFrames(in workspaceId: WorkspaceDescriptor.ID) -> [WindowToken: CGRect] {
         guard let root = roots[workspaceId] else { return [:] }
         var frames: [WindowToken: CGRect] = [:]

@@ -3,15 +3,12 @@ import Foundation
 @MainActor
 final class RuntimeStore {
     private let planner: Planner
-    private let traceRecorder: ReconcileTraceRecorder
     private let nowProvider: () -> Date
 
     init(
-        traceRecorder: ReconcileTraceRecorder,
         planner: Planner = Planner(),
         nowProvider: @escaping () -> Date = Date.init
     ) {
-        self.traceRecorder = traceRecorder
         self.planner = planner
         self.nowProvider = nowProvider
     }
@@ -55,20 +52,13 @@ final class RuntimeStore {
         snapshot: ReconcileSnapshot
     ) -> ReconcileTxn {
         let invariantViolations = InvariantChecks.validate(snapshot: snapshot)
-        var tracedPlan = plan
-        if !invariantViolations.isEmpty {
-            tracedPlan.notes.append(contentsOf: invariantViolations.map(\.traceNote))
-        }
-
-        let txn = ReconcileTxn(
+        return ReconcileTxn(
             timestamp: nowProvider(),
             event: event,
             normalizedEvent: normalizedEvent ?? event,
-            plan: tracedPlan,
+            plan: plan,
             snapshot: snapshot,
             invariantViolations: invariantViolations
         )
-        traceRecorder.append(transaction: txn)
-        return txn
     }
 }

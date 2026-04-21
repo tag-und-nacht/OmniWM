@@ -529,9 +529,6 @@ struct WorkspaceManagerTests {
             frame: frame
         )
 
-        HotPathDebugMetrics.shared.setEnabledForTests(true)
-        HotPathDebugMetrics.shared.reset()
-        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
 
         #expect(
             manager.setManagedRestoreSnapshot(
@@ -609,12 +606,8 @@ struct WorkspaceManagerTests {
         )
 
         let storedSnapshot = manager.managedRestoreSnapshot(for: token)
-        let metrics = HotPathDebugMetrics.shared.snapshot
         #expect(storedSnapshot?.frame == jitteredFrame)
         #expect(storedSnapshot?.niriState == resizedState)
-        #expect(metrics.managedRestoreSnapshotPersistenceAttempts == 0)
-        #expect(metrics.managedRestoreSnapshotWrites == 0)
-        #expect(metrics.managedRestoreSnapshotSemanticNoOpCount == 0)
     }
 
     @Test @MainActor func `equal distance remap uses deterministic tie break`() {

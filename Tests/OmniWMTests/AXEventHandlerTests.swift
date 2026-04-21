@@ -195,42 +195,6 @@ private func lastAppliedBorderFrame(on controller: WMController) -> CGRect? {
 }
 
 @MainActor
-private func createFocusTraceEvents(on controller: WMController) -> [NiriCreateFocusTraceEvent] {
-    controller.axEventHandler.niriCreateFocusTraceSnapshotForTests()
-}
-
-@MainActor
-private func managedReplacementTraceEvents(
-    on controller: WMController
-) -> [AXEventHandler.ManagedReplacementTraceEvent] {
-    controller.axEventHandler.managedReplacementTraceSnapshotForTests()
-}
-
-@MainActor
-private func structuralManagedReplacementMatchedElapsedMillis(on controller: WMController) -> Int? {
-    managedReplacementTraceEvents(on: controller).compactMap { event -> Int? in
-        guard case let .matched(policy, elapsedMillis) = event.kind,
-              policy == "structural"
-        else {
-            return nil
-        }
-        return elapsedMillis
-    }.last
-}
-
-@MainActor
-private func structuralManagedReplacementFlushElapsedMillis(on controller: WMController) -> [Int] {
-    managedReplacementTraceEvents(on: controller).compactMap { event -> Int? in
-        guard case let .flushed(policy, _, _, _, elapsedMillis) = event.kind,
-              policy == "structural"
-        else {
-            return nil
-        }
-        return elapsedMillis
-    }
-}
-
-@MainActor
 private func waitUntilAXEventTest(
     iterations: Int = 100,
     condition: () -> Bool
@@ -503,8 +467,8 @@ private func waitUntilAXEventTest(
         )
         await controller.layoutRefreshController.waitForRefreshWorkForTests()
 
-        // Tile/auto rules with degraded AX facts are deferred to prevent
-        // tooltips and auxiliary windows from destabilizing layout.
+
+
         let entry = controller.workspaceManager.entry(forPid: getpid(), windowId: 816)
         #expect(entry == nil)
     }
@@ -547,29 +511,10 @@ private func waitUntilAXEventTest(
                 relayoutReasons == [.axWindowCreated]
         }
 
-        let trace = createFocusTraceEvents(on: controller)
         #expect(controller.workspaceManager.entry(forPid: getpid(), windowId: 817)?.mode == .tiling)
         #expect(relayoutReasons == [.axWindowCreated])
         #expect(controller.layoutRefreshController.debugCounters.executedByReason[.windowRuleReevaluation, default: 0] == 0)
         #expect(axWindowRefLookupCount >= 2)
-        #expect(trace.contains { event in
-            if case .createSeen(windowId: 817) = event.kind {
-                return true
-            }
-            return false
-        })
-        #expect(trace.contains { event in
-            if case let .createRetryScheduled(windowId, pid, attempt) = event.kind {
-                return windowId == 817 && pid == getpid() && attempt == 1
-            }
-            return false
-        })
-        #expect(trace.contains { event in
-            if case let .candidateTracked(token, _) = event.kind {
-                return token == WindowToken(pid: getpid(), windowId: 817)
-            }
-            return false
-        })
     }
 
     @Test @MainActor func malformedActivationPayloadFallsBackToNonManagedFocus() {
@@ -721,22 +666,12 @@ private func waitUntilAXEventTest(
             source: .workspaceDidActivateApplication
         )
 
-        let deferredTrace = createFocusTraceEvents(on: controller)
         #expect(controller.workspaceManager.focusedToken == oldToken)
         #expect(controller.workspaceManager.pendingFocusedToken == newToken)
         #expect(controller.workspaceManager.preferredFocusToken(in: workspaceId) == newToken)
         #expect(controller.workspaceManager.niriViewportState(for: workspaceId).selectedNodeId == newNode.id)
         #expect(controller.workspaceManager.niriViewportState(for: workspaceId).activeColumnIndex == 1)
         #expect(lastAppliedBorderWindowId(on: controller) == oldToken.windowId)
-        #expect(deferredTrace.contains { event in
-            if case let .activationDeferred(_, token, source, reason, attempt) = event.kind {
-                return token == newToken &&
-                    source == .workspaceDidActivateApplication &&
-                    reason == .pendingFocusMismatch &&
-                    attempt == 1
-            }
-            return false
-        })
 
         controller.axEventHandler.focusedWindowRefProvider = { pid in
             guard pid == getpid() else { return nil }
@@ -747,21 +682,12 @@ private func waitUntilAXEventTest(
             source: .focusedWindowChanged
         )
 
-        let confirmedTrace = createFocusTraceEvents(on: controller)
         #expect(controller.workspaceManager.focusedToken == newToken)
         #expect(controller.workspaceManager.pendingFocusedToken == nil)
         #expect(controller.workspaceManager.preferredFocusToken(in: workspaceId) == newToken)
         #expect(controller.workspaceManager.niriViewportState(for: workspaceId).selectedNodeId == newNode.id)
         #expect(controller.workspaceManager.niriViewportState(for: workspaceId).activeColumnIndex == 1)
         #expect(lastAppliedBorderWindowId(on: controller) == Int(newWindowId))
-        #expect(confirmedTrace.contains { event in
-            if case let .focusConfirmed(token, confirmedWorkspaceId, source) = event.kind {
-                return token == newToken &&
-                    confirmedWorkspaceId == workspaceId &&
-                    source == .focusedWindowChanged
-            }
-            return false
-        })
 
         await controller.layoutRefreshController.waitForSettledRefreshWorkForTests()
 
@@ -883,7 +809,6 @@ private func waitUntilAXEventTest(
             source: .workspaceDidActivateApplication
         )
 
-        let deferredTrace = createFocusTraceEvents(on: controller)
         #expect(controller.workspaceManager.focusedToken == oldToken)
         #expect(controller.workspaceManager.pendingFocusedToken == newToken)
         #expect(controller.workspaceManager.isNonManagedFocusActive == false)
@@ -891,33 +816,11 @@ private func waitUntilAXEventTest(
         #expect(controller.workspaceManager.niriViewportState(for: workspaceId).selectedNodeId == newNode.id)
         #expect(controller.workspaceManager.niriViewportState(for: workspaceId).activeColumnIndex == 1)
         #expect(lastAppliedBorderWindowId(on: controller) == oldToken.windowId)
-        #expect(deferredTrace.contains { event in
-            if case let .activationDeferred(_, token, source, reason, attempt) = event.kind {
-                return token == newToken &&
-                    reason == .missingFocusedWindow &&
-                    attempt >= 1 &&
-                    (source == .focusedWindowChanged || source == .workspaceDidActivateApplication)
-            }
-            return false
-        })
-        #expect(!deferredTrace.contains { event in
-            if case let .nonManagedFallbackEntered(pid, source) = event.kind {
-                return pid == newPid && source == .workspaceDidActivateApplication
-            }
-            return false
-        })
 
         await controller.layoutRefreshController.waitForSettledRefreshWorkForTests()
 
-        let settledBeforeConfirmTrace = createFocusTraceEvents(on: controller)
         #expect(controller.workspaceManager.pendingFocusedToken == newToken)
         #expect(lastAppliedBorderWindowId(on: controller) == oldToken.windowId)
-        #expect(settledBeforeConfirmTrace.contains { event in
-            if case let .borderReapplied(token, phase) = event.kind {
-                return token == oldToken && phase == .animationSettled
-            }
-            return false
-        })
 
         controller.axEventHandler.focusedWindowRefProvider = { pid in
             guard pid == newPid else { return nil }
@@ -928,21 +831,12 @@ private func waitUntilAXEventTest(
             source: .focusedWindowChanged
         )
 
-        let confirmedTrace = createFocusTraceEvents(on: controller)
         #expect(controller.workspaceManager.focusedToken == newToken)
         #expect(controller.workspaceManager.pendingFocusedToken == nil)
         #expect(controller.workspaceManager.preferredFocusToken(in: workspaceId) == newToken)
         #expect(controller.workspaceManager.niriViewportState(for: workspaceId).selectedNodeId == newNode.id)
         #expect(controller.workspaceManager.niriViewportState(for: workspaceId).activeColumnIndex == 1)
         #expect(lastAppliedBorderWindowId(on: controller) == Int(newWindowId))
-        #expect(confirmedTrace.contains { event in
-            if case let .focusConfirmed(token, confirmedWorkspaceId, source) = event.kind {
-                return token == newToken &&
-                    confirmedWorkspaceId == workspaceId &&
-                    source == .focusedWindowChanged
-            }
-            return false
-        })
     }
 
     @Test @MainActor func workspaceSwitchIgnoresStaleOldAppActivationWhileTargetRequestIsPending() async {
@@ -1180,15 +1074,7 @@ private func waitUntilAXEventTest(
         controller.focusWindow(targetToken)
 
         await waitUntilAXEventTest(iterations: 300) {
-            createFocusTraceEvents(on: controller).contains { event in
-                if case let .activationDeferred(_, token, source, reason, attempt) = event.kind {
-                    return token == targetToken &&
-                        source == .focusedWindowChanged &&
-                        reason == .pendingFocusMismatch &&
-                        attempt == 1
-                }
-                return false
-            }
+            controller.workspaceManager.pendingFocusedToken == targetToken
         }
 
         #expect(controller.workspaceManager.pendingFocusedToken == targetToken)
@@ -1273,27 +1159,10 @@ private func waitUntilAXEventTest(
             source: .focusedWindowChanged
         )
 
-        let trace = createFocusTraceEvents(on: controller)
         #expect(controller.focusBridge.activeManagedRequest == nil)
         #expect(controller.workspaceManager.pendingFocusedToken == nil)
         #expect(controller.workspaceManager.focusedToken == observedToken)
         #expect(controller.focusBridge.focusedTarget?.token == observedToken)
-        #expect(!trace.contains { event in
-            if case let .activationDeferred(_, token, source, reason, _) = event.kind {
-                return token == pendingToken &&
-                    source == .focusedWindowChanged &&
-                    reason == .pendingFocusMismatch
-            }
-            return false
-        })
-        #expect(trace.contains { event in
-            if case let .focusConfirmed(token, confirmedWorkspaceId, source) = event.kind {
-                return token == observedToken &&
-                    confirmedWorkspaceId == workspaceId &&
-                    source == .focusedWindowChanged
-            }
-            return false
-        })
     }
 
     @Test @MainActor func externalFocusedWindowChangeWithNoObservedWindowCancelsPendingRequestAndFallsBackToNonManaged() {
@@ -1351,25 +1220,10 @@ private func waitUntilAXEventTest(
             source: .focusedWindowChanged
         )
 
-        let trace = createFocusTraceEvents(on: controller)
         #expect(controller.focusBridge.activeManagedRequest == nil)
         #expect(controller.workspaceManager.pendingFocusedToken == nil)
         #expect(controller.workspaceManager.isNonManagedFocusActive)
         #expect(controller.focusBridge.focusedTarget == nil)
-        #expect(!trace.contains { event in
-            if case let .activationDeferred(_, token, source, reason, _) = event.kind {
-                return token == pendingToken &&
-                    source == .focusedWindowChanged &&
-                    reason == .missingFocusedWindow
-            }
-            return false
-        })
-        #expect(trace.contains { event in
-            if case let .nonManagedFallbackEntered(pid, source) = event.kind {
-                return pid == getpid() && source == .focusedWindowChanged
-            }
-            return false
-        })
     }
 
     @Test @MainActor func externalFocusedWindowChangeWithObservedUnmanagedWindowCancelsPendingRequestAndFallsBackToNonManaged() {
@@ -1431,26 +1285,11 @@ private func waitUntilAXEventTest(
             source: .focusedWindowChanged
         )
 
-        let trace = createFocusTraceEvents(on: controller)
         #expect(controller.focusBridge.activeManagedRequest == nil)
         #expect(controller.workspaceManager.pendingFocusedToken == nil)
         #expect(controller.workspaceManager.isNonManagedFocusActive)
         #expect(controller.focusBridge.focusedTarget?.token == observedToken)
         #expect(controller.focusBridge.focusedTarget?.isManaged == false)
-        #expect(!trace.contains { event in
-            if case let .activationDeferred(_, token, source, reason, _) = event.kind {
-                return token == pendingToken &&
-                    source == .focusedWindowChanged &&
-                    reason == .pendingFocusUnmanagedToken
-            }
-            return false
-        })
-        #expect(trace.contains { event in
-            if case let .nonManagedFallbackEntered(pid, source) = event.kind {
-                return pid == getpid() && source == .focusedWindowChanged
-            }
-            return false
-        })
     }
 
     @Test @MainActor func activationRetryExhaustionClearsPendingFocusAndRestoresConfirmedBorder() async throws {
@@ -1613,17 +1452,7 @@ private func waitUntilAXEventTest(
             source: .workspaceDidActivateApplication
         )
 
-        let deferredTrace = createFocusTraceEvents(on: controller)
         #expect(controller.workspaceManager.pendingFocusedToken == secondPendingToken)
-        #expect(deferredTrace.contains { event in
-            if case let .activationDeferred(_, token, source, reason, attempt) = event.kind {
-                return token == secondPendingToken &&
-                    source == .workspaceDidActivateApplication &&
-                    reason == .pendingFocusMismatch &&
-                    attempt == 1
-            }
-            return false
-        })
 
         controller.axEventHandler.focusedWindowRefProvider = { pid in
             guard pid == getpid() else { return nil }
@@ -2236,9 +2065,6 @@ private func waitUntilAXEventTest(
 
     @Test @MainActor func managedRestoreGeometryBackfillsSnapshotMetadataBeforeFetchingFacts() {
         let controller = makeAXEventTestController()
-        HotPathDebugMetrics.shared.setEnabledForTests(true)
-        HotPathDebugMetrics.shared.reset()
-        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
         guard let workspaceId = controller.activeWorkspace()?.id else {
             Issue.record("Missing active workspace")
             return
@@ -2300,12 +2126,8 @@ private func waitUntilAXEventTest(
 
         controller.recordManagedRestoreGeometry(for: token, frame: refreshedFrame)
 
-        let snapshot = HotPathDebugMetrics.shared.snapshot
         let replacementMetadata = controller.workspaceManager.managedRestoreSnapshot(for: token)?.replacementMetadata
         #expect(factFetchCount == 0)
-        #expect(snapshot.managedRestoreReplacementMetadataCalls == 1)
-        #expect(snapshot.managedRestoreReplacementMetadataFactFetchCount == 0)
-        #expect(snapshot.managedRestoreReplacementMetadataCacheReuseCount == 1)
         #expect(replacementMetadata?.title == "Cached Title")
         #expect(replacementMetadata?.windowLevel == 19)
         #expect(replacementMetadata?.parentWindowId == 42)
@@ -2350,9 +2172,6 @@ private func waitUntilAXEventTest(
             for: token
         )
 
-        HotPathDebugMetrics.shared.setEnabledForTests(true)
-        HotPathDebugMetrics.shared.reset()
-        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
 
         var factFetchCount = 0
         controller.axEventHandler.windowFactsProvider = { _, _ in
@@ -2367,11 +2186,7 @@ private func waitUntilAXEventTest(
 
         controller.recordManagedRestoreGeometry(for: token, frame: jitteredFrame)
 
-        let snapshot = HotPathDebugMetrics.shared.snapshot
         #expect(factFetchCount == 0)
-        #expect(snapshot.managedRestoreGeometryCalls == 1)
-        #expect(snapshot.managedRestoreReplacementMetadataCalls == 0)
-        #expect(snapshot.managedRestoreSnapshotSemanticNoOpCount == 1)
         #expect(controller.workspaceManager.managedRestoreSnapshot(for: token)?.frame == cachedFrame)
     }
 
@@ -2407,21 +2222,13 @@ private func waitUntilAXEventTest(
         )
         controller.recordManagedRestoreGeometry(for: token, frame: frame)
 
-        HotPathDebugMetrics.shared.setEnabledForTests(true)
-        HotPathDebugMetrics.shared.reset()
-        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
 
         controller.reassignManagedWindow(token, to: targetWorkspaceId)
 
         let snapshot = controller.workspaceManager.managedRestoreSnapshot(for: token)
-        let metrics = HotPathDebugMetrics.shared.snapshot
         #expect(controller.axManager.lastAppliedFrame(for: token.windowId) == nil)
         #expect(snapshot?.workspaceId == targetWorkspaceId)
         #expect(snapshot?.replacementMetadata?.workspaceId == targetWorkspaceId)
-        #expect(metrics.managedRestoreGeometryCalls == 1)
-        #expect(metrics.managedRestoreSnapshotPersistenceAttemptsByReason[.workspaceMoved] == 1)
-        #expect(metrics.managedRestoreSnapshotWritesByReason[.workspaceMoved] == 1)
-        #expect(metrics.managedRestoreSnapshotSemanticNoOpCountByReason[.workspaceMoved, default: 0] == 0)
     }
 
     @Test @MainActor func hiddenMoveResizeEventsAreSuppressedButVisibleOnesStillRelayout() async {
@@ -3400,9 +3207,6 @@ private func waitUntilAXEventTest(
 
         #expect(controller.workspaceManager.entry(for: oldToken) == nil)
         #expect(replacementEntry.handle === oldEntry.handle)
-        let matchedElapsedMillis = structuralManagedReplacementMatchedElapsedMillis(on: controller) ?? .max
-        #expect(matchedElapsedMillis >= 130)
-        #expect(matchedElapsedMillis < 200)
     }
 
     @Test @MainActor func structuralReplacementCreateBeforeDestroyStillRekeysWithinSingleGraceWindow() async {
@@ -3496,9 +3300,6 @@ private func waitUntilAXEventTest(
 
         #expect(controller.workspaceManager.entry(for: oldToken) == nil)
         #expect(replacementEntry.handle === oldEntry.handle)
-        let matchedElapsedMillis = structuralManagedReplacementMatchedElapsedMillis(on: controller) ?? .max
-        #expect(matchedElapsedMillis >= 130)
-        #expect(matchedElapsedMillis < 200)
     }
 
     @Test @MainActor func structuralReplacementUnmatchedDestroyUsesSingleGraceWindowBeforeRemoval() async {
@@ -3544,10 +3345,7 @@ private func waitUntilAXEventTest(
             controller.workspaceManager.entry(for: token) == nil
         }
 
-        let flushElapsedMillis = structuralManagedReplacementFlushElapsedMillis(on: controller)
         #expect(controller.workspaceManager.entry(for: token) == nil)
-        #expect(flushElapsedMillis.count == 1)
-        #expect((flushElapsedMillis.first ?? 0) >= 130)
     }
 
     @Test @MainActor func structuralReplacementAmbiguousMultiCreateBurstFlushesWithoutRekeying() async {
@@ -3681,10 +3479,6 @@ private func waitUntilAXEventTest(
         #expect(firstNewEntry.handle !== siblingEntry.handle)
         #expect(secondNewEntry.handle !== oldEntry.handle)
         #expect(secondNewEntry.handle !== siblingEntry.handle)
-        #expect(structuralManagedReplacementMatchedElapsedMillis(on: controller) == nil)
-        let flushElapsedMillis = structuralManagedReplacementFlushElapsedMillis(on: controller)
-        #expect((flushElapsedMillis.last ?? 0) >= 130)
-        #expect((flushElapsedMillis.last ?? .max) < 200)
     }
 
     @Test @MainActor func ghosttyReplacementKeepsDwindleLeafAndRightNeighborStable() async {
@@ -4675,8 +4469,6 @@ private func waitUntilAXEventTest(
         }
 
         #expect(replacementEntry.handle !== oldEntry.handle)
-        #expect(structuralManagedReplacementMatchedElapsedMillis(on: controller) == nil)
-        #expect(managedReplacementTraceEvents(on: controller).isEmpty)
     }
 
     @Test @MainActor func samePidCreateDoesNotStealAwaitingNativeFullscreenReplacementFromDifferentWorkspace() {

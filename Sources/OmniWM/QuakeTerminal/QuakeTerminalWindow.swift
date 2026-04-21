@@ -46,19 +46,19 @@ final class QuakeTerminalWindow: NSPanel {
 
         if flags == .command {
             switch keyCode {
-            case 17: // Cmd+T
+            case 17:
                 tabController?.requestNewTab()
                 return true
-            case 13: // Cmd+W
+            case 13:
                 tabController?.requestCloseActiveTab()
                 return true
-            case 2: // Cmd+D
+            case 2:
                 tabController?.splitActivePane(direction: .horizontal)
                 return true
-            case 18...25: // Cmd+1 through Cmd+8 (keycodes 18-25)
+            case 18...25:
                 tabController?.selectTab(at: Int(keyCode) - 18)
                 return true
-            case 26: // Cmd+9
+            case 26:
                 tabController?.selectTab(at: Int(keyCode) - 18)
                 return true
             default:
@@ -68,16 +68,16 @@ final class QuakeTerminalWindow: NSPanel {
 
         if flags == [.command, .option] {
             switch keyCode {
-            case 123: // Cmd+Option+Left
+            case 123:
                 tabController?.navigatePane(direction: .left)
                 return true
-            case 124: // Cmd+Option+Right
+            case 124:
                 tabController?.navigatePane(direction: .right)
                 return true
-            case 125: // Cmd+Option+Down
+            case 125:
                 tabController?.navigatePane(direction: .down)
                 return true
-            case 126: // Cmd+Option+Up
+            case 126:
                 tabController?.navigatePane(direction: .up)
                 return true
             default:
@@ -87,19 +87,19 @@ final class QuakeTerminalWindow: NSPanel {
 
         if flags == [.command, .shift] {
             switch keyCode {
-            case 30: // Cmd+Shift+]
+            case 30:
                 tabController?.selectNextTab()
                 return true
-            case 33: // Cmd+Shift+[
+            case 33:
                 tabController?.selectPreviousTab()
                 return true
-            case 2: // Cmd+Shift+D
+            case 2:
                 tabController?.splitActivePane(direction: .vertical)
                 return true
-            case 13: // Cmd+Shift+W
+            case 13:
                 tabController?.closeActivePane()
                 return true
-            case 24: // Cmd+Shift+= (equalize)
+            case 24:
                 tabController?.equalizeSplits()
                 return true
             default:
@@ -107,12 +107,12 @@ final class QuakeTerminalWindow: NSPanel {
             }
         }
 
-        if flags == .control && keyCode == 48 { // Ctrl+Tab
+        if flags == .control && keyCode == 48 {
             tabController?.selectNextTab()
             return true
         }
 
-        if flags == [.control, .shift] && keyCode == 48 { // Ctrl+Shift+Tab
+        if flags == [.control, .shift] && keyCode == 48 {
             tabController?.selectPreviousTab()
             return true
         }

@@ -118,8 +118,8 @@ enum BorderUpdateMode {
     case none
 }
 
-// `frameChanges` imply active, restore-eligible windows for this pass.
-// `visibilityChanges` are reserved for explicit hide/show transitions.
+
+
 struct WorkspaceLayoutDiff {
     var frameChanges: [LayoutFrameChange] = []
     var visibilityChanges: [LayoutVisibilityChange] = []

@@ -14,95 +14,11 @@ enum ActivationCallOrigin: String, Equatable {
     case retry
 }
 
-struct NiriCreateFocusTraceEvent: Equatable {
-    enum Kind: Equatable {
-        case createSeen(windowId: UInt32)
-        case createRetryScheduled(windowId: UInt32, pid: pid_t, attempt: Int)
-        case candidateTracked(token: WindowToken, workspaceId: WorkspaceDescriptor.ID)
-        case relayoutActivatedWindow(token: WindowToken, workspaceId: WorkspaceDescriptor.ID)
-        case pendingFocusStarted(requestId: UInt64, token: WindowToken, workspaceId: WorkspaceDescriptor.ID)
-        case activationSourceObserved(pid: pid_t, source: ActivationEventSource)
-        case activationDeferred(
-            requestId: UInt64,
-            token: WindowToken,
-            source: ActivationEventSource,
-            reason: ActivationRetryReason,
-            attempt: Int
-        )
-        case focusConfirmed(token: WindowToken, workspaceId: WorkspaceDescriptor.ID, source: ActivationEventSource)
-        case borderReapplied(token: WindowToken, phase: ManagedBorderReapplyPhase)
-        case nonManagedFallbackEntered(pid: pid_t, source: ActivationEventSource)
-    }
-
-    let timestamp: Date
-    let kind: Kind
-
-    init(
-        timestamp: Date = Date(),
-        kind: Kind
-    ) {
-        self.timestamp = timestamp
-        self.kind = kind
-    }
-}
-
-extension NiriCreateFocusTraceEvent: CustomStringConvertible {
-    var description: String {
-        switch kind {
-        case let .createSeen(windowId):
-            "create_seen window=\(windowId)"
-        case let .createRetryScheduled(windowId, pid, attempt):
-            "create_retry_scheduled window=\(windowId) pid=\(pid) attempt=\(attempt)"
-        case let .candidateTracked(token, workspaceId):
-            "candidate_tracked token=\(token) workspace=\(workspaceId.uuidString)"
-        case let .relayoutActivatedWindow(token, workspaceId):
-            "relayout_activated_window token=\(token) workspace=\(workspaceId.uuidString)"
-        case let .pendingFocusStarted(requestId, token, workspaceId):
-            "pending_focus_started request=\(requestId) token=\(token) workspace=\(workspaceId.uuidString)"
-        case let .activationSourceObserved(pid, source):
-            "activation_source_observed pid=\(pid) source=\(source.rawValue)"
-        case let .activationDeferred(requestId, token, source, reason, attempt):
-            "activation_deferred request=\(requestId) token=\(token) source=\(source.rawValue) reason=\(reason.rawValue) attempt=\(attempt)"
-        case let .focusConfirmed(token, workspaceId, source):
-            "focus_confirmed token=\(token) workspace=\(workspaceId.uuidString) source=\(source.rawValue)"
-        case let .borderReapplied(token, phase):
-            "border_reapplied token=\(token) phase=\(phase.rawValue)"
-        case let .nonManagedFallbackEntered(pid, source):
-            "non_managed_fallback_entered pid=\(pid) source=\(source.rawValue)"
-        }
-    }
-}
-
 @MainActor
 final class AXEventHandler: CGSEventDelegate {
     struct DebugCounters {
         var geometryRelayoutRequests = 0
         var geometryRelayoutsSuppressedDuringGesture = 0
-    }
-
-    struct ManagedReplacementTraceEvent: Equatable {
-        enum Kind: Equatable {
-            case enqueued(
-                policy: String,
-                createCount: Int,
-                destroyCount: Int,
-                holdCount: Int,
-                deadlineReset: Bool
-            )
-            case flushed(
-                policy: String,
-                createCount: Int,
-                destroyCount: Int,
-                holdCount: Int,
-                elapsedMillis: Int
-            )
-            case matched(policy: String, elapsedMillis: Int)
-        }
-
-        let timestamp: TimeInterval
-        let pid: pid_t
-        let workspaceId: WorkspaceDescriptor.ID
-        let kind: Kind
     }
 
     private struct PreparedCreate {
@@ -199,12 +115,6 @@ final class AXEventHandler: CGSEventDelegate {
     )
     private static let stabilizationRetryDelay: Duration = .milliseconds(100)
     private static let createdWindowRetryLimit = 5
-    private static let createFocusTraceLimit = 128
-    private static let managedReplacementTraceLimit = 128
-    private static let createFocusTraceLoggingEnabled =
-        ProcessInfo.processInfo.environment["OMNIWM_DEBUG_NIRI_CREATE_FOCUS"] == "1"
-    private static let managedReplacementTraceLoggingEnabled =
-        ProcessInfo.processInfo.environment["OMNIWM_DEBUG_MANAGED_REPLACEMENT"] == "1"
 
     weak var controller: WMController?
     private var deferredCreatedWindowIds: Set<UInt32> = []
@@ -220,8 +130,6 @@ final class AXEventHandler: CGSEventDelegate {
     private var createdWindowRetryCountById: [UInt32: Int] = [:]
     private var pendingActivationRetryTask: Task<Void, Never>?
     private var pendingActivationRetryRequestId: UInt64?
-    private var createFocusTrace: [NiriCreateFocusTraceEvent] = []
-    private var managedReplacementTrace: [ManagedReplacementTraceEvent] = []
     private var nextManagedReplacementEventSequence: UInt64 = 0
     var windowInfoProvider: ((UInt32) -> WindowServerInfo?)?
     var axWindowRefProvider: ((UInt32, pid_t) -> AXWindowRef?)?
@@ -322,7 +230,6 @@ final class AXEventHandler: CGSEventDelegate {
     }
 
     private func handleCGSWindowCreated(windowId: UInt32) {
-        recordNiriCreateFocusTrace(.init(kind: .createSeen(windowId: windowId)))
         processCreatedWindow(windowId: windowId)
     }
 
@@ -365,8 +272,6 @@ final class AXEventHandler: CGSEventDelegate {
         resetCreatedWindowRetryState()
         resetActivationRetryState()
         controller?.focusBridge.reset()
-        createFocusTrace.removeAll(keepingCapacity: true)
-        managedReplacementTrace.removeAll(keepingCapacity: true)
         pendingWindowRuleReevaluationTask?.cancel()
         pendingWindowRuleReevaluationTask = nil
         pendingWindowRuleReevaluationTargets.removeAll()
@@ -392,54 +297,8 @@ final class AXEventHandler: CGSEventDelegate {
         }
     }
 
-    func niriCreateFocusTraceSnapshotForTests() -> [NiriCreateFocusTraceEvent] {
-        createFocusTrace
-    }
-
-    func managedReplacementTraceSnapshotForTests() -> [ManagedReplacementTraceEvent] {
-        managedReplacementTrace
-    }
-
-    func recordNiriCreateFocusTrace(_ event: NiriCreateFocusTraceEvent) {
-        if createFocusTrace.count == Self.createFocusTraceLimit {
-            createFocusTrace.removeFirst()
-        }
-        createFocusTrace.append(event)
-
-        if Self.createFocusTraceLoggingEnabled {
-            fputs("[NiriCreateFocus] \(event.description)\n", stderr)
-        }
-    }
-
     private func managedReplacementCurrentUptime() -> TimeInterval {
         managedReplacementTimeSourceForTests?() ?? ProcessInfo.processInfo.systemUptime
-    }
-
-    private func managedReplacementPolicyName(_ policy: ManagedReplacementCorrelationPolicy) -> String {
-        switch policy {
-        case .structural:
-            "structural"
-        }
-    }
-
-    private func recordManagedReplacementTrace(
-        key: ManagedReplacementKey,
-        kind: ManagedReplacementTraceEvent.Kind
-    ) {
-        let event = ManagedReplacementTraceEvent(
-            timestamp: managedReplacementCurrentUptime(),
-            pid: key.pid,
-            workspaceId: key.workspaceId,
-            kind: kind
-        )
-        if managedReplacementTrace.count == Self.managedReplacementTraceLimit {
-            managedReplacementTrace.removeFirst()
-        }
-        managedReplacementTrace.append(event)
-
-        if Self.managedReplacementTraceLoggingEnabled {
-            fputs("[ManagedReplacement] pid=\(key.pid) workspace=\(key.workspaceId.uuidString) kind=\(String(describing: kind))\n", stderr)
-        }
     }
 
     private func handleFrameChanged(windowId: UInt32) {
@@ -561,14 +420,6 @@ final class AXEventHandler: CGSEventDelegate {
     private func trackPreparedCreate(_ candidate: PreparedCreate) {
         guard let controller else { return }
         cancelCreatedWindowRetry(windowId: candidate.windowId)
-        recordNiriCreateFocusTrace(
-            .init(
-                kind: .candidateTracked(
-                    token: candidate.token,
-                    workspaceId: candidate.workspaceId
-                )
-            )
-        )
 
         if restoreNativeFullscreenReplacementIfNeeded(
             token: candidate.token,
@@ -834,14 +685,6 @@ final class AXEventHandler: CGSEventDelegate {
         ).allowsFocusChange else {
             return
         }
-        recordNiriCreateFocusTrace(
-            .init(
-                kind: .activationSourceObserved(
-                    pid: pid,
-                    source: source
-                )
-            )
-        )
         guard controller.hasStartedServices else { return }
 
         if source != .focusedWindowChanged {
@@ -1080,15 +923,6 @@ final class AXEventHandler: CGSEventDelegate {
                 activateWorkspaceOnMonitor: shouldActivateWorkspace
             )
             cancelActivationRetry()
-            recordNiriCreateFocusTrace(
-                .init(
-                    kind: .focusConfirmed(
-                        token: entry.token,
-                        workspaceId: wsId,
-                        source: source
-                    )
-                )
-            )
         } else {
             _ = controller.workspaceManager.setManagedFocus(
                 entry.token,
@@ -1720,16 +1554,6 @@ final class AXEventHandler: CGSEventDelegate {
         burst.append(create: pendingCreate)
         pendingManagedReplacementBursts[key] = burst
         let resetExistingDeadline = isNewBurst
-        recordManagedReplacementTrace(
-            key: key,
-            kind: .enqueued(
-                policy: managedReplacementPolicyName(policy),
-                createCount: burst.creates.count,
-                destroyCount: burst.destroys.count,
-                holdCount: 0,
-                deadlineReset: resetExistingDeadline
-            )
-        )
         scheduleManagedReplacementFlush(
             for: key,
             policy: policy,
@@ -1749,16 +1573,6 @@ final class AXEventHandler: CGSEventDelegate {
         burst.append(destroy: pendingDestroy)
         pendingManagedReplacementBursts[key] = burst
         let resetExistingDeadline = isNewBurst
-        recordManagedReplacementTrace(
-            key: key,
-            kind: .enqueued(
-                policy: managedReplacementPolicyName(policy),
-                createCount: burst.creates.count,
-                destroyCount: burst.destroys.count,
-                holdCount: 0,
-                deadlineReset: resetExistingDeadline
-            )
-        )
         scheduleManagedReplacementFlush(
             for: key,
             policy: policy,
@@ -2129,30 +1943,9 @@ final class AXEventHandler: CGSEventDelegate {
     private func flushManagedReplacementBurst(for key: ManagedReplacementKey) {
         pendingManagedReplacementTasks.removeValue(forKey: key)?.cancel()
         guard let burst = pendingManagedReplacementBursts.removeValue(forKey: key) else { return }
-        let elapsedMillis = max(
-            0,
-            Int(((managedReplacementCurrentUptime() - burst.firstEventUptime) * 1000).rounded())
-        )
-        recordManagedReplacementTrace(
-            key: key,
-            kind: .flushed(
-                policy: managedReplacementPolicyName(burst.policy),
-                createCount: burst.creates.count,
-                destroyCount: burst.destroys.count,
-                holdCount: 0,
-                elapsedMillis: elapsedMillis
-            )
-        )
 
         if let pair = matchedManagedReplacementPair(in: burst) {
             if completeManagedReplacement(destroy: pair.destroy, create: pair.create) {
-                recordManagedReplacementTrace(
-                    key: key,
-                    kind: .matched(
-                        policy: managedReplacementPolicyName(burst.policy),
-                        elapsedMillis: elapsedMillis
-                    )
-                )
                 replayManagedReplacementEvents(
                     burst.orderedEvents(excludingSequences: pair.excludedSequences)
                 )
@@ -2231,15 +2024,6 @@ final class AXEventHandler: CGSEventDelegate {
 
         createdWindowRetryCountById[windowId] = attempt
         pendingCreatedWindowRetryTasks.removeValue(forKey: windowId)?.cancel()
-        recordNiriCreateFocusTrace(
-            .init(
-                kind: .createRetryScheduled(
-                    windowId: windowId,
-                    pid: pid,
-                    attempt: attempt
-                )
-            )
-        )
         pendingCreatedWindowRetryTasks[windowId] = Task { @MainActor [weak self] in
             try? await Task.sleep(for: Self.stabilizationRetryDelay)
             guard !Task.isCancelled, let self else { return }
@@ -2342,14 +2126,6 @@ final class AXEventHandler: CGSEventDelegate {
                     )
                 }
 
-                recordNiriCreateFocusTrace(
-                    .init(
-                        kind: .nonManagedFallbackEntered(
-                            pid: pid,
-                            source: source
-                        )
-                    )
-                )
             case let .cancelActivationRetry(requestId):
                 if let requestId {
                     cancelActivationRetry(requestId: requestId)
@@ -2488,17 +2264,6 @@ final class AXEventHandler: CGSEventDelegate {
         guard controller != nil else { return }
         cancelActivationRetry()
         pendingActivationRetryRequestId = request.requestId
-        recordNiriCreateFocusTrace(
-            .init(
-                kind: .activationDeferred(
-                    requestId: request.requestId,
-                    token: request.token,
-                    source: source,
-                    reason: reason,
-                    attempt: request.retryCount
-                )
-            )
-        )
         let retryOrigin: ActivationCallOrigin = origin == .probe ? .probe : .retry
         pendingActivationRetryTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: Self.stabilizationRetryDelay)
@@ -2536,23 +2301,7 @@ final class AXEventHandler: CGSEventDelegate {
                source: .borderReapplyRetryExhaustedFallback
            )
         {
-            recordNiriCreateFocusTrace(
-                .init(
-                    kind: .borderReapplied(
-                        token: target.token,
-                        phase: .retryExhaustedFallback
-                    )
-                )
-            )
         } else {
-            recordNiriCreateFocusTrace(
-                .init(
-                    kind: .nonManagedFallbackEntered(
-                        pid: pid,
-                        source: source
-                    )
-                )
-            )
             controller.hideKeyboardFocusBorder(
                 source: .borderReapplyRetryExhaustedFallback,
                 reason: "retry exhausted without renderable target",

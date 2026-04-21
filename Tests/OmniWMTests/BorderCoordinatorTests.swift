@@ -114,13 +114,7 @@ struct BorderCoordinatorTests {
         )
 
         let observedRevalidation = await waitForBorderCoordinatorCondition(timeout: .seconds(5)) {
-            let trace = controller.borderCoordinator.traceSnapshotForTests()
             return lastAppliedBorderWindowIdForLayoutPlanTests(on: controller) == 901
-                && trace.contains {
-                    $0.source == .fallbackLeaseExpired
-                        && $0.action == .update
-                        && $0.reason == "fallback lease revalidated"
-                }
         }
         #expect(observedRevalidation)
     }
@@ -163,13 +157,7 @@ struct BorderCoordinatorTests {
         #expect(controller.borderCoordinator.reconcile(event: .cgsFrameChanged(windowId: 902)))
 
         let observedLeaseExtension = await waitForBorderCoordinatorCondition(timeout: .seconds(5)) {
-            let trace = controller.borderCoordinator.traceSnapshotForTests()
             return lastAppliedBorderWindowIdForLayoutPlanTests(on: controller) == 902
-                && trace.contains {
-                    $0.source == .fallbackLeaseExpired
-                        && $0.action == .ignore
-                        && $0.reason == "lease extended during live motion"
-                }
         }
         #expect(observedLeaseExtension)
     }
@@ -250,11 +238,7 @@ struct BorderCoordinatorTests {
 
         #expect(!controller.borderCoordinator.reconcile(event: .cgsFrameChanged(windowId: 903)))
 
-        let trace = controller.borderCoordinator.traceSnapshotForTests()
         #expect(lastAppliedBorderWindowIdForLayoutPlanTests(on: controller) == 904)
-        #expect(trace.last?.source == .cgsFrameChanged)
-        #expect(trace.last?.action == .ignore)
-        #expect(trace.last?.reason == "stale frame event")
     }
 
     @Test @MainActor func managedRenderUsesSafeFallbackOrderingWhenWindowServerPidMismatches() {
@@ -442,9 +426,6 @@ struct BorderCoordinatorTests {
         let frame = CGRect(x: 180, y: 140, width: 720, height: 520)
         var windowFactsLookups = 0
 
-        HotPathDebugMetrics.shared.setEnabledForTests(true)
-        HotPathDebugMetrics.shared.reset()
-        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
 
         controller.setBordersEnabled(true)
         controller.axEventHandler.windowInfoProvider = { windowId in
@@ -492,15 +473,6 @@ struct BorderCoordinatorTests {
 
         #expect(windowFactsLookups == 1)
         #expect(lastAppliedBorderWindowIdForLayoutPlanTests(on: controller) == 909)
-        #expect(
-            HotPathDebugMetrics.shared.snapshot.borderReconcileCacheOutcomeCounts[.fullResolution, default: 0] == 1
-        )
-        #expect(
-            HotPathDebugMetrics.shared.snapshot.borderReconcileCacheOutcomeCounts[.fastPathHit, default: 0] == 1
-        )
-        #expect(
-            HotPathDebugMetrics.shared.snapshot.borderReconcileCacheOutcomeCounts[.eligibilityCacheHit, default: 0] == 0
-        )
     }
 
     @Test @MainActor func managedRenderReusesEligibilityWhenPreferredFrameChangesOutsideFastPathTolerance() {
@@ -527,9 +499,6 @@ struct BorderCoordinatorTests {
         let secondFrame = CGRect(x: 208, y: 160, width: 720, height: 520)
         var windowFactsLookups = 0
 
-        HotPathDebugMetrics.shared.setEnabledForTests(true)
-        HotPathDebugMetrics.shared.reset()
-        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
 
         controller.setBordersEnabled(true)
         controller.axEventHandler.windowInfoProvider = { windowId in
@@ -575,14 +544,9 @@ struct BorderCoordinatorTests {
             )
         )
 
-        let metrics = HotPathDebugMetrics.shared.snapshot
         #expect(windowFactsLookups == 1)
         #expect(lastAppliedBorderWindowIdForLayoutPlanTests(on: controller) == 914)
         #expect(lastAppliedBorderFrameForLayoutPlanTests(on: controller) == secondFrame)
-        #expect(metrics.borderReconcileCacheOutcomeCounts[.fullResolution, default: 0] == 1)
-        #expect(metrics.borderReconcileCacheOutcomeCounts[.eligibilityCacheHit, default: 0] == 1)
-        #expect(metrics.borderReconcileCacheOutcomeCounts[.fastPathHit, default: 0] == 0)
-        #expect(metrics.borderReconcileCacheMissComponents[.preferredFrame, default: 0] == 1)
     }
 
     @Test @MainActor func managedEligibilityCacheReusesFullscreenAndMinimizedState() {
@@ -611,9 +575,6 @@ struct BorderCoordinatorTests {
         var fullscreenLookups = 0
         var minimizedLookups = 0
 
-        HotPathDebugMetrics.shared.setEnabledForTests(true)
-        HotPathDebugMetrics.shared.reset()
-        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
 
         controller.setBordersEnabled(true)
         controller.axEventHandler.windowInfoProvider = { windowId in
@@ -667,15 +628,11 @@ struct BorderCoordinatorTests {
             )
         )
 
-        let metrics = HotPathDebugMetrics.shared.snapshot
         #expect(windowFactsLookups == 1)
         #expect(fullscreenLookups == 1)
         #expect(minimizedLookups == 1)
         #expect(lastAppliedBorderWindowIdForLayoutPlanTests(on: controller) == 915)
         #expect(lastAppliedBorderFrameForLayoutPlanTests(on: controller) == secondFrame)
-        #expect(metrics.borderReconcileCacheOutcomeCounts[.fullResolution, default: 0] == 1)
-        #expect(metrics.borderReconcileCacheOutcomeCounts[.eligibilityCacheHit, default: 0] == 1)
-        #expect(metrics.borderReconcileCacheOutcomeCounts[.fastPathHit, default: 0] == 0)
     }
 
     @Test @MainActor func orderingCacheRefreshesWhenCornerRadiusChanges() {
@@ -703,9 +660,6 @@ struct BorderCoordinatorTests {
         var cornerRadiusLookups = 0
         var currentCornerRadius: CGFloat? = 18
 
-        HotPathDebugMetrics.shared.setEnabledForTests(true)
-        HotPathDebugMetrics.shared.reset()
-        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
 
         controller.setBordersEnabled(true)
         controller.axEventHandler.windowInfoProvider = { windowId in
@@ -756,14 +710,11 @@ struct BorderCoordinatorTests {
             )
         )
 
-        let metrics = HotPathDebugMetrics.shared.snapshot
         let ownerState = controller.borderCoordinator.ownerStateSnapshotForTests()
         #expect(cornerRadiusLookups == 2)
         #expect(lastAppliedBorderWindowIdForLayoutPlanTests(on: controller) == 916)
         #expect(lastAppliedBorderFrameForLayoutPlanTests(on: controller) == secondFrame)
         #expect(ownerState.orderingMetadata?.cornerRadius == 24)
-        #expect(metrics.borderReconcileCacheOutcomeCounts[.fullResolution, default: 0] == 1)
-        #expect(metrics.borderReconcileCacheOutcomeCounts[.eligibilityCacheHit, default: 0] == 1)
     }
 
     @Test @MainActor func representativeInvalidationSourcesForceManagedCacheReevaluation() {
@@ -796,9 +747,6 @@ struct BorderCoordinatorTests {
             var cornerRadiusLookups = 0
             var currentCornerRadius: CGFloat? = 18
 
-            HotPathDebugMetrics.shared.setEnabledForTests(true)
-            HotPathDebugMetrics.shared.reset()
-            defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
 
             controller.setBordersEnabled(true)
             controller.axEventHandler.windowInfoProvider = { requestedWindowId in
@@ -859,7 +807,6 @@ struct BorderCoordinatorTests {
                 )
             )
 
-            let metrics = HotPathDebugMetrics.shared.snapshot
             let ownerState = controller.borderCoordinator.ownerStateSnapshotForTests()
             #expect(windowFactsLookups == 2)
             #expect(fullscreenLookups == 2)
@@ -868,9 +815,6 @@ struct BorderCoordinatorTests {
             #expect(lastAppliedBorderWindowIdForLayoutPlanTests(on: controller) == windowId)
             #expect(lastAppliedBorderFrameForLayoutPlanTests(on: controller) == secondFrame)
             #expect(ownerState.orderingMetadata?.cornerRadius == 26)
-            #expect(metrics.borderReconcileCacheOutcomeCounts[.fullResolution, default: 0] == 2)
-            #expect(metrics.borderReconcileCacheOutcomeCounts[.eligibilityCacheHit, default: 0] == 0)
-            #expect(metrics.borderReconcileCacheOutcomeCounts[.fastPathHit, default: 0] == 0)
         }
 
         assertInvalidation(source: .workspaceActivation, windowId: 918)
@@ -907,9 +851,6 @@ struct BorderCoordinatorTests {
         var minimizedLookups = 0
         var cornerRadiusLookups = 0
 
-        HotPathDebugMetrics.shared.setEnabledForTests(true)
-        HotPathDebugMetrics.shared.reset()
-        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
 
         controller.setBordersEnabled(true)
         controller.axEventHandler.windowInfoProvider = { windowId in
@@ -997,7 +938,6 @@ struct BorderCoordinatorTests {
             )
         )
 
-        let metrics = HotPathDebugMetrics.shared.snapshot
         let ownerState = controller.borderCoordinator.ownerStateSnapshotForTests()
         #expect(windowFactsLookups == 2)
         #expect(fullscreenLookups == 2)
@@ -1007,9 +947,6 @@ struct BorderCoordinatorTests {
         #expect(lastAppliedBorderFrameForLayoutPlanTests(on: controller) == secondFrame)
         #expect(ownerState.owner == .managed(token: newToken, wid: 922, workspaceId: workspaceId))
         #expect(ownerState.orderingMetadata?.cornerRadius == 24)
-        #expect(metrics.borderReconcileCacheOutcomeCounts[.fullResolution, default: 0] == 2)
-        #expect(metrics.borderReconcileCacheOutcomeCounts[.eligibilityCacheHit, default: 0] == 0)
-        #expect(metrics.borderReconcileCacheOutcomeCounts[.fastPathHit, default: 0] == 0)
     }
 
     @Test @MainActor func cgsFrameChangeDoesNotPolluteRenderRequestedMetrics() {
@@ -1034,9 +971,6 @@ struct BorderCoordinatorTests {
 
         let frame = CGRect(x: 264, y: 204, width: 720, height: 520)
 
-        HotPathDebugMetrics.shared.setEnabledForTests(true)
-        HotPathDebugMetrics.shared.reset()
-        defer { HotPathDebugMetrics.shared.setEnabledForTests(false) }
 
         controller.setBordersEnabled(true)
         controller.focusBridge.setFocusedTarget(controller.keyboardFocusTarget(for: token, axRef: axRef))
@@ -1072,20 +1006,9 @@ struct BorderCoordinatorTests {
             )
         )
 
-        let metricsAfterRender = HotPathDebugMetrics.shared.snapshot
         #expect(controller.borderCoordinator.reconcile(event: .cgsFrameChanged(windowId: 917)))
 
-        let metricsAfterFrameChange = HotPathDebugMetrics.shared.snapshot
         #expect(lastAppliedBorderWindowIdForLayoutPlanTests(on: controller) == 917)
-        #expect(metricsAfterFrameChange.borderRenderRequestedCalls == metricsAfterRender.borderRenderRequestedCalls)
-        #expect(
-            metricsAfterFrameChange.borderReconcileCacheOutcomeCounts
-                == metricsAfterRender.borderReconcileCacheOutcomeCounts
-        )
-        #expect(
-            metricsAfterFrameChange.borderReconcileCacheMissComponents
-                == metricsAfterRender.borderReconcileCacheMissComponents
-        )
     }
 
     @Test @MainActor func managedRenderInvalidatesCachedEligibilityWhenWindowServerMetadataChanges() {
@@ -1367,48 +1290,4 @@ struct BorderCoordinatorTests {
         #expect(unsubscriptions == [[913]])
     }
 
-    @Test @MainActor func traceBufferStaysBoundedAndTitleFree() {
-        let controller = makeLayoutPlanTestController()
-        let target = makeBorderCoordinatorFallbackTarget(windowId: 906)
-        let frame = CGRect(x: 12, y: 14, width: 340, height: 220)
-        let secretTitle = "Secret Border Title"
-
-        controller.setBordersEnabled(true)
-        controller.borderCoordinator.observedFrameProviderForTests = { _ in frame }
-        controller.axEventHandler.windowInfoProvider = { windowId in
-            guard windowId == 906 else { return nil }
-            return makeBorderCoordinatorWindowInfo(
-                id: windowId,
-                frame: frame,
-                title: secretTitle
-            )
-        }
-        controller.axEventHandler.windowFactsProvider = { axRef, _ in
-            makeBorderCoordinatorWindowFacts(
-                title: secretTitle,
-                windowServer: makeBorderCoordinatorWindowInfo(
-                    id: UInt32(axRef.windowId),
-                    frame: frame,
-                    title: secretTitle
-                )
-            )
-        }
-
-        for _ in 0..<140 {
-            controller.focusBridge.setFocusedTarget(target)
-            _ = controller.borderCoordinator.reconcile(
-                event: .renderRequested(
-                    source: .manualRender,
-                    target: target,
-                    preferredFrame: nil,
-                    policy: .direct
-                )
-            )
-        }
-
-        let trace = controller.borderCoordinator.traceSnapshotForTests()
-        #expect(trace.count == 128)
-        #expect(trace.allSatisfy { ($0.rawFocus ?? "").contains(secretTitle) == false })
-        #expect(trace.last?.rawFocus == "pid=\(getpid()) wid=906")
-    }
 }

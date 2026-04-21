@@ -624,7 +624,7 @@ class NiriContainer: NiriNode {
         return windows[idx]
     }
 
-    // Storage index 0 is the visual bottom of a column; overlay index 0 is the visual top.
+
     func visualTileIndex(forStorageTileIndex storageIndex: Int) -> Int? {
         let count = windowNodes.count
         guard storageIndex >= 0, storageIndex < count else { return nil }

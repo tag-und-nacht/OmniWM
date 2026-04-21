@@ -120,7 +120,7 @@ import QuartzCore
         return plans
     }
 
-    // MARK: - Layout Capability Commands
+
 
     func focusNeighbor(direction: Direction) {
         guard let controller else { return }
@@ -293,7 +293,7 @@ import QuartzCore
         return true
     }
 
-    // MARK: - Layout Engine Configuration
+
 
     func enableDwindleLayout() {
         guard let controller else { return }

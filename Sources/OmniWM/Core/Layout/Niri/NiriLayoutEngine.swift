@@ -359,7 +359,7 @@ final class NiriLayoutEngine {
         if let aspectRatio = singleWindowAspectRatio {
             self.singleWindowAspectRatio = aspectRatio
         }
-        // Double optional distinguishes "no config change" from "set Auto/nil".
+
         if let defaultColumnWidth {
             self.defaultColumnWidth = defaultColumnWidth?.clamped(to: 0.05 ... 1.0)
         }
