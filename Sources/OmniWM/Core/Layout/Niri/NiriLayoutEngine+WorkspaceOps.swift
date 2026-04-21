@@ -75,14 +75,13 @@ extension NiriLayoutEngine {
 
         removeEmptyColumnsIfWorkspaceEmpty(in: targetRoot)
 
-        let allCols = columns(in: sourceWorkspaceId)
         var fallbackSelection: NodeId?
         if let colIdx = columnIndex(of: column, in: sourceWorkspaceId) {
-            if colIdx > 0 {
-                fallbackSelection = allCols[colIdx - 1].firstChild()?.id
-            } else if allCols.count > 1 {
-                fallbackSelection = allCols[1].firstChild()?.id
-            }
+            fallbackSelection = topologyFallbackSelectionOnColumnRemoval(
+                columnIndex: colIdx,
+                in: sourceWorkspaceId,
+                state: sourceState
+            )
         }
 
         column.detach()

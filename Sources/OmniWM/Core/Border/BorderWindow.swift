@@ -55,10 +55,7 @@ final class BorderWindow {
             },
             transactionHide: { SkyLight.shared.transactionHide($0) },
             backingScaleForFrame: { targetFrame in
-                let targetScreen = NSScreen.screens.first(where: {
-                    $0.frame.contains(targetFrame.center)
-                }) ?? NSScreen.main ?? NSScreen.screens.first
-                return targetScreen?.backingScaleFactor ?? 2.0
+                ScreenCoordinateSpace.backingScale(forAppKitRect: targetFrame)
             }
         )
     }
@@ -73,6 +70,7 @@ final class BorderWindow {
     private var currentTargetWid: UInt32 = 0
     private var currentOrderingMetadata: BorderOrderingMetadata?
     private var origin: CGPoint = .zero
+    private var lastAppliedOrigin: CGPoint?
     private var needsRedraw = true
     private var isVisible = false
     private var hasLiveOwner = false
@@ -88,6 +86,7 @@ final class BorderWindow {
 
 
     private static let sizeJitterTolerance: CGFloat = 1.0
+    private static let originJitterTolerance: CGFloat = 0.5
 
     init(config: BorderConfig, operations: Operations = .live) {
         self.config = config
@@ -166,7 +165,18 @@ final class BorderWindow {
         let needsOrdering = createdWindow
             || !isVisible
             || lastAppliedOrderingMetadata != resolvedOrderingMetadata
-        move(ordering: resolvedOrderingMetadata, needsOrdering: needsOrdering)
+        let originChanged: Bool
+        if let lastAppliedOrigin {
+            originChanged =
+                abs(origin.x - lastAppliedOrigin.x) > Self.originJitterTolerance
+                || abs(origin.y - lastAppliedOrigin.y) > Self.originJitterTolerance
+        } else {
+            originChanged = true
+        }
+        if needsOrdering || originChanged {
+            move(ordering: resolvedOrderingMetadata, needsOrdering: needsOrdering)
+            lastAppliedOrigin = origin
+        }
         isVisible = true
         lastAppliedOrderingMetadata = resolvedOrderingMetadata
     }
@@ -286,6 +296,7 @@ final class BorderWindow {
         currentTargetWid = 0
         currentOrderingMetadata = nil
         origin = .zero
+        lastAppliedOrigin = nil
         isVisible = false
         hasLiveOwner = false
         lastAppliedOrderingMetadata = nil

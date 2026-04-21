@@ -144,7 +144,10 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
         #expect(controller.workspaceManager.preferredFocusToken(in: workspaceId) == token)
     }
 
-    @Test @MainActor func windowCloseAnimationCachesDisplayLinkReverseLookup() {
+    @Test @MainActor func windowCloseAnimationCachesDisplayLinkReverseLookup() async {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
         let controller = makeLayoutPlanTestController()
         guard let monitor = controller.workspaceManager.monitors.first,
               let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
@@ -183,7 +186,10 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
         #expect(controller.layoutRefreshController.layoutState.displayIdByLink[ObjectIdentifier(link)] == nil)
     }
 
-    @Test @MainActor func displayLinkSchedulingIsIdempotentAcrossAnimationEntryPoints() {
+    @Test @MainActor func displayLinkSchedulingIsIdempotentAcrossAnimationEntryPoints() async {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
         let controller = makeLayoutPlanTestController()
         guard let monitor = controller.workspaceManager.monitors.first,
               let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
@@ -1685,7 +1691,10 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
         )
     }
 
-    @Test @MainActor func restoreScratchpadWindowWithoutRestoreGeometryKeepsHiddenStateAndSkipsSuccessAction() {
+    @Test @MainActor func restoreScratchpadWindowWithoutRestoreGeometryKeepsHiddenStateAndSkipsSuccessAction() async {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
         let controller = makeLayoutPlanTestController()
         AXWindowService.fastFrameProviderForTests = { _ in nil }
         defer {
@@ -2078,6 +2087,9 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
     }
 
     @Test @MainActor func pendingRevealTransactionSurvivesManagedRekeyDuringDelayedVerification() async {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
         let controller = makeLayoutPlanTestController()
         guard let monitor = controller.workspaceManager.monitors.first,
               let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
@@ -2266,7 +2278,10 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
         #expect(controller.axManager.recentFrameWriteFailure(for: token.windowId) == nil)
     }
 
-    @Test @MainActor func workspaceInactiveHideUsesManagedRestoreSnapshotFrameHintOrFailsClosedWhenMoveCannotBeVerified() {
+    @Test @MainActor func workspaceInactiveHideUsesManagedRestoreSnapshotFrameHintOrFailsClosedWhenMoveCannotBeVerified() async {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
         let controller = makeLayoutPlanTestController()
         AXWindowService.fastFrameProviderForTests = { _ in nil }
         defer {
@@ -2320,7 +2335,10 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
         }
     }
 
-    @Test @MainActor func workspaceInactiveHideTreatsLastAppliedFrameAsHintAndFailsClosedWhenMoveCannotBeVerified() {
+    @Test @MainActor func workspaceInactiveHideTreatsLastAppliedFrameAsHintAndFailsClosedWhenMoveCannotBeVerified() async {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
         let controller = makeLayoutPlanTestController()
         AXWindowService.fastFrameProviderForTests = { _ in nil }
         defer {
@@ -2361,7 +2379,10 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
         #expect(!controller.layoutRefreshController.isAwaitingFreshFrameAfterWorkspaceHideFailure(for: token.windowId))
     }
 
-    @Test @MainActor func workspaceInactiveHideRetriesOnceThenAwaitsFreshFrame() {
+    @Test @MainActor func workspaceInactiveHideRetriesOnceThenAwaitsFreshFrame() async {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
         let controller = makeLayoutPlanTestController()
         AXWindowService.fastFrameProviderForTests = { _ in nil }
         defer {
@@ -2646,7 +2667,10 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
         #expect(controller.workspaceManager.nativeFullscreenRestoreContext(for: token) == nil)
     }
 
-    @Test @MainActor func hideWindowWithoutResolvedGeometryDoesNotMarkWindowHidden() {
+    @Test @MainActor func hideWindowWithoutResolvedGeometryDoesNotMarkWindowHidden() async {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
         let controller = makeLayoutPlanTestController()
         AXWindowService.fastFrameProviderForTests = { _ in nil }
         defer {

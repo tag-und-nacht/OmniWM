@@ -24,6 +24,15 @@ private func makeMonitorDescriptionTestMonitor(
 }
 
 @Suite struct MonitorDescriptionTests {
+    @Test func sortedByPositionUsesDisplayIdForIdenticalOrigins() {
+        let highDisplay = makeMonitorDescriptionTestMonitor(displayId: 200, name: "High", x: 0, y: 0)
+        let lowDisplay = makeMonitorDescriptionTestMonitor(displayId: 100, name: "Low", x: 0, y: 0)
+
+        let sorted = Monitor.sortedByPosition([highDisplay, lowDisplay])
+
+        #expect(sorted.map(\.displayId) == [100, 200])
+    }
+
     @Test func outputResolvesByExactDisplayId() {
         let mainMonitor = makeMonitorDescriptionTestMonitor(displayId: 100, name: "Main", x: 0, y: 0)
         let second = makeMonitorDescriptionTestMonitor(displayId: 200, name: "Second", x: 1920, y: 0)

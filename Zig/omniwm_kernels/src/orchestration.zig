@@ -1180,6 +1180,13 @@ fn deferManagedActivation(
     const next_attempt = nextRetryCount(request, source, retry_limit);
     if (next_attempt > retry_limit) {
         if (origin == activation_origin_probe) {
+            try appendContinueManagedFocusRequest(
+                actions,
+                request_id,
+                retry_reason,
+                source,
+                origin,
+            );
             var decision = makeDecision(decision_managed_activation_deferred);
             decision.request_id = request_id;
             decision.retry_reason = retry_reason;
@@ -2644,7 +2651,8 @@ test "orchestration step leaves probe-origin retry exhaustion pending" {
     try std.testing.expectEqual(kernel_ok, omniwm_orchestration_step(&input, &output));
     try std.testing.expectEqual(decision_managed_activation_deferred, output.decision.kind);
     try std.testing.expectEqual(retry_pending_focus_unmanaged_token, output.decision.retry_reason);
-    try std.testing.expectEqual(@as(usize, 0), output.action_count);
+    try std.testing.expectEqual(@as(usize, 1), output.action_count);
+    try std.testing.expectEqual(action_continue_managed_focus_request, output.actions.?[0].kind);
     try std.testing.expect(output.snapshot.focus.has_active_managed_request != 0);
     try std.testing.expectEqual(@as(u32, 5), output.snapshot.focus.active_managed_request.retry_count);
     try std.testing.expect(output.snapshot.focus.has_pending_focused_token != 0);

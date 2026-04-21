@@ -481,6 +481,24 @@ final class BorderCoordinator {
 
         let previousOwner = ownerState.owner
         let nextOwner = owner(for: target)
+
+        if source == .borderReapplyPostLayout,
+           nextOwner.isManaged,
+           previousOwner == nextOwner,
+           !source.requiresManagedWindowInfoRefresh,
+           !source.invalidatesManagedEligibilityCache,
+           let preferredFrame,
+           let orderingMetadata = ownerState.orderingMetadata
+        {
+            applyManagedFastPath(
+                target: target,
+                frame: preferredFrame,
+                ordering: orderingMetadata,
+                policy: policy
+            )
+            return true
+        }
+
         adoptOwnerIfNeeded(nextOwner)
 
         switch resolveRenderDecision(
@@ -503,6 +521,23 @@ final class BorderCoordinator {
             }
             return false
         }
+    }
+
+    private func applyManagedFastPath(
+        target: KeyboardFocusTarget,
+        frame: CGRect,
+        ordering: BorderOrderingMetadata,
+        policy: KeyboardFocusBorderRenderPolicy
+    ) {
+        ownerState.resolvedFrame = frame
+        ownerState.lastRenderPolicy = policy
+
+        controller?.borderManager.updateFocusedWindow(
+            frame: frame,
+            windowId: target.windowId,
+            ordering: ordering
+        )
+        cancelFallbackLease()
     }
 
     private func reconcileCurrentOwnerFrameChange(windowId: UInt32) -> Bool {

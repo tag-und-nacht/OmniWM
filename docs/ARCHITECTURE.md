@@ -574,7 +574,7 @@ The Niri directory is the largest subsystem. Files are organized by responsibili
 |----------|-------|---------|
 | Core engine | `NiriLayoutEngine.swift`, `NiriNode.swift`, `NiriLayout.swift` | Engine class, node tree (Root/Container/Window), pixel-rounding utilities |
 | Navigation/topology | `NiriNavigation.swift`, `NiriTopologyKernel.swift` | Thin Swift boundary for workspace-local focus, insertion, removal, movement, and viewport planning |
-| Constraint solving | `NiriConstraintSolver.swift` | `NiriAxisSolver` distributes space among windows respecting min/max size constraints |
+| Constraint solving | `omniwm_niri_layout_solve` (Zig) | Axis solver embedded in the layout kernel distributes space while respecting min/max size constraints |
 | Monitor model | `NiriMonitor.swift` | Per-monitor state: geometry, workspace roots, workspace switch animation |
 | Viewport | `ViewportState.swift`, `+Animation`, `+ColumnTransitions`, `+Geometry`, `+Gestures` | Horizontal scroll offset, spring physics, gesture tracking |
 | Interactive move | `InteractiveMove.swift`, `+InteractiveMove`, `DragGhostController.swift`, `DragGhostWindow.swift`, `SwapTargetOverlay.swift` | Mouse-driven window dragging with ghost thumbnail and swap target indicators |
@@ -585,7 +585,7 @@ The Niri directory is the largest subsystem. Files are organized by responsibili
 
 **Interactive Move/Resize:** Users can drag windows between columns using Option+Shift+click. `InteractiveMove` tracks the drag state (origin column, hover target). `DragGhostController` captures a `ScreenCaptureKit` thumbnail of the dragged window and displays it as a semi-transparent ghost. `SwapTargetOverlay` highlights the drop target. On release, the engine performs a column insertion or window swap. Interactive resize (`InteractiveResize`) allows edge-dragging to change column widths or window heights.
 
-**Constraint Solving:** `NiriAxisSolver` (in `NiriConstraintSolver.swift`) distributes available space among windows in a column while respecting per-window min/max size constraints. Windows with `isConstraintFixed` get exact sizes; remaining space is distributed by weight. This runs during every layout calculation and handles edge cases like tabbed columns (all windows share the same height).
+**Constraint Solving:** handled inside `omniwm_niri_layout_solve` (see the axis solver in `Zig/omniwm_kernels/src/root.zig`). Swift flattens per-window min/max constraints and weights into `omniwm_axis_input` records before the kernel call; the kernel returns distributed sizes, with fixed-constraint windows getting exact sizes and remaining space distributed by weight. Tabbed columns (all windows share the same height) are handled by the same kernel path.
 
 ### 4.4 Dwindle Layout Engine (BSP)
 
@@ -1049,7 +1049,7 @@ Actions can carry multiple persisted bindings, so any extra default shortcuts sh
    - `NiriLayoutEngine+Windows.swift` — window query and lookup
    - `NiriLayoutEngine+WorkspaceOps.swift` — workspace-level operations
 
-   Focus/navigation and workspace-local topology planning are flattened through `NiriTopologyKernel.swift` into `omniwm_niri_topology_plan`. Constraint solving lives in `NiriConstraintSolver.swift`.
+   Focus/navigation and workspace-local topology planning are flattened through `NiriTopologyKernel.swift` into `omniwm_niri_topology_plan`. Constraint solving lives inside `omniwm_niri_layout_solve` (Zig).
 
 3. **Write tests** using existing helpers. Layout engines can be tested in isolation — create nodes, call `calculateLayout()`, assert frame positions.
 

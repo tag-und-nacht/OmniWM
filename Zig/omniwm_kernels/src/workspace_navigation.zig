@@ -409,7 +409,7 @@ fn monitorSortLess(
     if (lhs.frame_max_y != rhs.frame_max_y) {
         return lhs.frame_max_y > rhs.frame_max_y;
     }
-    return lhs_index < rhs_index;
+    return lhs.monitor_id < rhs.monitor_id;
 }
 
 fn monitorSortKeyLess(lhs: MonitorSnapshot, rhs: MonitorSnapshot) bool {

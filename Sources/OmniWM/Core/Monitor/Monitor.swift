@@ -141,7 +141,10 @@ extension Monitor {
             if $0.frame.minX != $1.frame.minX {
                 return $0.frame.minX < $1.frame.minX
             }
-            return $0.frame.maxY > $1.frame.maxY
+            if $0.frame.maxY != $1.frame.maxY {
+                return $0.frame.maxY > $1.frame.maxY
+            }
+            return $0.displayId < $1.displayId
         }
     }
 }

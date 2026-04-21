@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import OmniWMIPC
 
 enum WindowDecisionDisposition: Equatable, Sendable {
     case managed
@@ -429,6 +430,10 @@ final class WindowRuleEngine {
     ) -> CompiledRule? {
         let titleRegex: NSRegularExpression?
         if let pattern = rule.titleRegex, !pattern.isEmpty {
+            if let invalidMessage = IPCRuleValidator.invalidRegexMessage(for: pattern) {
+                invalidRegexMessagesByRuleId[rule.id] = invalidMessage
+                return nil
+            }
             do {
                 titleRegex = try NSRegularExpression(pattern: pattern)
             } catch {

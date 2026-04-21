@@ -2931,10 +2931,21 @@ extension WMController {
     private func canonicalManagedRestoreMaterialStateFrame(
         for token: WindowToken
     ) -> CGRect? {
-        if let node = niriEngine?.findNode(for: token),
-           let frame = node.frame
-        {
-            return frame
+        if let node = niriEngine?.findNode(for: token) {
+            let workspaceId = workspaceManager.workspace(for: token)
+            let useCanonicalFrame = workspaceId.map {
+                niriLayoutHandler.hasScrollAnimationRunning(in: $0)
+            } ?? false
+            if useCanonicalFrame,
+               let frame = node.frame {
+                return frame
+            }
+            if let renderedFrame = node.renderedFrame {
+                return renderedFrame
+            }
+            if let frame = node.frame {
+                return frame
+            }
         }
         if let node = dwindleEngine?.findNode(for: token),
            let cachedFrame = node.cachedFrame

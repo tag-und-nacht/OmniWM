@@ -539,6 +539,25 @@ fn fallbackSelectionOnRemoval(topology: *const Topology, removing_id: u64) u64 {
     return null_id;
 }
 
+fn fallbackSelectionOnColumnRemoval(topology: *const Topology, removing_column_index: usize) u64 {
+    if (removing_column_index >= topology.column_count) return null_id;
+
+    if (removing_column_index > 0) {
+        const previous = topology.columns[removing_column_index - 1];
+        if (previous.count > 0) return topology.columnWindowSliceConst(removing_column_index - 1)[0];
+    }
+    if (removing_column_index + 1 < topology.column_count) {
+        const next = topology.columns[removing_column_index + 1];
+        if (next.count > 0) return topology.columnWindowSliceConst(removing_column_index + 1)[0];
+    }
+
+    for (topology.columns[0..topology.column_count], 0..) |candidate, index| {
+        if (index == removing_column_index or candidate.count == 0) continue;
+        return topology.columnWindowSliceConst(index)[0];
+    }
+    return null_id;
+}
+
 fn firstColumnWithWindow(topology: *const Topology, id: u64) ?usize {
     return if (topology.findWindow(id)) |location| location.column else null;
 }
@@ -780,11 +799,7 @@ fn planColumnRemoval(topology: *const Topology, input: TopologyInput, removed_co
 
     const active = activeIndex(input, topology);
     const post_removal_count = if (topology.column_count > 0) topology.column_count - 1 else 0;
-    const removing_id = if (topology.columns[removed_column_index].count > 0)
-        topology.columnWindowSliceConst(removed_column_index)[0]
-    else
-        null_id;
-    const fallback = fallbackSelectionOnRemoval(topology, removing_id);
+    const fallback = fallbackSelectionOnColumnRemoval(topology, removed_column_index);
 
     result.effect_kind = effect_remove_column;
     result.source_column_index = @intCast(removed_column_index);
@@ -833,8 +848,7 @@ fn syncWindows(
         }
         if (all_removed and first_removed_full_column == null) {
             first_removed_full_column = column_index;
-            const first_id = window_slice[0];
-            fallback = fallbackSelectionOnRemoval(topology, first_id);
+            fallback = fallbackSelectionOnColumnRemoval(topology, column_index);
         }
         column_index += 1;
     }

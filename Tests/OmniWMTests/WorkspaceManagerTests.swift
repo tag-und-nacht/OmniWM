@@ -202,6 +202,41 @@ private func workspaceConfigurations(
         #expect(restoreIntent.rescueEligible)
     }
 
+    @Test func `near fullscreen floating geometry stores exact normalized origin`() throws {
+        let settings = SettingsStore(defaults: makeWorkspaceManagerTestDefaults())
+        settings.workspaceConfigurations = workspaceConfigurations([
+            ("1", .main)
+        ])
+        let monitor = makeWorkspaceManagerTestMonitor(
+            displayId: 411,
+            name: "Studio Display",
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100
+        )
+        let manager = WorkspaceManager(settings: settings)
+        manager.applyMonitorConfigurationChange([monitor])
+
+        let workspaceId = try #require(manager.workspaceId(for: "1", createIfMissing: true))
+        let token = manager.addWindow(
+            makeWorkspaceManagerTestWindow(windowId: 4111),
+            pid: 4111,
+            windowId: 4111,
+            to: workspaceId,
+            mode: .floating
+        )
+        manager.updateFloatingGeometry(
+            frame: CGRect(x: 0.25, y: 0.125, width: 99.5, height: 99.75),
+            for: token,
+            referenceMonitor: monitor
+        )
+
+        let normalizedOrigin = try #require(manager.floatingState(for: token)?.normalizedOrigin)
+        #expect(normalizedOrigin.x == 0.5)
+        #expect(normalizedOrigin.y == 0.5)
+    }
+
     @Test func `persisted restore falls back to best monitor across single to multi relaunch`() throws {
         let defaults = makeWorkspaceManagerTestDefaults()
 

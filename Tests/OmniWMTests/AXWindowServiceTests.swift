@@ -272,7 +272,7 @@ import Testing
         }
 
         #expect(AXWindowService.titlePreferFast(windowId: 24) == "Title 1")
-        now += 0.6
+        now += 30.1
         #expect(AXWindowService.titlePreferFast(windowId: 24) == "Title 2")
         #expect(lookupCount == 2)
     }

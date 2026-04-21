@@ -2419,6 +2419,9 @@ private func waitUntilAXEventTest(
     }
 
     @Test @MainActor func floatingFrameChangedRetriesWorkspaceHideAfterFreshFrameWakeup() async {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
         let controller = makeAXEventTestController()
         AXWindowService.fastFrameProviderForTests = { _ in nil }
         defer {
@@ -2542,6 +2545,9 @@ private func waitUntilAXEventTest(
     }
 
     @Test @MainActor func interactiveGestureDoesNotConsumeWorkspaceHideFreshFrameWakeup() async {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
         let controller = makeAXEventTestController()
         AXWindowService.fastFrameProviderForTests = { _ in nil }
         defer {
@@ -5595,17 +5601,17 @@ private func waitUntilAXEventTest(
             AXWindowService.clearTitleCacheForTests()
         }
 
+        let controller = makeAXEventTestController()
+        guard let workspaceId = controller.activeWorkspace()?.id else {
+            Issue.record("Missing active workspace")
+            return
+        }
+
         var lookupCount = 0
         AXWindowService.timeSourceForTests = { 100 }
         AXWindowService.titleLookupProviderForTests = { _ in
             lookupCount += 1
             return lookupCount == 1 ? "Before Remove" : "After Remove"
-        }
-
-        let controller = makeAXEventTestController()
-        guard let workspaceId = controller.activeWorkspace()?.id else {
-            Issue.record("Missing active workspace")
-            return
         }
 
         let token = controller.workspaceManager.addWindow(

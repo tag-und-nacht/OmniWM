@@ -129,6 +129,7 @@ import QuartzCore
     private var activeFrameContext: RefreshFrameContext?
     private var pendingRevealTransactionsByWindowId: [Int: PendingRevealTransaction] = [:]
     private var pendingRevealVerificationTasksByWindowId: [Int: Task<Void, Never>] = [:]
+    private var pendingRevealWindowIdRedirects: [Int: Int] = [:]
     private var lastAppliedHideOrigins: [WindowToken: CGPoint] = [:]
     private var verifiedHideOriginTokens: Set<WindowToken> = []
     private var workspaceInactiveHideRetryCountByWindowId: [Int: Int] = [:]
@@ -1634,9 +1635,10 @@ import QuartzCore
             return
         }
 
-        let result = RefreshPlanner.step(
-            snapshot: refreshPlanningSnapshot(),
-            event: .requested(
+        let refreshSnapshot = refreshPlanningSnapshot()
+        let result = OrchestrationCore.step(
+            snapshot: orchestrationSnapshot(refresh: refreshSnapshot),
+            event: .refreshRequested(
                 .init(
                     refresh: refresh,
                     shouldDropWhileBusy: shouldDropWhileBusy,
@@ -1647,14 +1649,7 @@ import QuartzCore
                 )
             )
         )
-        applyRefreshPlanningResult(result)
-    }
-
-    private func applyRefreshPlanningResult(_ result: RefreshPlannerResult) {
-        applyResolvedRefreshPlan(
-            snapshot: result.snapshot,
-            actions: result.plan.actions
-        )
+        applyRuntimeRefreshResult(result)
     }
 
     func applyRuntimeRefreshResult(_ result: OrchestrationResult) {
@@ -1698,9 +1693,24 @@ import QuartzCore
                  .enterNonManagedFallback,
                  .enterOwnedApplicationFallback,
                  .frontManagedWindow:
-                preconditionFailure("RefreshPlanner emitted non-refresh action \(action)")
+                preconditionFailure("Refresh orchestration emitted non-refresh action \(action)")
             }
         }
+    }
+
+    private func orchestrationSnapshot(refresh: RefreshOrchestrationSnapshot) -> OrchestrationSnapshot {
+        controller?.orchestrationSnapshot(refresh: refresh)
+            ?? .init(
+                refresh: refresh,
+                focus: .init(
+                    nextManagedRequestId: 0,
+                    activeManagedRequest: nil,
+                    pendingFocusedToken: nil,
+                    pendingFocusedWorkspaceId: nil,
+                    isNonManagedFocusActive: false,
+                    isAppFullscreenActive: false
+                )
+            )
     }
 
     private func synchronizeRefreshCycleCounter() {
@@ -1760,9 +1770,10 @@ import QuartzCore
             return
         }
 
-        let result = RefreshPlanner.step(
-            snapshot: refreshPlanningSnapshot(),
-            event: .completed(
+        let refreshSnapshot = refreshPlanningSnapshot()
+        let result = OrchestrationCore.step(
+            snapshot: orchestrationSnapshot(refresh: refreshSnapshot),
+            event: .refreshCompleted(
                 .init(
                     refresh: refresh,
                     didComplete: didComplete,
@@ -1770,7 +1781,7 @@ import QuartzCore
                 )
             )
         )
-        applyRefreshPlanningResult(result)
+        applyRuntimeRefreshResult(result)
     }
 
     private func recordRefreshExecution(_ route: RefreshRoute, reason: RefreshReason) {
@@ -1917,15 +1928,27 @@ import QuartzCore
 
         let verifyEpsilon: CGFloat = 1.0
         for plan in plans {
+            let targetFrame = CGRect(origin: plan.origin, size: plan.frameSize)
             if let observedOrigin = observedWindowOrigin(plan.entry),
                abs(observedOrigin.x - plan.origin.x) <= verifyEpsilon,
                abs(observedOrigin.y - plan.origin.y) <= verifyEpsilon
             {
+                controller.axManager.confirmFrameWrite(
+                    for: plan.entry.windowId,
+                    pid: plan.entry.pid,
+                    frame: targetFrame
+                )
                 continue
             }
 
-            let fallbackFrame = CGRect(origin: plan.origin, size: plan.frameSize)
-            _ = AXWindowService.setFrame(plan.entry.axRef, frame: fallbackFrame)
+            let result = AXWindowService.setFrame(plan.entry.axRef, frame: targetFrame)
+            if result.isVerifiedSuccess {
+                controller.axManager.confirmFrameWrite(
+                    for: plan.entry.windowId,
+                    pid: plan.entry.pid,
+                    frame: result.observedFrame ?? targetFrame
+                )
+            }
         }
     }
 
@@ -2482,6 +2505,11 @@ import QuartzCore
         transaction.pid = entry.pid
         transaction.windowId = entry.windowId
         pendingRevealTransactionsByWindowId[newWindowId] = transaction
+        pendingRevealWindowIdRedirects[oldWindowId] = newWindowId
+        for (sourceWindowId, targetWindowId) in pendingRevealWindowIdRedirects where targetWindowId == oldWindowId {
+            pendingRevealWindowIdRedirects[sourceWindowId] = newWindowId
+        }
+        pendingRevealWindowIdRedirects.removeValue(forKey: newWindowId)
 
         if let verificationTask = pendingRevealVerificationTasksByWindowId.removeValue(forKey: oldWindowId) {
             verificationTask.cancel()
@@ -2493,7 +2521,7 @@ import QuartzCore
     }
 
     fileprivate func completePendingRevealTransaction(with result: AXFrameApplyResult) {
-        guard pendingRevealTransactionsByWindowId[result.windowId] != nil else {
+        guard let windowId = resolvedPendingRevealWindowId(for: result.windowId) else {
             return
         }
 
@@ -2501,21 +2529,35 @@ import QuartzCore
         switch hiddenRevealTerminalOutcome(for: result) {
         case .success:
             finalizePendingRevealTransactionSuccess(
-                forWindowId: result.windowId,
+                forWindowId: windowId,
                 confirmedFrame: result.confirmedFrame
             )
         case .delayedVerification:
-            guard var pendingTransaction = pendingRevealTransactionsByWindowId[result.windowId],
+            guard var pendingTransaction = pendingRevealTransactionsByWindowId[windowId],
                   !pendingTransaction.delayedVerificationScheduled
             else {
                 return
             }
             pendingTransaction.delayedVerificationScheduled = true
-            pendingRevealTransactionsByWindowId[result.windowId] = pendingTransaction
-            scheduleDelayedRevealVerification(forWindowId: result.windowId)
+            pendingRevealTransactionsByWindowId[windowId] = pendingTransaction
+            scheduleDelayedRevealVerification(forWindowId: windowId)
         case .failure:
-            finalizePendingRevealTransactionFailure(forWindowId: result.windowId)
+            finalizePendingRevealTransactionFailure(forWindowId: windowId)
         }
+    }
+
+    private func resolvedPendingRevealWindowId(for windowId: Int) -> Int? {
+        if pendingRevealTransactionsByWindowId[windowId] != nil {
+            return windowId
+        }
+        guard let redirectedWindowId = pendingRevealWindowIdRedirects[windowId] else {
+            return nil
+        }
+        if pendingRevealTransactionsByWindowId[redirectedWindowId] != nil {
+            return redirectedWindowId
+        }
+        pendingRevealWindowIdRedirects.removeValue(forKey: windowId)
+        return nil
     }
 
     private func hiddenRevealTerminalOutcome(for result: AXFrameApplyResult) -> HiddenRevealTerminalOutcome {
@@ -2541,6 +2583,7 @@ import QuartzCore
             return
         }
         pendingRevealVerificationTasksByWindowId.removeValue(forKey: windowId)?.cancel()
+        clearPendingRevealRedirects(forWindowId: windowId)
 
         clearHiddenRecord(for: pendingTransaction.token)
         if let confirmedFrame {
@@ -2562,6 +2605,7 @@ import QuartzCore
             return
         }
         pendingRevealVerificationTasksByWindowId.removeValue(forKey: windowId)?.cancel()
+        clearPendingRevealRedirects(forWindowId: windowId)
         let frameEntry = [(pendingTransaction.pid, pendingTransaction.windowId)]
 
         if pendingTransaction.hiddenState.workspaceInactive {
@@ -2592,6 +2636,13 @@ import QuartzCore
             } else {
                 finalizePendingRevealTransactionFailure(forWindowId: windowId)
             }
+        }
+    }
+
+    private func clearPendingRevealRedirects(forWindowId windowId: Int) {
+        pendingRevealWindowIdRedirects.removeValue(forKey: windowId)
+        pendingRevealWindowIdRedirects = pendingRevealWindowIdRedirects.filter { sourceWindowId, targetWindowId in
+            sourceWindowId != windowId && targetWindowId != windowId
         }
     }
 
@@ -2732,6 +2783,18 @@ import QuartzCore
             origin: restoredOrigin,
             frameSize: frame.size
         )
+    }
+
+    func restoredFrameForHiddenEntry(
+        _ entry: WindowModel.Entry,
+        monitor: Monitor,
+        hiddenState: WindowModel.HiddenState
+    ) -> CGRect? {
+        makeRestorePositionPlan(
+            for: entry,
+            monitor: monitor,
+            hiddenState: hiddenState
+        ).map { CGRect(origin: $0.origin, size: $0.frameSize) }
     }
 
     private func topLeftPoint(from proportionalPosition: CGPoint, in frame: CGRect) -> CGPoint {
@@ -2916,6 +2979,11 @@ final class LayoutDiffExecutor {
             }
         }
 
+        let preExistingHiddenEntryTokens = Set(
+            hiddenEntries.compactMap { entry, _ in
+                controller.workspaceManager.hiddenState(for: entry.token) == nil ? nil : entry.token
+            }
+        )
         if !hiddenEntries.isEmpty {
             applyHiddenEntryUpdates(
                 hiddenEntries,
@@ -2985,6 +3053,7 @@ final class LayoutDiffExecutor {
         frameUpdates.reserveCapacity(diff.frameChanges.count)
         var revealFrameUpdates: [(pid: pid_t, windowId: Int, frame: CGRect)] = []
         revealFrameUpdates.reserveCapacity(pendingRevealTokens.count)
+        let hiddenEntryTokens = Set(hiddenEntries.map { $0.entry.token })
 
         for change in diff.frameChanges {
             guard !hiddenTokens.contains(change.token),
@@ -2993,7 +3062,11 @@ final class LayoutDiffExecutor {
             else {
                 continue
             }
-            guard entry.layoutReason != .nativeFullscreen else { continue }
+            guard entry.layoutReason != .nativeFullscreen
+                || nativeFullscreenRestoreFinalizeTokens.contains(change.token)
+            else {
+                continue
+            }
             if pendingRevealTokens.contains(change.token) {
                 controller.axManager.forceApplyNextFrame(for: entry.windowId)
             }
@@ -3008,6 +3081,32 @@ final class LayoutDiffExecutor {
             if nativeFullscreenRestoreFinalizeTokens.contains(change.token) {
                 nativeFullscreenRestoreFramesByToken[change.token] = change.frame
             }
+        }
+
+        for token in nativeFullscreenRestoreFinalizeTokens
+            where nativeFullscreenRestoreFramesByToken[token] == nil
+        {
+            let nativeFullscreenRecord = controller.workspaceManager.nativeFullscreenRecord(for: token)
+            let isReplacementRestore = nativeFullscreenRecord.map { $0.originalToken != token } ?? false
+            guard !(hiddenEntryTokens.contains(token)
+                    && controller.workspaceManager.hiddenState(for: token) != nil
+                    && !isReplacementRestore
+                    && !preExistingHiddenEntryTokens.contains(token)
+                    && refreshController.lastVerifiedHideOrigin(for: token) == nil),
+                  !blockedRevealTokens.contains(token),
+                  let entry = resolveEntry(for: token),
+                  let restoreFrame = controller.workspaceManager.nativeFullscreenRestoreContext(for: token)?
+                      .restoreFrame
+            else {
+                continue
+            }
+            if hiddenTokens.contains(token) {
+                controller.workspaceManager.setHiddenState(nil, for: token)
+                controller.axManager.unsuppressFrameWrites([(entry.pid, entry.windowId)])
+            }
+            controller.axManager.forceApplyNextFrame(for: entry.windowId)
+            frameUpdates.append((entry.pid, entry.windowId, restoreFrame))
+            nativeFullscreenRestoreFramesByToken[token] = restoreFrame
         }
 
         var appliedFrameTokens: Set<WindowToken> = []
@@ -3161,10 +3260,10 @@ final class LayoutDiffExecutor {
         if !hidePlans.isEmpty {
             let verifiedHideTokens = refreshController.applyHidePositionPlans(hidePlans)
             for hideOrigin in hideOriginsToRemember {
-                guard verifiedHideTokens.contains(hideOrigin.token) else { continue }
                 refreshController.rememberHiddenOrigin(
                     for: hideOrigin.token,
-                    origin: hideOrigin.origin
+                    origin: hideOrigin.origin,
+                    verified: verifiedHideTokens.contains(hideOrigin.token)
                 )
             }
             finalizeTokensMovable.formIntersection(verifiedHideTokens)

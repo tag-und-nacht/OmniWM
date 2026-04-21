@@ -642,62 +642,6 @@ struct OverviewLayoutCalculator {
         )
     }
 
-    private static func scrollBoundsFromKernel(
-        layout: OverviewLayout,
-        screenFrame: CGRect
-    ) -> ClosedRange<CGFloat> {
-        let metricsScale = clampedScale(layout.scale)
-        let scaledWindowPadding = OverviewLayoutMetrics.windowPadding * metricsScale
-        var rawContext = omniwm_overview_context(
-            screen_x: screenFrame.minX,
-            screen_y: screenFrame.minY,
-            screen_width: screenFrame.width,
-            screen_height: screenFrame.height,
-            metrics_scale: metricsScale,
-            available_width: screenFrame.width - (scaledWindowPadding * 2),
-            scaled_window_padding: scaledWindowPadding,
-            scaled_workspace_label_height: OverviewLayoutMetrics.workspaceLabelHeight * metricsScale,
-            scaled_workspace_section_padding: OverviewLayoutMetrics.workspaceSectionPadding * metricsScale,
-            scaled_window_spacing: OverviewLayoutMetrics.windowSpacing * metricsScale,
-            thumbnail_width: 0,
-            initial_content_y: layout.searchBarFrame.minY - OverviewLayoutMetrics.contentTopPadding * metricsScale,
-            content_bottom_padding: OverviewLayoutMetrics.contentBottomPadding * metricsScale,
-            total_content_height_override: layout.totalContentHeight,
-            has_total_content_height_override: 1
-        )
-        var result = zeroOverviewResult()
-
-        let status = omniwm_overview_projection_solve(
-            &rawContext,
-            nil,
-            0,
-            nil,
-            0,
-            nil,
-            0,
-            nil,
-            0,
-            nil,
-            0,
-            nil,
-            0,
-            nil,
-            0,
-            nil,
-            0,
-            nil,
-            0,
-            &result
-        )
-
-        precondition(
-            status == OMNIWM_KERNELS_STATUS_OK,
-            "omniwm_overview_projection_solve returned \(status)"
-        )
-
-        return result.scrollOffsetBounds
-    }
-
     private static func makeWindowItem(
         handle: WindowHandle,
         workspaceId: WorkspaceDescriptor.ID,
@@ -739,7 +683,11 @@ struct OverviewLayoutCalculator {
     }
 
     static func scrollOffsetBounds(layout: OverviewLayout, screenFrame: CGRect) -> ClosedRange<CGFloat> {
-        layout.resolvedScrollOffsetBounds ?? scrollBoundsFromKernel(layout: layout, screenFrame: screenFrame)
+        _ = screenFrame
+        return KernelContract.require(
+            layout.resolvedScrollOffsetBounds,
+            "Overview layout missing kernel scroll bounds"
+        )
     }
 
     static func clampedScrollOffset(

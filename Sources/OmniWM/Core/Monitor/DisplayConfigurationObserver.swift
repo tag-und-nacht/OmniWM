@@ -21,6 +21,7 @@ final class DisplayConfigurationObserver: NSObject {
     override nonisolated init() {
         super.init()
         MainActor.assumeIsolated {
+            ScreenCoordinateSpace.invalidateDisplaySnapshot()
             self.updatePreviousMonitors()
         }
 
@@ -57,6 +58,7 @@ final class DisplayConfigurationObserver: NSObject {
     }
 
     private func handleDisplayChange() {
+        ScreenCoordinateSpace.invalidateDisplaySnapshot()
         let currentMonitors = Monitor.current()
         let currentById = Dictionary(uniqueKeysWithValues: currentMonitors.map { ($0.id, $0) })
         let currentIds = Set(currentById.keys)

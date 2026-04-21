@@ -596,6 +596,36 @@ private func prepareMouseResizeFixture(
         #expect(relayoutReasons == [.interactiveGesture])
     }
 
+    @Test @MainActor func viewportScrollDeltaThreadsMonitorRefreshRateIntoNiriStateAndEngine() async {
+        let controller = makeMouseEventTestController()
+        controller.settings.scrollGestureEnabled = true
+        controller.enableNiriLayout(maxWindowsPerColumn: 1)
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+        controller.syncMonitorsToNiriEngine()
+
+        guard let workspaceId = controller.activeWorkspace()?.id,
+              let monitor = controller.workspaceManager.monitor(for: workspaceId),
+              let engine = controller.niriEngine
+        else {
+            Issue.record("Missing Niri context for mouse refresh-rate test")
+            return
+        }
+
+        controller.layoutRefreshController.layoutState.refreshRateByDisplay[monitor.displayId] = 144.0
+
+        controller.mouseEventHandler.applyMouseViewportScrollDelta(
+            12,
+            isTrackpad: true,
+            engine: engine,
+            wsId: workspaceId,
+            monitor: monitor
+        )
+
+        #expect(engine.displayRefreshRate == 144.0)
+        #expect(controller.workspaceManager.niriViewportState(for: workspaceId).displayRefreshRate == 144.0)
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+    }
+
     @Test @MainActor func scrollBurstOnlyMergesWithinMatchingModifierAndPhaseGroups() {
         let controller = makeMouseEventTestController()
         let handler = controller.mouseEventHandler

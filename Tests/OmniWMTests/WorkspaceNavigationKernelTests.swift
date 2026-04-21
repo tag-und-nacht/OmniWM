@@ -2,7 +2,7 @@ import Foundation
 @testable import OmniWM
 import Testing
 
-private func makeWorkspaceNavigationPlannerMonitor(
+private func makeWorkspaceNavigationKernelMonitor(
     id: UInt32,
     minX: CGFloat,
     maxY: CGFloat = 1080,
@@ -10,7 +10,7 @@ private func makeWorkspaceNavigationPlannerMonitor(
     centerY: CGFloat = 540,
     activeWorkspaceId: WorkspaceDescriptor.ID? = nil,
     previousWorkspaceId: WorkspaceDescriptor.ID? = nil
-) -> WorkspaceNavigationPlanner.Input.MonitorSnapshot {
+) -> WorkspaceNavigationKernel.Input.MonitorSnapshot {
     .init(
         monitorId: .init(displayId: id),
         frameMinX: minX,
@@ -22,15 +22,15 @@ private func makeWorkspaceNavigationPlannerMonitor(
     )
 }
 
-private func makeWorkspaceNavigationPlannerWorkspace(
+private func makeWorkspaceNavigationKernelWorkspace(
     id: WorkspaceDescriptor.ID,
     monitorId: UInt32?,
-    layoutKind: WorkspaceNavigationPlanner.Input.WorkspaceSnapshot.LayoutKind = .niri,
+    layoutKind: WorkspaceNavigationKernel.Input.WorkspaceSnapshot.LayoutKind = .niri,
     rememberedTiledFocusToken: WindowToken? = nil,
     firstTiledFocusToken: WindowToken? = nil,
     rememberedFloatingFocusToken: WindowToken? = nil,
     firstFloatingFocusToken: WindowToken? = nil
-) -> WorkspaceNavigationPlanner.Input.WorkspaceSnapshot {
+) -> WorkspaceNavigationKernel.Input.WorkspaceSnapshot {
     .init(
         workspaceId: id,
         monitorId: monitorId.map(Monitor.ID.init(displayId:)),
@@ -42,15 +42,15 @@ private func makeWorkspaceNavigationPlannerWorkspace(
     )
 }
 
-private func makeWorkspaceNavigationPlannerInput(
-    intent: WorkspaceNavigationPlanner.Intent,
-    monitors: [WorkspaceNavigationPlanner.Input.MonitorSnapshot],
-    workspaces: [WorkspaceNavigationPlanner.Input.WorkspaceSnapshot],
+private func makeWorkspaceNavigationKernelInput(
+    intent: WorkspaceNavigationKernel.Intent,
+    monitors: [WorkspaceNavigationKernel.Input.MonitorSnapshot],
+    workspaces: [WorkspaceNavigationKernel.Input.WorkspaceSnapshot],
     adjacentFallbackWorkspaceNumber: UInt32? = nil,
     activeColumnSubjectToken: WindowToken? = nil,
     selectedColumnSubjectToken: WindowToken? = nil,
-    focus: WorkspaceNavigationPlanner.Input.FocusSessionSnapshot = .init()
-) -> WorkspaceNavigationPlanner.Input {
+    focus: WorkspaceNavigationKernel.Input.FocusSessionSnapshot = .init()
+) -> WorkspaceNavigationKernel.Input {
     .init(
         intent: intent,
         adjacentFallbackWorkspaceNumber: adjacentFallbackWorkspaceNumber,
@@ -62,20 +62,20 @@ private func makeWorkspaceNavigationPlannerInput(
     )
 }
 
-@Suite struct WorkspaceNavigationPlannerTests {
+@Suite @MainActor struct WorkspaceNavigationKernelTests {
     @Test func explicitSwitchHandsOffRememberedFocusAndSavesCurrentWorkspace() {
         let workspaceOne = WorkspaceDescriptor.ID()
         let workspaceTwo = WorkspaceDescriptor.ID()
         let targetToken = WindowToken(pid: 42, windowId: 4201)
 
-        let input = makeWorkspaceNavigationPlannerInput(
+        let input = makeWorkspaceNavigationKernelInput(
             intent: .init(
                 operation: .switchWorkspaceExplicit,
                 currentWorkspaceId: workspaceOne,
                 targetWorkspaceId: workspaceTwo
             ),
             monitors: [
-                makeWorkspaceNavigationPlannerMonitor(
+                makeWorkspaceNavigationKernelMonitor(
                     id: 1,
                     minX: 0,
                     centerX: 960,
@@ -83,8 +83,8 @@ private func makeWorkspaceNavigationPlannerInput(
                 )
             ],
             workspaces: [
-                makeWorkspaceNavigationPlannerWorkspace(id: workspaceOne, monitorId: 1),
-                makeWorkspaceNavigationPlannerWorkspace(
+                makeWorkspaceNavigationKernelWorkspace(id: workspaceOne, monitorId: 1),
+                makeWorkspaceNavigationKernelWorkspace(
                     id: workspaceTwo,
                     monitorId: 1,
                     rememberedTiledFocusToken: targetToken
@@ -92,7 +92,7 @@ private func makeWorkspaceNavigationPlannerInput(
             ]
         )
 
-        let plan = WorkspaceNavigationPlanner.plan(input)
+        let plan = WorkspaceNavigationKernel.plan(input)
 
         #expect(plan.outcome == .execute)
         #expect(plan.targetWorkspaceId == workspaceTwo)
@@ -108,14 +108,14 @@ private func makeWorkspaceNavigationPlannerInput(
         let workspaceOne = WorkspaceDescriptor.ID()
         let workspaceTwo = WorkspaceDescriptor.ID()
 
-        let input = makeWorkspaceNavigationPlannerInput(
+        let input = makeWorkspaceNavigationKernelInput(
             intent: .init(
                 operation: .switchWorkspaceExplicit,
                 currentWorkspaceId: workspaceOne,
                 targetWorkspaceId: workspaceTwo
             ),
             monitors: [
-                makeWorkspaceNavigationPlannerMonitor(
+                makeWorkspaceNavigationKernelMonitor(
                     id: 1,
                     minX: 0,
                     centerX: 960,
@@ -123,12 +123,12 @@ private func makeWorkspaceNavigationPlannerInput(
                 )
             ],
             workspaces: [
-                makeWorkspaceNavigationPlannerWorkspace(id: workspaceOne, monitorId: 1),
-                makeWorkspaceNavigationPlannerWorkspace(id: workspaceTwo, monitorId: 1)
+                makeWorkspaceNavigationKernelWorkspace(id: workspaceOne, monitorId: 1),
+                makeWorkspaceNavigationKernelWorkspace(id: workspaceTwo, monitorId: 1)
             ]
         )
 
-        let plan = WorkspaceNavigationPlanner.plan(input)
+        let plan = WorkspaceNavigationKernel.plan(input)
 
         #expect(plan.outcome == .execute)
         #expect(plan.focusAction == .clearManagedFocus)
@@ -140,7 +140,7 @@ private func makeWorkspaceNavigationPlannerInput(
         let workspaceTwo = WorkspaceDescriptor.ID()
         let workspaceThree = WorkspaceDescriptor.ID()
 
-        let input = makeWorkspaceNavigationPlannerInput(
+        let input = makeWorkspaceNavigationKernelInput(
             intent: .init(
                 operation: .focusWorkspaceAnywhere,
                 currentWorkspaceId: workspaceOne,
@@ -148,13 +148,13 @@ private func makeWorkspaceNavigationPlannerInput(
                 currentMonitorId: .init(displayId: 1)
             ),
             monitors: [
-                makeWorkspaceNavigationPlannerMonitor(
+                makeWorkspaceNavigationKernelMonitor(
                     id: 1,
                     minX: 0,
                     centerX: 960,
                     activeWorkspaceId: workspaceOne
                 ),
-                makeWorkspaceNavigationPlannerMonitor(
+                makeWorkspaceNavigationKernelMonitor(
                     id: 2,
                     minX: 1920,
                     centerX: 2880,
@@ -162,13 +162,13 @@ private func makeWorkspaceNavigationPlannerInput(
                 )
             ],
             workspaces: [
-                makeWorkspaceNavigationPlannerWorkspace(id: workspaceOne, monitorId: 1),
-                makeWorkspaceNavigationPlannerWorkspace(id: workspaceTwo, monitorId: 2),
-                makeWorkspaceNavigationPlannerWorkspace(id: workspaceThree, monitorId: 2)
+                makeWorkspaceNavigationKernelWorkspace(id: workspaceOne, monitorId: 1),
+                makeWorkspaceNavigationKernelWorkspace(id: workspaceTwo, monitorId: 2),
+                makeWorkspaceNavigationKernelWorkspace(id: workspaceThree, monitorId: 2)
             ]
         )
 
-        let plan = WorkspaceNavigationPlanner.plan(input)
+        let plan = WorkspaceNavigationKernel.plan(input)
 
         #expect(plan.outcome == .execute)
         #expect(plan.targetWorkspaceId == workspaceThree)
@@ -180,7 +180,7 @@ private func makeWorkspaceNavigationPlannerInput(
         let workspaceTwo = WorkspaceDescriptor.ID()
         let token = WindowToken(pid: 77, windowId: 7701)
 
-        let input = makeWorkspaceNavigationPlannerInput(
+        let input = makeWorkspaceNavigationKernelInput(
             intent: .init(
                 operation: .moveWindowAdjacent,
                 direction: .down,
@@ -189,7 +189,7 @@ private func makeWorkspaceNavigationPlannerInput(
                 focusedToken: token
             ),
             monitors: [
-                makeWorkspaceNavigationPlannerMonitor(
+                makeWorkspaceNavigationKernelMonitor(
                     id: 1,
                     minX: 0,
                     centerX: 960,
@@ -197,12 +197,12 @@ private func makeWorkspaceNavigationPlannerInput(
                 )
             ],
             workspaces: [
-                makeWorkspaceNavigationPlannerWorkspace(id: workspaceTwo, monitorId: 1)
+                makeWorkspaceNavigationKernelWorkspace(id: workspaceTwo, monitorId: 1)
             ],
             adjacentFallbackWorkspaceNumber: 3
         )
 
-        let plan = WorkspaceNavigationPlanner.plan(input)
+        let plan = WorkspaceNavigationKernel.plan(input)
 
         #expect(plan.outcome == .execute)
         #expect(plan.subject == .window(token))
@@ -217,7 +217,7 @@ private func makeWorkspaceNavigationPlannerInput(
     @Test func moveColumnAdjacentBlocksWithoutNiriColumnSubject() {
         let workspaceOne = WorkspaceDescriptor.ID()
 
-        let input = makeWorkspaceNavigationPlannerInput(
+        let input = makeWorkspaceNavigationKernelInput(
             intent: .init(
                 operation: .moveColumnAdjacent,
                 direction: .right,
@@ -225,7 +225,7 @@ private func makeWorkspaceNavigationPlannerInput(
                 currentMonitorId: .init(displayId: 1)
             ),
             monitors: [
-                makeWorkspaceNavigationPlannerMonitor(
+                makeWorkspaceNavigationKernelMonitor(
                     id: 1,
                     minX: 0,
                     centerX: 960,
@@ -233,7 +233,7 @@ private func makeWorkspaceNavigationPlannerInput(
                 )
             ],
             workspaces: [
-                makeWorkspaceNavigationPlannerWorkspace(
+                makeWorkspaceNavigationKernelWorkspace(
                     id: workspaceOne,
                     monitorId: 1,
                     layoutKind: .defaultLayout
@@ -241,7 +241,7 @@ private func makeWorkspaceNavigationPlannerInput(
             ]
         )
 
-        let plan = WorkspaceNavigationPlanner.plan(input)
+        let plan = WorkspaceNavigationKernel.plan(input)
 
         #expect(plan.outcome == .blocked)
     }
@@ -251,7 +251,7 @@ private func makeWorkspaceNavigationPlannerInput(
         let workspaceTwo = WorkspaceDescriptor.ID()
         let token = WindowToken(pid: 91, windowId: 9101)
 
-        let input = makeWorkspaceNavigationPlannerInput(
+        let input = makeWorkspaceNavigationKernelInput(
             intent: .init(
                 operation: .moveWindowExplicit,
                 sourceWorkspaceId: workspaceOne,
@@ -260,16 +260,16 @@ private func makeWorkspaceNavigationPlannerInput(
                 followFocus: true
             ),
             monitors: [
-                makeWorkspaceNavigationPlannerMonitor(id: 1, minX: 0, centerX: 960, activeWorkspaceId: workspaceOne),
-                makeWorkspaceNavigationPlannerMonitor(id: 2, minX: 1920, centerX: 2880, activeWorkspaceId: workspaceTwo)
+                makeWorkspaceNavigationKernelMonitor(id: 1, minX: 0, centerX: 960, activeWorkspaceId: workspaceOne),
+                makeWorkspaceNavigationKernelMonitor(id: 2, minX: 1920, centerX: 2880, activeWorkspaceId: workspaceTwo)
             ],
             workspaces: [
-                makeWorkspaceNavigationPlannerWorkspace(id: workspaceOne, monitorId: 1),
-                makeWorkspaceNavigationPlannerWorkspace(id: workspaceTwo, monitorId: 2)
+                makeWorkspaceNavigationKernelWorkspace(id: workspaceOne, monitorId: 1),
+                makeWorkspaceNavigationKernelWorkspace(id: workspaceTwo, monitorId: 2)
             ]
         )
 
-        let plan = WorkspaceNavigationPlanner.plan(input)
+        let plan = WorkspaceNavigationKernel.plan(input)
 
         #expect(plan.outcome == .execute)
         #expect(plan.subject == .window(token))
@@ -283,7 +283,7 @@ private func makeWorkspaceNavigationPlannerInput(
         let workspaceOne = WorkspaceDescriptor.ID()
         let workspaceTwo = WorkspaceDescriptor.ID()
 
-        let input = makeWorkspaceNavigationPlannerInput(
+        let input = makeWorkspaceNavigationKernelInput(
             intent: .init(
                 operation: .swapWorkspaceWithMonitor,
                 direction: .right,
@@ -291,16 +291,16 @@ private func makeWorkspaceNavigationPlannerInput(
                 currentMonitorId: .init(displayId: 1)
             ),
             monitors: [
-                makeWorkspaceNavigationPlannerMonitor(id: 1, minX: 0, centerX: 960, activeWorkspaceId: workspaceOne),
-                makeWorkspaceNavigationPlannerMonitor(id: 2, minX: 1920, centerX: 2880, activeWorkspaceId: workspaceTwo)
+                makeWorkspaceNavigationKernelMonitor(id: 1, minX: 0, centerX: 960, activeWorkspaceId: workspaceOne),
+                makeWorkspaceNavigationKernelMonitor(id: 2, minX: 1920, centerX: 2880, activeWorkspaceId: workspaceTwo)
             ],
             workspaces: [
-                makeWorkspaceNavigationPlannerWorkspace(id: workspaceOne, monitorId: 1),
-                makeWorkspaceNavigationPlannerWorkspace(id: workspaceTwo, monitorId: 2)
+                makeWorkspaceNavigationKernelWorkspace(id: workspaceOne, monitorId: 1),
+                makeWorkspaceNavigationKernelWorkspace(id: workspaceTwo, monitorId: 2)
             ]
         )
 
-        let plan = WorkspaceNavigationPlanner.plan(input)
+        let plan = WorkspaceNavigationKernel.plan(input)
 
         #expect(plan.outcome == .execute)
         #expect(plan.sourceWorkspaceId == workspaceOne)
@@ -317,21 +317,21 @@ private func makeWorkspaceNavigationPlannerInput(
         let workspaceThree = WorkspaceDescriptor.ID()
         let targetToken = WindowToken(pid: 12, windowId: 1201)
 
-        let input = makeWorkspaceNavigationPlannerInput(
+        let input = makeWorkspaceNavigationKernelInput(
             intent: .init(
                 operation: .focusMonitorCyclic,
                 direction: .right,
                 currentMonitorId: .init(displayId: 2)
             ),
             monitors: [
-                makeWorkspaceNavigationPlannerMonitor(id: 3, minX: 1920, centerX: 2880, activeWorkspaceId: workspaceThree),
-                makeWorkspaceNavigationPlannerMonitor(id: 2, minX: 960, centerX: 1440, activeWorkspaceId: workspaceTwo),
-                makeWorkspaceNavigationPlannerMonitor(id: 1, minX: 0, centerX: 480, activeWorkspaceId: workspaceOne)
+                makeWorkspaceNavigationKernelMonitor(id: 3, minX: 1920, centerX: 2880, activeWorkspaceId: workspaceThree),
+                makeWorkspaceNavigationKernelMonitor(id: 2, minX: 960, centerX: 1440, activeWorkspaceId: workspaceTwo),
+                makeWorkspaceNavigationKernelMonitor(id: 1, minX: 0, centerX: 480, activeWorkspaceId: workspaceOne)
             ],
             workspaces: [
-                makeWorkspaceNavigationPlannerWorkspace(id: workspaceOne, monitorId: 1),
-                makeWorkspaceNavigationPlannerWorkspace(id: workspaceTwo, monitorId: 2),
-                makeWorkspaceNavigationPlannerWorkspace(
+                makeWorkspaceNavigationKernelWorkspace(id: workspaceOne, monitorId: 1),
+                makeWorkspaceNavigationKernelWorkspace(id: workspaceTwo, monitorId: 2),
+                makeWorkspaceNavigationKernelWorkspace(
                     id: workspaceThree,
                     monitorId: 3,
                     rememberedTiledFocusToken: targetToken
@@ -339,7 +339,7 @@ private func makeWorkspaceNavigationPlannerInput(
             ]
         )
 
-        let plan = WorkspaceNavigationPlanner.plan(input)
+        let plan = WorkspaceNavigationKernel.plan(input)
 
         #expect(plan.outcome == .execute)
         #expect(plan.targetWorkspaceId == workspaceThree)
@@ -348,33 +348,33 @@ private func makeWorkspaceNavigationPlannerInput(
         #expect(plan.resolvedFocusToken == targetToken)
     }
 
-    @Test func focusMonitorCyclicPreservesInputOrderForIdenticalSortKeys() {
+    @Test func focusMonitorCyclicUsesDisplayIdTieBreakerForIdenticalSortKeys() {
         let workspaceOne = WorkspaceDescriptor.ID()
         let workspaceTwo = WorkspaceDescriptor.ID()
         let workspaceThree = WorkspaceDescriptor.ID()
 
-        let input = makeWorkspaceNavigationPlannerInput(
+        let input = makeWorkspaceNavigationKernelInput(
             intent: .init(
                 operation: .focusMonitorCyclic,
                 direction: .right,
                 currentMonitorId: .init(displayId: 2)
             ),
             monitors: [
-                makeWorkspaceNavigationPlannerMonitor(id: 2, minX: 0, centerX: 500, activeWorkspaceId: workspaceTwo),
-                makeWorkspaceNavigationPlannerMonitor(id: 1, minX: 0, centerX: 500, activeWorkspaceId: workspaceOne),
-                makeWorkspaceNavigationPlannerMonitor(id: 3, minX: 1920, centerX: 2880, activeWorkspaceId: workspaceThree)
+                makeWorkspaceNavigationKernelMonitor(id: 2, minX: 0, centerX: 500, activeWorkspaceId: workspaceTwo),
+                makeWorkspaceNavigationKernelMonitor(id: 1, minX: 0, centerX: 500, activeWorkspaceId: workspaceOne),
+                makeWorkspaceNavigationKernelMonitor(id: 3, minX: 1920, centerX: 2880, activeWorkspaceId: workspaceThree)
             ],
             workspaces: [
-                makeWorkspaceNavigationPlannerWorkspace(id: workspaceOne, monitorId: 1),
-                makeWorkspaceNavigationPlannerWorkspace(id: workspaceTwo, monitorId: 2),
-                makeWorkspaceNavigationPlannerWorkspace(id: workspaceThree, monitorId: 3)
+                makeWorkspaceNavigationKernelWorkspace(id: workspaceOne, monitorId: 1),
+                makeWorkspaceNavigationKernelWorkspace(id: workspaceTwo, monitorId: 2),
+                makeWorkspaceNavigationKernelWorkspace(id: workspaceThree, monitorId: 3)
             ]
         )
 
-        let plan = WorkspaceNavigationPlanner.plan(input)
+        let plan = WorkspaceNavigationKernel.plan(input)
 
         #expect(plan.outcome == .execute)
-        #expect(plan.targetWorkspaceId == workspaceOne)
-        #expect(plan.targetMonitorId == Monitor.ID(displayId: 1))
+        #expect(plan.targetWorkspaceId == workspaceThree)
+        #expect(plan.targetMonitorId == Monitor.ID(displayId: 3))
     }
 }

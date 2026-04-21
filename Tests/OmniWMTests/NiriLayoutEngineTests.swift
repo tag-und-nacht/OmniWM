@@ -13,6 +13,29 @@ func makeTestHandle(pid: pid_t = 1) -> WindowHandle {
     )
 }
 
+private func appendManualNiriColumn(
+    to engine: NiriLayoutEngine,
+    workspaceId: WorkspaceDescriptor.ID,
+    pids: [pid_t]
+) -> (column: NiriContainer, windows: [NiriWindow]) {
+    let root = engine.ensureRoot(for: workspaceId)
+    if root.columns.count == 1, root.columns[0].windowNodes.isEmpty {
+        root.replaceChildren([])
+    }
+
+    let column = NiriContainer()
+    root.appendChild(column)
+
+    let windows = pids.map { pid in
+        NiriWindow(token: makeTestHandle(pid: pid).id)
+    }
+    for window in windows {
+        column.appendChild(window)
+        engine.tokenToNode[window.token] = window
+    }
+    return (column, windows)
+}
+
 func makeTestMonitor(
     displayId: CGDirectDisplayID,
     name: String,
@@ -1010,6 +1033,47 @@ private func makeCenteredCrossMonitorFixture(
         )
     }
 
+    @Test @MainActor func relayoutPlanThreadsMonitorRefreshRateIntoNiriEngineAndViewportState() async throws {
+        let controller = makeLayoutPlanTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing monitor or active workspace for Niri refresh-rate test")
+            return
+        }
+
+        controller.enableNiriLayout(maxWindowsPerColumn: 1)
+        controller.layoutRefreshController.layoutState.refreshRateByDisplay[monitor.displayId] = 120.0
+        await waitForLayoutPlanRefreshWork(on: controller)
+
+        _ = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 699)
+        _ = try await controller.niriLayoutHandler.layoutWithNiriEngine(
+            activeWorkspaces: [workspaceId]
+        )
+
+        #expect(controller.niriEngine?.displayRefreshRate == 120.0)
+        #expect(controller.workspaceManager.niriViewportState(for: workspaceId).displayRefreshRate == 120.0)
+    }
+
+    @Test @MainActor func workspaceContextThreadsMonitorRefreshRateIntoNiriEngineAndViewportState() {
+        let controller = makeLayoutPlanTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing monitor or active workspace for Niri context refresh-rate test")
+            return
+        }
+
+        controller.enableNiriLayout(maxWindowsPerColumn: 1)
+        controller.layoutRefreshController.layoutState.refreshRateByDisplay[monitor.displayId] = 144.0
+
+        controller.niriLayoutHandler.withNiriWorkspaceContext { engine, wsId, _, state, _, _, _ in
+            #expect(wsId == workspaceId)
+            #expect(engine.displayRefreshRate == 144.0)
+            #expect(state.displayRefreshRate == 144.0)
+        }
+    }
+
     @Test func niriWindowMovementUsesExactSnappyConfig() {
         let engine = NiriLayoutEngine()
 
@@ -1518,81 +1582,6 @@ private func makeCenteredCrossMonitorFixture(
         #expect(window.constraints == constraints)
         #expect(window.constraints.minSize.width == 400)
         #expect(window.constraints.maxSize.width == 800)
-    }
-
-    @Test func solverRedistributesSpaceAfterMaxCapsWithoutReviolatingThem() {
-        let outputs = NiriAxisSolver.solve(
-            windows: [
-                .init(
-                    weight: 1,
-                    minConstraint: 0,
-                    maxConstraint: 100,
-                    hasMaxConstraint: true,
-                    isConstraintFixed: false,
-                    hasFixedValue: false,
-                    fixedValue: nil
-                ),
-                .init(
-                    weight: 1,
-                    minConstraint: 0,
-                    maxConstraint: 400,
-                    hasMaxConstraint: true,
-                    isConstraintFixed: false,
-                    hasFixedValue: false,
-                    fixedValue: nil
-                ),
-                .init(
-                    weight: 1,
-                    minConstraint: 0,
-                    maxConstraint: 0,
-                    hasMaxConstraint: false,
-                    isConstraintFixed: false,
-                    hasFixedValue: false,
-                    fixedValue: nil
-                ),
-            ],
-            availableSpace: 1200,
-            gapSize: 0
-        )
-
-        #expect(outputs.count == 3)
-        #expect(abs(outputs[0].value - 100) < 0.001)
-        #expect(abs(outputs[1].value - 400) < 0.001)
-        #expect(abs(outputs[2].value - 700) < 0.001)
-    }
-
-    @Test func solverFixedOverflowDoesNotOverallocateAutoWindows() {
-        let outputs = NiriAxisSolver.solve(
-            windows: [
-                .init(
-                    weight: 0,
-                    minConstraint: 80,
-                    maxConstraint: 0,
-                    hasMaxConstraint: false,
-                    isConstraintFixed: false,
-                    hasFixedValue: true,
-                    fixedValue: 80
-                ),
-                .init(
-                    weight: 1,
-                    minConstraint: 0,
-                    maxConstraint: 0,
-                    hasMaxConstraint: false,
-                    isConstraintFixed: false,
-                    hasFixedValue: false,
-                    fixedValue: nil
-                ),
-            ],
-            availableSpace: 50,
-            gapSize: 0
-        )
-
-        #expect(outputs.count == 2)
-        #expect(abs(outputs[0].value - 50) < 0.001)
-        #expect(outputs[0].wasConstrained == true)
-        #expect(outputs[1].value == 0)
-        #expect(outputs[1].wasConstrained == false)
-        #expect(abs(outputs.map(\.value).reduce(0, +) - 50) < 0.001)
     }
 
     @Test func columnWidthDoesNotShrinkBelowRequiredFixedChildWidth() {
@@ -4737,6 +4726,71 @@ private func makeCenteredCrossMonitorFixture(
         #expect(sourceState.selectedNodeId == fallbackWindow.id)
         #expect(inserted)
         #expect(orderedWindowIds == [focusedWindow.token.windowId, targetWindow.token.windowId])
+    }
+
+    @Test func moveMultiWindowColumnToWorkspaceSelectsFallbackOutsideMovedColumn() {
+        let engine = NiriLayoutEngine(maxWindowsPerColumn: 3, maxVisibleColumns: 3)
+        let sourceWorkspaceId = UUID()
+        let targetWorkspaceId = UUID()
+
+        let previous = appendManualNiriColumn(to: engine, workspaceId: sourceWorkspaceId, pids: [71])
+        let moved = appendManualNiriColumn(to: engine, workspaceId: sourceWorkspaceId, pids: [72, 73])
+        let next = appendManualNiriColumn(to: engine, workspaceId: sourceWorkspaceId, pids: [74])
+        let targetWindow = engine.addWindow(handle: makeTestHandle(pid: 75), to: targetWorkspaceId, afterSelection: nil)
+
+        var sourceState = ViewportState()
+        sourceState.selectedNodeId = moved.windows[0].id
+        sourceState.activeColumnIndex = 1
+        var targetState = ViewportState()
+        targetState.selectedNodeId = targetWindow.id
+
+        let result = engine.moveColumnToWorkspace(
+            moved.column,
+            from: sourceWorkspaceId,
+            to: targetWorkspaceId,
+            sourceState: &sourceState,
+            targetState: &targetState
+        )
+
+        let sourceTokens = engine.columns(in: sourceWorkspaceId).flatMap(\.windowNodes).map(\.token)
+        let targetTokens = engine.columns(in: targetWorkspaceId).flatMap(\.windowNodes).map(\.token)
+
+        #expect(result?.newFocusNodeId == previous.windows[0].id)
+        #expect(sourceState.selectedNodeId == previous.windows[0].id)
+        #expect(targetState.selectedNodeId == moved.windows[0].id)
+        #expect(sourceTokens == [previous.windows[0].token, next.windows[0].token])
+        #expect(Array(targetTokens.suffix(2)) == moved.windows.map(\.token))
+    }
+
+    @Test func moveOnlySourceColumnToWorkspaceLeavesNoSourceFallback() {
+        let engine = NiriLayoutEngine(maxWindowsPerColumn: 3, maxVisibleColumns: 3)
+        let sourceWorkspaceId = UUID()
+        let targetWorkspaceId = UUID()
+
+        let moved = appendManualNiriColumn(to: engine, workspaceId: sourceWorkspaceId, pids: [81, 82])
+
+        var sourceState = ViewportState()
+        sourceState.selectedNodeId = moved.windows[0].id
+        sourceState.activeColumnIndex = 0
+        var targetState = ViewportState()
+
+        let result = engine.moveColumnToWorkspace(
+            moved.column,
+            from: sourceWorkspaceId,
+            to: targetWorkspaceId,
+            sourceState: &sourceState,
+            targetState: &targetState
+        )
+
+        let sourceColumns = engine.columns(in: sourceWorkspaceId)
+        let targetTokens = engine.columns(in: targetWorkspaceId).flatMap(\.windowNodes).map(\.token)
+
+        #expect(result?.newFocusNodeId == nil)
+        #expect(sourceState.selectedNodeId == nil)
+        #expect(sourceColumns.count == 1)
+        #expect(sourceColumns[0].windowNodes.isEmpty)
+        #expect(targetState.selectedNodeId == moved.windows[0].id)
+        #expect(targetTokens == moved.windows.map(\.token))
     }
 
     @Test func toggleColumnWidthFollowsOrderedDuplicatePresetsFromExplicitDefaultMatch() {

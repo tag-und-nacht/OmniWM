@@ -4,7 +4,7 @@ import OmniWMIPC
 
 @MainActor
 enum WorkspaceNavigationKernel {
-    enum Operation {
+    enum Operation: Equatable {
         case focusMonitorCyclic
         case focusMonitorLast
         case swapWorkspaceWithMonitor
@@ -38,7 +38,7 @@ enum WorkspaceNavigationKernel {
         }
     }
 
-    enum Outcome {
+    enum Outcome: Equatable {
         case noop
         case execute
         case invalidTarget
@@ -55,7 +55,7 @@ enum WorkspaceNavigationKernel {
         }
     }
 
-    enum FocusAction {
+    enum FocusAction: Equatable {
         case none
         case workspaceHandoff
         case resolveTargetIfPresent
@@ -76,13 +76,13 @@ enum WorkspaceNavigationKernel {
         }
     }
 
-    enum Subject {
+    enum Subject: Equatable {
         case none
         case window(WindowToken)
         case column(WindowToken)
     }
 
-    struct Intent {
+    struct Intent: Equatable {
         var operation: Operation
         var direction: Direction = .right
         var currentWorkspaceId: WorkspaceDescriptor.ID?
@@ -96,7 +96,7 @@ enum WorkspaceNavigationKernel {
         var followFocus = false
     }
 
-    struct Plan {
+    struct Plan: Equatable {
         var outcome: Outcome
         var subject: Subject
         var focusAction: FocusAction
@@ -139,66 +139,158 @@ enum WorkspaceNavigationKernel {
         let selectedToken: WindowToken?
     }
 
+    struct Input {
+        struct MonitorSnapshot: Equatable {
+            var monitorId: Monitor.ID
+            var frameMinX: CGFloat
+            var frameMaxY: CGFloat
+            var centerX: CGFloat
+            var centerY: CGFloat
+            var activeWorkspaceId: WorkspaceDescriptor.ID?
+            var previousWorkspaceId: WorkspaceDescriptor.ID?
+        }
+
+        struct WorkspaceSnapshot: Equatable {
+            enum LayoutKind: Equatable {
+                case defaultLayout
+                case niri
+                case dwindle
+            }
+
+            var workspaceId: WorkspaceDescriptor.ID
+            var monitorId: Monitor.ID?
+            var layoutKind: LayoutKind
+            var rememberedTiledFocusToken: WindowToken?
+            var firstTiledFocusToken: WindowToken?
+            var rememberedFloatingFocusToken: WindowToken?
+            var firstFloatingFocusToken: WindowToken?
+        }
+
+        struct FocusSessionSnapshot: Equatable {
+            var pendingManagedTiledFocusToken: WindowToken? = nil
+            var pendingManagedTiledFocusWorkspaceId: WorkspaceDescriptor.ID? = nil
+            var confirmedTiledFocusToken: WindowToken? = nil
+            var confirmedTiledFocusWorkspaceId: WorkspaceDescriptor.ID? = nil
+            var confirmedFloatingFocusToken: WindowToken? = nil
+            var confirmedFloatingFocusWorkspaceId: WorkspaceDescriptor.ID? = nil
+            var isNonManagedFocusActive = false
+            var isAppFullscreenActive = false
+        }
+
+        var intent: Intent
+        var adjacentFallbackWorkspaceNumber: UInt32?
+        var activeColumnSubjectToken: WindowToken?
+        var selectedColumnSubjectToken: WindowToken?
+        var focus: FocusSessionSnapshot
+        var monitors: [MonitorSnapshot]
+        var workspaces: [WorkspaceSnapshot]
+
+        @MainActor
+        static func capture(
+            controller: WMController,
+            intent: Intent
+        ) -> Input {
+            let manager = controller.workspaceManager
+
+            let monitors = manager.monitors.map { monitor in
+                MonitorSnapshot(
+                    monitorId: monitor.id,
+                    frameMinX: monitor.frame.minX,
+                    frameMaxY: monitor.frame.maxY,
+                    centerX: monitor.frame.midX,
+                    centerY: monitor.frame.midY,
+                    activeWorkspaceId: manager.activeWorkspace(on: monitor.id)?.id,
+                    previousWorkspaceId: manager.previousWorkspace(on: monitor.id)?.id
+                )
+            }
+
+            let workspaces = manager.workspaces.map { workspace in
+                let focusSnapshot = workspaceFocusSnapshot(manager: manager, workspaceId: workspace.id)
+                return WorkspaceSnapshot(
+                    workspaceId: workspace.id,
+                    monitorId: manager.monitorId(for: workspace.id),
+                    layoutKind: layoutKind(controller.settings.layoutType(for: workspace.name)),
+                    rememberedTiledFocusToken: focusSnapshot.rememberedTiledToken,
+                    firstTiledFocusToken: focusSnapshot.firstTiledToken,
+                    rememberedFloatingFocusToken: focusSnapshot.rememberedFloatingToken,
+                    firstFloatingFocusToken: focusSnapshot.firstFloatingToken
+                )
+            }
+
+            let focus = focusSessionSnapshot(manager: manager)
+            let sourceWorkspaceId = intent.sourceWorkspaceId
+            return Input(
+                intent: intent,
+                adjacentFallbackWorkspaceNumber: WorkspaceNavigationKernel.adjacentFallbackWorkspaceNumber(
+                    controller: controller,
+                    intent: intent
+                ),
+                activeColumnSubjectToken: sourceWorkspaceId.flatMap {
+                    WorkspaceNavigationKernel.activeColumnSubjectToken(controller: controller, workspaceId: $0)
+                },
+                selectedColumnSubjectToken: sourceWorkspaceId.flatMap {
+                    WorkspaceNavigationKernel.selectedColumnSubjectToken(controller: controller, workspaceId: $0)
+                },
+                focus: .init(
+                    pendingManagedTiledFocusToken: focus.pendingManagedTiledToken,
+                    pendingManagedTiledFocusWorkspaceId: focus.pendingManagedTiledWorkspaceId,
+                    confirmedTiledFocusToken: focus.confirmedTiledToken,
+                    confirmedTiledFocusWorkspaceId: focus.confirmedTiledWorkspaceId,
+                    confirmedFloatingFocusToken: focus.confirmedFloatingToken,
+                    confirmedFloatingFocusWorkspaceId: focus.confirmedFloatingWorkspaceId,
+                    isNonManagedFocusActive: focus.isNonManagedFocusActive,
+                    isAppFullscreenActive: focus.isAppFullscreenActive
+                ),
+                monitors: monitors,
+                workspaces: workspaces
+            )
+        }
+    }
+
     static func plan(
         controller: WMController,
         intent: Intent
     ) -> Plan {
-        let manager = controller.workspaceManager
-        let focusSessionSnapshot = focusSessionSnapshot(manager: manager)
-        let columnSubjectSnapshot = columnSubjectSnapshot(
-            controller: controller,
-            workspaceId: intent.sourceWorkspaceId
-        )
-        let adjacentFallbackWorkspaceNumber = adjacentFallbackWorkspaceNumber(
-            controller: controller,
-            intent: intent
-        )
+        plan(.capture(controller: controller, intent: intent))
+    }
 
+    static func plan(_ input: Input) -> Plan {
+        let intent = input.intent
         var rawMonitors = ContiguousArray<omniwm_workspace_navigation_monitor>()
-        rawMonitors.reserveCapacity(manager.monitors.count)
-        for monitor in manager.monitors {
-            let activeWorkspaceId = manager.activeWorkspace(on: monitor.id)?.id
-            let previousWorkspaceId = manager.previousWorkspace(on: monitor.id)?.id
+        rawMonitors.reserveCapacity(input.monitors.count)
+        for monitor in input.monitors {
             rawMonitors.append(
                 omniwm_workspace_navigation_monitor(
-                    monitor_id: monitor.id.displayId,
-                    frame_min_x: monitor.frame.minX,
-                    frame_max_y: monitor.frame.maxY,
-                    center_x: monitor.frame.midX,
-                    center_y: monitor.frame.midY,
-                    active_workspace_id: activeWorkspaceId.map(encode(uuid:)) ?? zeroUUID(),
-                    previous_workspace_id: previousWorkspaceId.map(encode(uuid:)) ?? zeroUUID(),
-                    has_active_workspace_id: activeWorkspaceId == nil ? 0 : 1,
-                    has_previous_workspace_id: previousWorkspaceId == nil ? 0 : 1
+                    monitor_id: monitor.monitorId.displayId,
+                    frame_min_x: monitor.frameMinX,
+                    frame_max_y: monitor.frameMaxY,
+                    center_x: monitor.centerX,
+                    center_y: monitor.centerY,
+                    active_workspace_id: monitor.activeWorkspaceId.map(encode(uuid:)) ?? zeroUUID(),
+                    previous_workspace_id: monitor.previousWorkspaceId.map(encode(uuid:)) ?? zeroUUID(),
+                    has_active_workspace_id: monitor.activeWorkspaceId == nil ? 0 : 1,
+                    has_previous_workspace_id: monitor.previousWorkspaceId == nil ? 0 : 1
                 )
             )
         }
 
         var rawWorkspaces = ContiguousArray<omniwm_workspace_navigation_workspace>()
-        rawWorkspaces.reserveCapacity(manager.workspaces.count)
-        for workspace in manager.workspaces {
-            let monitorId = manager.monitorId(for: workspace.id)
-            let layoutKind = rawLayoutKind(
-                controller.settings.layoutType(for: workspace.name)
-            )
-            let focusSnapshot = workspaceFocusSnapshot(
-                manager: manager,
-                workspaceId: workspace.id
-            )
+        rawWorkspaces.reserveCapacity(input.workspaces.count)
+        for workspace in input.workspaces {
             rawWorkspaces.append(
                 omniwm_workspace_navigation_workspace(
-                    workspace_id: encode(uuid: workspace.id),
-                    monitor_id: monitorId?.displayId ?? 0,
-                    layout_kind: layoutKind,
-                    remembered_tiled_focus_token: focusSnapshot.rememberedTiledToken.map(encode(token:)) ?? zeroToken(),
-                    first_tiled_focus_token: focusSnapshot.firstTiledToken.map(encode(token:)) ?? zeroToken(),
-                    remembered_floating_focus_token: focusSnapshot.rememberedFloatingToken.map(encode(token:)) ?? zeroToken(),
-                    first_floating_focus_token: focusSnapshot.firstFloatingToken.map(encode(token:)) ?? zeroToken(),
-                    has_monitor_id: monitorId == nil ? 0 : 1,
-                    has_remembered_tiled_focus_token: focusSnapshot.rememberedTiledToken == nil ? 0 : 1,
-                    has_first_tiled_focus_token: focusSnapshot.firstTiledToken == nil ? 0 : 1,
-                    has_remembered_floating_focus_token: focusSnapshot.rememberedFloatingToken == nil ? 0 : 1,
-                    has_first_floating_focus_token: focusSnapshot.firstFloatingToken == nil ? 0 : 1
+                    workspace_id: encode(uuid: workspace.workspaceId),
+                    monitor_id: workspace.monitorId?.displayId ?? 0,
+                    layout_kind: rawLayoutKind(workspace.layoutKind),
+                    remembered_tiled_focus_token: workspace.rememberedTiledFocusToken.map(encode(token:)) ?? zeroToken(),
+                    first_tiled_focus_token: workspace.firstTiledFocusToken.map(encode(token:)) ?? zeroToken(),
+                    remembered_floating_focus_token: workspace.rememberedFloatingFocusToken.map(encode(token:)) ?? zeroToken(),
+                    first_floating_focus_token: workspace.firstFloatingFocusToken.map(encode(token:)) ?? zeroToken(),
+                    has_monitor_id: workspace.monitorId == nil ? 0 : 1,
+                    has_remembered_tiled_focus_token: workspace.rememberedTiledFocusToken == nil ? 0 : 1,
+                    has_first_tiled_focus_token: workspace.firstTiledFocusToken == nil ? 0 : 1,
+                    has_remembered_floating_focus_token: workspace.rememberedFloatingFocusToken == nil ? 0 : 1,
+                    has_first_floating_focus_token: workspace.firstFloatingFocusToken == nil ? 0 : 1
                 )
             )
         }
@@ -209,37 +301,37 @@ enum WorkspaceNavigationKernel {
             current_workspace_id: intent.currentWorkspaceId.map(encode(uuid:)) ?? zeroUUID(),
             source_workspace_id: intent.sourceWorkspaceId.map(encode(uuid:)) ?? zeroUUID(),
             target_workspace_id: intent.targetWorkspaceId.map(encode(uuid:)) ?? zeroUUID(),
-            adjacent_fallback_workspace_number: adjacentFallbackWorkspaceNumber ?? 0,
+            adjacent_fallback_workspace_number: input.adjacentFallbackWorkspaceNumber ?? 0,
             current_monitor_id: intent.currentMonitorId?.displayId ?? 0,
             previous_monitor_id: intent.previousMonitorId?.displayId ?? 0,
             subject_token: intent.subjectToken.map(encode(token:)) ?? zeroToken(),
             focused_token: intent.focusedToken.map(encode(token:)) ?? zeroToken(),
-            pending_managed_tiled_focus_token: focusSessionSnapshot.pendingManagedTiledToken.map(encode(token:)) ?? zeroToken(),
-            pending_managed_tiled_focus_workspace_id: focusSessionSnapshot.pendingManagedTiledWorkspaceId.map(encode(uuid:)) ?? zeroUUID(),
-            confirmed_tiled_focus_token: focusSessionSnapshot.confirmedTiledToken.map(encode(token:)) ?? zeroToken(),
-            confirmed_tiled_focus_workspace_id: focusSessionSnapshot.confirmedTiledWorkspaceId.map(encode(uuid:)) ?? zeroUUID(),
-            confirmed_floating_focus_token: focusSessionSnapshot.confirmedFloatingToken.map(encode(token:)) ?? zeroToken(),
-            confirmed_floating_focus_workspace_id: focusSessionSnapshot.confirmedFloatingWorkspaceId.map(encode(uuid:)) ?? zeroUUID(),
-            active_column_subject_token: columnSubjectSnapshot.activeToken.map(encode(token:)) ?? zeroToken(),
-            selected_column_subject_token: columnSubjectSnapshot.selectedToken.map(encode(token:)) ?? zeroToken(),
+            pending_managed_tiled_focus_token: input.focus.pendingManagedTiledFocusToken.map(encode(token:)) ?? zeroToken(),
+            pending_managed_tiled_focus_workspace_id: input.focus.pendingManagedTiledFocusWorkspaceId.map(encode(uuid:)) ?? zeroUUID(),
+            confirmed_tiled_focus_token: input.focus.confirmedTiledFocusToken.map(encode(token:)) ?? zeroToken(),
+            confirmed_tiled_focus_workspace_id: input.focus.confirmedTiledFocusWorkspaceId.map(encode(uuid:)) ?? zeroUUID(),
+            confirmed_floating_focus_token: input.focus.confirmedFloatingFocusToken.map(encode(token:)) ?? zeroToken(),
+            confirmed_floating_focus_workspace_id: input.focus.confirmedFloatingFocusWorkspaceId.map(encode(uuid:)) ?? zeroUUID(),
+            active_column_subject_token: input.activeColumnSubjectToken.map(encode(token:)) ?? zeroToken(),
+            selected_column_subject_token: input.selectedColumnSubjectToken.map(encode(token:)) ?? zeroToken(),
             has_current_workspace_id: intent.currentWorkspaceId == nil ? 0 : 1,
             has_source_workspace_id: intent.sourceWorkspaceId == nil ? 0 : 1,
             has_target_workspace_id: intent.targetWorkspaceId == nil ? 0 : 1,
-            has_adjacent_fallback_workspace_number: adjacentFallbackWorkspaceNumber == nil ? 0 : 1,
+            has_adjacent_fallback_workspace_number: input.adjacentFallbackWorkspaceNumber == nil ? 0 : 1,
             has_current_monitor_id: intent.currentMonitorId == nil ? 0 : 1,
             has_previous_monitor_id: intent.previousMonitorId == nil ? 0 : 1,
             has_subject_token: intent.subjectToken == nil ? 0 : 1,
             has_focused_token: intent.focusedToken == nil ? 0 : 1,
-            has_pending_managed_tiled_focus_token: focusSessionSnapshot.pendingManagedTiledToken == nil ? 0 : 1,
-            has_pending_managed_tiled_focus_workspace_id: focusSessionSnapshot.pendingManagedTiledWorkspaceId == nil ? 0 : 1,
-            has_confirmed_tiled_focus_token: focusSessionSnapshot.confirmedTiledToken == nil ? 0 : 1,
-            has_confirmed_tiled_focus_workspace_id: focusSessionSnapshot.confirmedTiledWorkspaceId == nil ? 0 : 1,
-            has_confirmed_floating_focus_token: focusSessionSnapshot.confirmedFloatingToken == nil ? 0 : 1,
-            has_confirmed_floating_focus_workspace_id: focusSessionSnapshot.confirmedFloatingWorkspaceId == nil ? 0 : 1,
-            has_active_column_subject_token: columnSubjectSnapshot.activeToken == nil ? 0 : 1,
-            has_selected_column_subject_token: columnSubjectSnapshot.selectedToken == nil ? 0 : 1,
-            is_non_managed_focus_active: focusSessionSnapshot.isNonManagedFocusActive ? 1 : 0,
-            is_app_fullscreen_active: focusSessionSnapshot.isAppFullscreenActive ? 1 : 0,
+            has_pending_managed_tiled_focus_token: input.focus.pendingManagedTiledFocusToken == nil ? 0 : 1,
+            has_pending_managed_tiled_focus_workspace_id: input.focus.pendingManagedTiledFocusWorkspaceId == nil ? 0 : 1,
+            has_confirmed_tiled_focus_token: input.focus.confirmedTiledFocusToken == nil ? 0 : 1,
+            has_confirmed_tiled_focus_workspace_id: input.focus.confirmedTiledFocusWorkspaceId == nil ? 0 : 1,
+            has_confirmed_floating_focus_token: input.focus.confirmedFloatingFocusToken == nil ? 0 : 1,
+            has_confirmed_floating_focus_workspace_id: input.focus.confirmedFloatingFocusWorkspaceId == nil ? 0 : 1,
+            has_active_column_subject_token: input.activeColumnSubjectToken == nil ? 0 : 1,
+            has_selected_column_subject_token: input.selectedColumnSubjectToken == nil ? 0 : 1,
+            is_non_managed_focus_active: input.focus.isNonManagedFocusActive ? 1 : 0,
+            is_app_fullscreen_active: input.focus.isAppFullscreenActive ? 1 : 0,
             wrap_around: intent.wrapAround ? 1 : 0,
             follow_focus: intent.followFocus ? 1 : 0
         )
@@ -655,8 +747,16 @@ enum WorkspaceNavigationKernel {
         }
     }
 
-    private static func rawLayoutKind(_ layoutType: LayoutType) -> UInt32 {
+    private static func layoutKind(_ layoutType: LayoutType) -> Input.WorkspaceSnapshot.LayoutKind {
         switch layoutType {
+        case .defaultLayout: .defaultLayout
+        case .niri: .niri
+        case .dwindle: .dwindle
+        }
+    }
+
+    private static func rawLayoutKind(_ layoutKind: Input.WorkspaceSnapshot.LayoutKind) -> UInt32 {
+        switch layoutKind {
         case .defaultLayout: UInt32(OMNIWM_WORKSPACE_NAV_LAYOUT_DEFAULT)
         case .niri: UInt32(OMNIWM_WORKSPACE_NAV_LAYOUT_NIRI)
         case .dwindle: UInt32(OMNIWM_WORKSPACE_NAV_LAYOUT_DWINDLE)

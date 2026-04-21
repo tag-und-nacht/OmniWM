@@ -283,6 +283,7 @@ private func makeNiriOverviewLayout(
             screenFrame: viewport
         )
 
+        #expect(zoomedLayout.resolvedScrollOffsetBounds != nil)
         #expect(sampleWindow.originalFrame.minX < viewport.maxX)
         #expect(sampleWindow.originalFrame.minX >= -monitorFrame.width)
         #expect(frameIsWithinViewport(sampleWindow.overviewFrame, viewport: viewport))

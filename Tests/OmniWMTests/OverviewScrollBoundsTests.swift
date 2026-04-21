@@ -9,6 +9,7 @@ import Testing
         layout.scale = 1.0
         layout.searchBarFrame = CGRect(x: 0, y: 900, width: 500, height: 44)
         layout.totalContentHeight = 200
+        layout.resolvedScrollOffsetBounds = 0 ... 0
 
         let bounds = OverviewLayoutCalculator.scrollOffsetBounds(
             layout: layout,
@@ -24,6 +25,7 @@ import Testing
         layout.scale = 1.0
         layout.searchBarFrame = CGRect(x: 0, y: 900, width: 500, height: 44)
         layout.totalContentHeight = 1300
+        layout.resolvedScrollOffsetBounds = -420 ... 0
 
         let bounds = OverviewLayoutCalculator.scrollOffsetBounds(
             layout: layout,
@@ -39,6 +41,7 @@ import Testing
         layout.scale = 1.0
         layout.searchBarFrame = CGRect(x: 0, y: 900, width: 500, height: 44)
         layout.totalContentHeight = 1300
+        layout.resolvedScrollOffsetBounds = -420 ... 0
         let screenFrame = CGRect(x: 0, y: 0, width: 1440, height: 900)
 
         let aboveTop = OverviewLayoutCalculator.clampedScrollOffset(

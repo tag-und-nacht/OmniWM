@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import os
 
 extension CGPoint {
     func flipY(maxY: CGFloat) -> CGPoint {
@@ -19,11 +20,13 @@ extension CGRect {
 }
 
 enum ScreenCoordinateSpace {
-    private struct ScreenTransform {
+    struct ScreenTransform {
+        let displayId: CGDirectDisplayID
         let appKitFrame: CGRect
         let quartzFrame: CGRect
         let scaleX: CGFloat
         let scaleY: CGFloat
+        let backingScale: CGFloat
 
         func toAppKit(point: CGPoint) -> CGPoint {
             let dx = point.x - quartzFrame.minX
@@ -62,119 +65,160 @@ enum ScreenCoordinateSpace {
         }
     }
 
-    nonisolated(unsafe) private static var cachedTransforms: [ScreenTransform]?
-    nonisolated(unsafe) private static var cachedGlobalFrame: CGRect?
-    nonisolated(unsafe) private static var screenConfigurationToken: Int = 0
+    struct DisplayGeometrySnapshot {
+        let transforms: [ScreenTransform]
+        let globalFrame: CGRect
+        let backingScaleByDisplayId: [CGDirectDisplayID: CGFloat]
+        let generation: UInt64
 
-    private static func currentToken() -> Int {
-        var hasher = Hasher()
-        for screen in NSScreen.screens {
-            hasher.combine(screen.displayId ?? 0)
-            let frame = screen.frame
-            hasher.combine(frame.origin.x)
-            hasher.combine(frame.origin.y)
-            hasher.combine(frame.size.width)
-            hasher.combine(frame.size.height)
-        }
-        return hasher.finalize()
+        static let empty = DisplayGeometrySnapshot(
+            transforms: [],
+            globalFrame: .zero,
+            backingScaleByDisplayId: [:],
+            generation: 0
+        )
     }
 
-    private static func transforms() -> [ScreenTransform] {
-        let token = currentToken()
-        if let cached = cachedTransforms, token == screenConfigurationToken {
-            return cached
-        }
+    nonisolated(unsafe) private static var currentSnapshot: DisplayGeometrySnapshot = .empty
+    nonisolated(unsafe) private static var snapshotLock = os_unfair_lock_s()
+    nonisolated(unsafe) private static var nextGeneration: UInt64 = 1
 
-        let transforms = NSScreen.screens.compactMap { screen -> ScreenTransform? in
-            guard let displayId = screen.displayId else { return nil }
+    @MainActor
+    static func invalidateDisplaySnapshot() {
+        let snapshot = buildSnapshotOnMain()
+        publish(snapshot)
+    }
+
+    @MainActor
+    private static func buildSnapshotOnMain() -> DisplayGeometrySnapshot {
+        let screens = NSScreen.screens
+        var transforms: [ScreenTransform] = []
+        transforms.reserveCapacity(screens.count)
+        var backingScaleByDisplayId: [CGDirectDisplayID: CGFloat] = [:]
+        backingScaleByDisplayId.reserveCapacity(screens.count)
+
+        var globalFrame = CGRect.null
+        for screen in screens {
+            globalFrame = globalFrame.union(screen.frame)
+            guard let displayId = screen.displayId else { continue }
             let quartzFrame = CGDisplayBounds(displayId)
             let appKitFrame = screen.frame
             let scaleX = quartzFrame.width / max(1.0, appKitFrame.width)
             let scaleY = quartzFrame.height / max(1.0, appKitFrame.height)
-            return ScreenTransform(
-                appKitFrame: appKitFrame,
-                quartzFrame: quartzFrame,
-                scaleX: scaleX,
-                scaleY: scaleY
+            let backingScale = screen.backingScaleFactor
+            transforms.append(
+                ScreenTransform(
+                    displayId: displayId,
+                    appKitFrame: appKitFrame,
+                    quartzFrame: quartzFrame,
+                    scaleX: scaleX,
+                    scaleY: scaleY,
+                    backingScale: backingScale
+                )
             )
+            backingScaleByDisplayId[displayId] = backingScale
         }
 
-        cachedTransforms = transforms
-        cachedGlobalFrame = nil
-        screenConfigurationToken = token
-        return transforms
+        let generation = nextGeneration
+        nextGeneration &+= 1
+        return DisplayGeometrySnapshot(
+            transforms: transforms,
+            globalFrame: globalFrame.isNull ? .zero : globalFrame,
+            backingScaleByDisplayId: backingScaleByDisplayId,
+            generation: generation
+        )
+    }
+
+    private static func publish(_ snapshot: DisplayGeometrySnapshot) {
+        os_unfair_lock_lock(&snapshotLock)
+        currentSnapshot = snapshot
+        os_unfair_lock_unlock(&snapshotLock)
+    }
+
+    static func snapshot() -> DisplayGeometrySnapshot {
+        os_unfair_lock_lock(&snapshotLock)
+        let snapshot = currentSnapshot
+        os_unfair_lock_unlock(&snapshotLock)
+        if snapshot.generation == 0, Thread.isMainThread {
+            return MainActor.assumeIsolated {
+                let rebuilt = buildSnapshotOnMain()
+                publish(rebuilt)
+                return rebuilt
+            }
+        }
+        return snapshot
     }
 
     static var globalFrame: CGRect {
-        let token = currentToken()
-        if let cached = cachedGlobalFrame, token == screenConfigurationToken {
-            return cached
+        snapshot().globalFrame
+    }
+
+    static func backingScale(forAppKitRect rect: CGRect, fallback: CGFloat = 2.0) -> CGFloat {
+        let snap = snapshot()
+        let center = rect.center
+        for transform in snap.transforms where transform.appKitFrame.contains(center) {
+            return transform.backingScale
         }
-        let frame = NSScreen.screens.reduce(into: CGRect.null) { result, screen in
-            result = result.union(screen.frame)
-        }
-        cachedGlobalFrame = frame
-        screenConfigurationToken = token
-        return frame
+        return snap.transforms.first?.backingScale ?? fallback
     }
 
-    private static func transformForQuartz(point: CGPoint) -> ScreenTransform? {
-        transforms().first { $0.quartzFrame.contains(point) }
+    private static func transformForQuartz(point: CGPoint, in snap: DisplayGeometrySnapshot) -> ScreenTransform? {
+        snap.transforms.first { $0.quartzFrame.contains(point) }
     }
 
-    private static func transformForAppKit(point: CGPoint) -> ScreenTransform? {
-        transforms().first { $0.appKitFrame.contains(point) }
+    private static func transformForAppKit(point: CGPoint, in snap: DisplayGeometrySnapshot) -> ScreenTransform? {
+        snap.transforms.first { $0.appKitFrame.contains(point) }
     }
 
-    private static func transformClosestToQuartz(point: CGPoint) -> ScreenTransform? {
-        if let transform = transformForQuartz(point: point) {
+    private static func transformClosestToQuartz(point: CGPoint, in snap: DisplayGeometrySnapshot) -> ScreenTransform? {
+        if let transform = transformForQuartz(point: point, in: snap) {
             return transform
         }
-        return transforms().min { lhs, rhs in
+        return snap.transforms.min { lhs, rhs in
             lhs.quartzFrame.distanceSquared(to: point) < rhs.quartzFrame.distanceSquared(to: point)
         }
     }
 
-    private static func transformClosestToAppKit(point: CGPoint) -> ScreenTransform? {
-        if let transform = transformForAppKit(point: point) {
+    private static func transformClosestToAppKit(point: CGPoint, in snap: DisplayGeometrySnapshot) -> ScreenTransform? {
+        if let transform = transformForAppKit(point: point, in: snap) {
             return transform
         }
-        return transforms().min { lhs, rhs in
+        return snap.transforms.min { lhs, rhs in
             lhs.appKitFrame.distanceSquared(to: point) < rhs.appKitFrame.distanceSquared(to: point)
         }
     }
 
     static func toAppKit(point: CGPoint) -> CGPoint {
-        if let transform = transformClosestToQuartz(point: point) {
+        let snap = snapshot()
+        if let transform = transformClosestToQuartz(point: point, in: snap) {
             return transform.toAppKit(point: point)
         }
-        let global = globalFrame
-        return CGPoint(x: point.x, y: global.maxY - point.y)
+        return CGPoint(x: point.x, y: snap.globalFrame.maxY - point.y)
     }
 
     static func toAppKit(rect: CGRect) -> CGRect {
-        if let transform = transformClosestToQuartz(point: rect.center) {
+        let snap = snapshot()
+        if let transform = transformClosestToQuartz(point: rect.center, in: snap) {
             return transform.toAppKit(rect: rect)
         }
-        let global = globalFrame
-        let flippedY = global.maxY - (rect.origin.y + rect.size.height)
+        let flippedY = snap.globalFrame.maxY - (rect.origin.y + rect.size.height)
         return CGRect(origin: CGPoint(x: rect.origin.x, y: flippedY), size: rect.size)
     }
 
     static func toWindowServer(point: CGPoint) -> CGPoint {
-        if let transform = transformClosestToAppKit(point: point) {
+        let snap = snapshot()
+        if let transform = transformClosestToAppKit(point: point, in: snap) {
             return transform.toWindowServer(point: point)
         }
-        let global = globalFrame
-        return CGPoint(x: point.x, y: global.maxY - point.y)
+        return CGPoint(x: point.x, y: snap.globalFrame.maxY - point.y)
     }
 
     static func toWindowServer(rect: CGRect) -> CGRect {
-        if let transform = transformClosestToAppKit(point: rect.center) {
+        let snap = snapshot()
+        if let transform = transformClosestToAppKit(point: rect.center, in: snap) {
             return transform.toWindowServer(rect: rect)
         }
-        let global = globalFrame
-        let flippedY = global.maxY - (rect.origin.y + rect.size.height)
+        let flippedY = snap.globalFrame.maxY - (rect.origin.y + rect.size.height)
         return CGRect(origin: CGPoint(x: rect.origin.x, y: flippedY), size: rect.size)
     }
 }

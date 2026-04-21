@@ -191,9 +191,9 @@ final class AXEventHandler: CGSEventDelegate {
             handleAppActivation(pid: pid, source: .cgsFrontAppChanged)
 
         case let .titleChanged(windowId):
-            AXWindowService.invalidateCachedTitle(windowId: windowId)
+            AXWindowService.refreshCachedTitle(windowId: windowId)
             controller.requestWorkspaceBarRefresh()
-            if let token = resolveWindowToken(windowId) ?? resolveTrackedToken(windowId) {
+            if let token = resolveTrackedToken(windowId) {
                 updateManagedReplacementTitle(windowId: windowId, token: token)
                 scheduleWindowRuleReevaluationIfNeeded(targets: [.window(token)])
             }
@@ -913,6 +913,7 @@ final class AXEventHandler: CGSEventDelegate {
         assert(entry.workspaceId == workspaceId, "Activation workspace drift for \(entry.token)")
         let wsId = workspaceId
         let shouldActivateWorkspace = !isWorkspaceActive && !controller.isTransferringWindow
+        let preActivationHiddenState = controller.workspaceManager.hiddenState(for: entry.token)
 
         if confirmRequest {
             _ = controller.workspaceManager.confirmManagedFocus(
@@ -934,9 +935,46 @@ final class AXEventHandler: CGSEventDelegate {
         let target = controller.keyboardFocusTarget(for: entry.token, axRef: entry.axRef)
         controller.focusBridge.setFocusedTarget(target)
 
+        let shouldForceWorkspaceInactiveRevealFrame = preActivationHiddenState?.workspaceInactive == true
+        func activationRevealFrame(
+            preferredFrame: CGRect?,
+            hiddenState: WindowModel.HiddenState?,
+            monitor: Monitor
+        ) -> CGRect? {
+            guard shouldForceWorkspaceInactiveRevealFrame else { return preferredFrame }
+            guard let preferredFrame else {
+                return hiddenState.flatMap {
+                    controller.layoutRefreshController.restoredFrameForHiddenEntry(
+                        entry,
+                        monitor: monitor,
+                        hiddenState: $0
+                    )
+                }
+            }
+            let midpoint = CGPoint(x: preferredFrame.midX, y: preferredFrame.midY)
+            guard !monitor.visibleFrame.contains(midpoint) else { return preferredFrame }
+            return hiddenState.flatMap {
+                controller.layoutRefreshController.restoredFrameForHiddenEntry(
+                    entry,
+                    monitor: monitor,
+                    hiddenState: $0
+                )
+            } ?? preferredFrame
+        }
+        if let hiddenState = preActivationHiddenState,
+           hiddenState.workspaceInactive,
+           let monitor = controller.workspaceManager.monitor(for: wsId)
+        {
+            if controller.workspaceManager.hiddenState(for: entry.token) == nil {
+                controller.workspaceManager.setHiddenState(hiddenState, for: entry.token)
+            }
+            controller.axManager.markWindowActive(entry.windowId)
+            controller.layoutRefreshController.unhideWindow(entry, monitor: monitor)
+        }
+
         if let engine = controller.niriEngine,
            let node = engine.findNode(for: entry.handle),
-           let _ = controller.workspaceManager.monitor(for: wsId)
+           let monitor = controller.workspaceManager.monitor(for: wsId)
         {
             var state = controller.workspaceManager.niriViewportState(for: wsId)
             controller.niriLayoutHandler.activateNode(
@@ -951,13 +989,47 @@ final class AXEventHandler: CGSEventDelegate {
                 )
             )
 
+            let preferredFrame = activationRevealFrame(
+                preferredFrame: node.renderedFrame ?? node.frame,
+                hiddenState: preActivationHiddenState,
+                monitor: monitor
+            )
+            let cachedFrame = controller.axManager.lastAppliedFrame(for: entry.windowId)
+            let needsActivationRevealFrame = shouldForceWorkspaceInactiveRevealFrame
+                || (shouldActivateWorkspace && cachedFrame.map {
+                    !monitor.visibleFrame.contains(CGPoint(x: $0.midX, y: $0.midY))
+                } ?? false)
+            if needsActivationRevealFrame,
+               let preferredFrame
+            {
+                controller.axManager.forceApplyNextFrame(for: entry.windowId)
+                controller.axManager.applyFramesParallel([(entry.pid, entry.windowId, preferredFrame)])
+            }
+
             _ = controller.renderKeyboardFocusBorder(
                 for: target,
-                preferredFrame: node.renderedFrame ?? node.frame,
+                preferredFrame: preferredFrame,
                 policy: .direct,
                 source: borderReconcileSource(for: source)
             )
         } else {
+            let monitor = controller.workspaceManager.monitor(for: wsId)
+            let cachedFrame = controller.axManager.lastAppliedFrame(for: entry.windowId)
+            let needsActivationRevealFrame = shouldForceWorkspaceInactiveRevealFrame
+                || (shouldActivateWorkspace && cachedFrame.map { frame in
+                    monitor.map { !($0.visibleFrame.contains(CGPoint(x: frame.midX, y: frame.midY))) } ?? false
+                } ?? false)
+            if needsActivationRevealFrame,
+               let monitor,
+               let preferredFrame = activationRevealFrame(
+                   preferredFrame: controller.preferredKeyboardFocusFrame(for: entry.token),
+                   hiddenState: preActivationHiddenState,
+                   monitor: monitor
+               )
+            {
+                controller.axManager.forceApplyNextFrame(for: entry.windowId)
+                controller.axManager.applyFramesParallel([(entry.pid, entry.windowId, preferredFrame)])
+            }
             _ = controller.renderKeyboardFocusBorder(
                 for: target,
                 policy: .direct,
@@ -1496,8 +1568,7 @@ final class AXEventHandler: CGSEventDelegate {
         windowId: UInt32,
         pidHint: pid_t?
     ) {
-        let resolvedToken = resolveWindowToken(windowId)
-            ?? resolveTrackedToken(windowId)
+        let resolvedToken = resolveTrackedToken(windowId)
             ?? pidHint.map { WindowToken(pid: $0, windowId: Int(windowId)) }
         if let resolvedToken {
             cancelWindowStabilizationRetry(for: resolvedToken)
@@ -2054,7 +2125,6 @@ final class AXEventHandler: CGSEventDelegate {
         confirmRequest: Bool = true
     ) {
         guard let controller else { return }
-
         controller.focusBridge.applyOrchestrationState(
             nextManagedRequestId: result.snapshot.focus.nextManagedRequestId,
             activeManagedRequest: result.snapshot.focus.activeManagedRequest
@@ -2345,13 +2415,10 @@ final class AXEventHandler: CGSEventDelegate {
     }
 
     private func resolveTrackedToken(_ windowId: UInt32) -> WindowToken? {
-        if let token = resolveWindowToken(windowId) {
-            return token
+        if let entry = controller?.workspaceManager.entry(forWindowId: Int(windowId)) {
+            return entry.token
         }
-        guard let controller else { return nil }
-        let matches = controller.workspaceManager.allEntries().filter { $0.windowId == Int(windowId) }
-        guard matches.count == 1 else { return nil }
-        return matches[0].token
+        return resolveWindowToken(windowId)
     }
 
     private func resolveAXWindowRef(windowId: UInt32, pid: pid_t) -> AXWindowRef? {

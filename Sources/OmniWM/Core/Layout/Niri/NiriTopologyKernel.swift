@@ -651,4 +651,26 @@ extension NiriLayoutEngine {
         }
         return nil
     }
+
+    func topologyFallbackSelectionOnColumnRemoval(
+        columnIndex: Int,
+        in workspaceId: WorkspaceDescriptor.ID,
+        state: ViewportState
+    ) -> NodeId? {
+        guard let plan = callTopologyKernel(
+            operation: .columnRemoval,
+            workspaceId: workspaceId,
+            state: state,
+            workingFrame: .zero,
+            gaps: 0,
+            targetIndex: columnIndex
+        ) else { return nil }
+
+        if plan.result.fallback_window_id != 0,
+           let window = findWindow(in: plan, id: plan.result.fallback_window_id)
+        {
+            return window.id
+        }
+        return nil
+    }
 }

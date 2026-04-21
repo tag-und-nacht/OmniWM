@@ -586,7 +586,14 @@ final class MouseEventHandler {
             return
         }
 
-        if let hitResult = engine.hitTestResize(point: location, in: wsId) {
+        let workingFrame = controller.workspaceManager.monitor(for: wsId).map {
+            controller.insetWorkingFrame(for: $0)
+        }
+        if let hitResult = engine.hitTestResize(
+            point: location,
+            in: wsId,
+            workspaceWorkingFrame: workingFrame
+        ) {
             if hitResult.edges != state.currentHoveredEdges {
                 hitResult.edges.cursor.set()
                 state.currentHoveredEdges = hitResult.edges
@@ -621,6 +628,11 @@ final class MouseEventHandler {
                 let isInsertMode = modifiers.contains(.maskShift)
                 var moveStarted = false
                 controller.workspaceManager.withNiriViewportState(for: wsId) { vstate in
+                    controller.niriLayoutHandler.syncAnimationRefreshRate(
+                        for: monitor,
+                        engine: engine,
+                        state: &vstate
+                    )
                     if engine.interactiveMoveBegin(
                         windowId: tiledWindow.id,
                         windowHandle: tiledWindow.handle,
@@ -768,6 +780,11 @@ final class MouseEventHandler {
                 let gaps = CGFloat(controller.workspaceManager.gaps)
                 var didEnd = false
                 controller.workspaceManager.withNiriViewportState(for: wsId) { vstate in
+                    controller.niriLayoutHandler.syncAnimationRefreshRate(
+                        for: monitor,
+                        engine: engine,
+                        state: &vstate
+                    )
                     didEnd = engine.interactiveMoveEnd(
                         at: location,
                         in: wsId,
@@ -803,6 +820,11 @@ final class MouseEventHandler {
             let hadInteractiveResize = engine.interactiveResize != nil
 
             controller.workspaceManager.withNiriViewportState(for: wsId) { vstate in
+                controller.niriLayoutHandler.syncAnimationRefreshRate(
+                    for: monitor,
+                    engine: engine,
+                    state: &vstate
+                )
                 engine.interactiveResizeEnd(
                     motion: controller.motionPolicy.snapshot(),
                     state: &vstate,
@@ -985,7 +1007,7 @@ final class MouseEventHandler {
         }
 
         guard resolveScrollContext(at: location) != nil else {
-            finalizeOrAbortActiveGesture(engine: engine)
+            abortActiveGestureIfNeeded()
             return
         }
         guard !snapshot.touches.isEmpty else {
@@ -1072,6 +1094,11 @@ final class MouseEventHandler {
 
         var targetWindowHandle: WindowHandle?
         controller.workspaceManager.withNiriViewportState(for: wsId) { vstate in
+            controller.niriLayoutHandler.syncAnimationRefreshRate(
+                for: monitor,
+                engine: engine,
+                state: &vstate
+            )
             if vstate.viewOffsetPixels.isAnimating {
                 vstate.cancelAnimation()
             }
@@ -1138,6 +1165,11 @@ final class MouseEventHandler {
         let gap = CGFloat(controller.workspaceManager.gaps)
 
         controller.workspaceManager.withNiriViewportState(for: wsId) { endState in
+            controller.niriLayoutHandler.syncAnimationRefreshRate(
+                for: monitor,
+                engine: engine,
+                state: &endState
+            )
             endState.endGesture(
                 columns: columns,
                 gap: gap,

@@ -190,7 +190,7 @@ enum AXWindowService {
         let fetchedAt: TimeInterval
     }
 
-    private static let titleTTL: TimeInterval = 0.5
+    private static let titleTTL: TimeInterval = 30.0
     private static let titleCacheCap = 512
     @MainActor private static var titleCache: [UInt32: CachedTitle] = [:]
     @MainActor private static var titleInsertionOrder: [UInt32] = []
@@ -206,6 +206,13 @@ enum AXWindowService {
         let title = titleLookupProviderForTests?(windowId) ?? SkyLight.shared.getWindowTitle(windowId)
         storeTitleCacheEntry(windowId: windowId, title: title, at: now)
         return title
+    }
+
+    @MainActor
+    static func refreshCachedTitle(windowId: UInt32) {
+        let now = timeSourceForTests?() ?? ProcessInfo.processInfo.systemUptime
+        let title = titleLookupProviderForTests?(windowId) ?? SkyLight.shared.getWindowTitle(windowId)
+        storeTitleCacheEntry(windowId: windowId, title: title, at: now)
     }
 
     @MainActor

@@ -31,11 +31,17 @@ final class SettingsStore {
     }
 
     var mouseWarpMonitorOrder = SettingsStore.defaultExport.mouseWarpMonitorOrder {
-        didSet { scheduleSave() }
+        didSet {
+            bumpMouseWarpSettingsGeneration()
+            scheduleSave()
+        }
     }
 
     var mouseWarpAxis = MouseWarpAxis(rawValue: SettingsStore.defaultExport.mouseWarpAxis ?? "") ?? .horizontal {
-        didSet { scheduleSave() }
+        didSet {
+            bumpMouseWarpSettingsGeneration()
+            scheduleSave()
+        }
     }
 
     var niriColumnWidthPresets = SettingsStore.validatedPresets(
@@ -555,12 +561,59 @@ final class SettingsStore {
         workspaceConfigurations.first(where: { $0.name == workspaceName })?.effectiveDisplayName ?? workspaceName
     }
 
+    private struct MouseWarpOrderingCacheEntry {
+        let sortedMonitors: [Monitor]
+        let orderedMonitorIds: [Monitor.ID]
+    }
+
+    private struct MouseWarpOrderingCacheKey: Hashable {
+        let settingsGeneration: UInt64
+        let monitorsGeneration: UInt64
+        let axis: MouseWarpAxis
+    }
+
+    private var mouseWarpOrderingCache: [MouseWarpOrderingCacheKey: MouseWarpOrderingCacheEntry] = [:]
+    private var mouseWarpSettingsGeneration: UInt64 = 0
+    private var mouseWarpMonitorsGeneration: UInt64 = 0
+
+    private func bumpMouseWarpSettingsGeneration() {
+        mouseWarpSettingsGeneration &+= 1
+        mouseWarpOrderingCache.removeAll(keepingCapacity: true)
+    }
+
+    func bumpMouseWarpMonitorsGeneration() {
+        mouseWarpMonitorsGeneration &+= 1
+        mouseWarpOrderingCache.removeAll(keepingCapacity: true)
+    }
+
     func effectiveMouseWarpMonitorOrder(for monitors: [Monitor], axis: MouseWarpAxis? = nil) -> [Monitor.ID] {
-        effectiveMouseWarpMonitorOrder(
+        cachedMouseWarpOrdering(for: monitors, axis: axis).orderedMonitorIds
+    }
+
+    func sortedMouseWarpMonitors(for monitors: [Monitor], axis: MouseWarpAxis? = nil) -> [Monitor] {
+        cachedMouseWarpOrdering(for: monitors, axis: axis).sortedMonitors
+    }
+
+    private func cachedMouseWarpOrdering(
+        for monitors: [Monitor],
+        axis: MouseWarpAxis?
+    ) -> MouseWarpOrderingCacheEntry {
+        let resolvedAxis = axis ?? mouseWarpAxis
+        let key = MouseWarpOrderingCacheKey(
+            settingsGeneration: mouseWarpSettingsGeneration,
+            monitorsGeneration: mouseWarpMonitorsGeneration,
+            axis: resolvedAxis
+        )
+        if let cached = mouseWarpOrderingCache[key] {
+            return cached
+        }
+        let entry = computeMouseWarpOrdering(
             for: monitors,
             storedOrder: mouseWarpMonitorOrder,
-            axis: axis
+            axis: resolvedAxis
         )
+        mouseWarpOrderingCache[key] = entry
+        return entry
     }
 
     private func effectiveMouseWarpMonitorOrder(
@@ -568,8 +621,22 @@ final class SettingsStore {
         storedOrder: [OutputId],
         axis: MouseWarpAxis? = nil
     ) -> [Monitor.ID] {
-        let sortedMonitors = (axis ?? mouseWarpAxis).sortedMonitors(monitors)
-        guard !sortedMonitors.isEmpty else { return [] }
+        computeMouseWarpOrdering(
+            for: monitors,
+            storedOrder: storedOrder,
+            axis: axis ?? mouseWarpAxis
+        ).orderedMonitorIds
+    }
+
+    private func computeMouseWarpOrdering(
+        for monitors: [Monitor],
+        storedOrder: [OutputId],
+        axis: MouseWarpAxis
+    ) -> MouseWarpOrderingCacheEntry {
+        let sortedMonitors = axis.sortedMonitors(monitors)
+        guard !sortedMonitors.isEmpty else {
+            return MouseWarpOrderingCacheEntry(sortedMonitors: [], orderedMonitorIds: [])
+        }
 
         let resolution = OutputId.resolveOrderedPreservingUnresolved(
             storedOrder,
@@ -581,7 +648,10 @@ final class SettingsStore {
             orderedMonitorIds.append(monitor.id)
         }
 
-        return orderedMonitorIds
+        return MouseWarpOrderingCacheEntry(
+            sortedMonitors: sortedMonitors,
+            orderedMonitorIds: orderedMonitorIds
+        )
     }
 
     @discardableResult

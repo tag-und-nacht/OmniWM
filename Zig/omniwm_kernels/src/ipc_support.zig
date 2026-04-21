@@ -465,6 +465,27 @@ pub export fn omniwm_ipc_socket_is_current_user(fd: c_int) c_int {
     return if (effective_user_id == c.geteuid()) 1 else 0;
 }
 
+fn validateSecretTokenFile(fd: c_int) c_int {
+    var file_status: c.struct_stat = undefined;
+    if (c.fstat(fd, &file_status) != 0) {
+        return -1;
+    }
+
+    if ((file_status.st_mode & c.S_IFMT) != c.S_IFREG) {
+        setErrno(c.EINVAL);
+        return -1;
+    }
+    if (file_status.st_uid != c.geteuid()) {
+        setErrno(c.EACCES);
+        return -1;
+    }
+    if ((file_status.st_mode & 0o077) != 0) {
+        setErrno(c.EACCES);
+        return -1;
+    }
+    return 0;
+}
+
 pub export fn omniwm_ipc_write_secret_token(
     socket_path: [*c]const u8,
     token: [*c]const u8,
@@ -480,15 +501,23 @@ pub export fn omniwm_ipc_write_secret_token(
         return -1;
     }
 
+    if (c.unlink(@ptrCast(&secret_path_buffer)) != 0 and c.__error().* != c.ENOENT) {
+        return -1;
+    }
+
     const fd = c.open(
         @ptrCast(&secret_path_buffer),
-        c.O_WRONLY | c.O_CREAT | c.O_TRUNC,
+        c.O_WRONLY | c.O_CREAT | c.O_EXCL | c.O_NOFOLLOW,
         @as(c_int, 0o600),
     );
     if (fd < 0) {
         return -1;
     }
     defer _ = c.close(fd);
+
+    if (validateSecretTokenFile(fd) != 0) {
+        return -1;
+    }
 
     const token_slice = cStringSlice(token);
     if (token_slice.len != 0) {
@@ -524,11 +553,15 @@ pub export fn omniwm_ipc_read_secret_token_for_socket(
         return -1;
     }
 
-    const fd = c.open(@ptrCast(&secret_path_buffer), c.O_RDONLY, @as(c_int, 0));
+    const fd = c.open(@ptrCast(&secret_path_buffer), c.O_RDONLY | c.O_NOFOLLOW, @as(c_int, 0));
     if (fd < 0) {
         return -1;
     }
     defer _ = c.close(fd);
+
+    if (validateSecretTokenFile(fd) != 0) {
+        return -1;
+    }
 
     var read_buffer: [1024]u8 = undefined;
     const read_count = c.read(fd, &read_buffer, read_buffer.len);

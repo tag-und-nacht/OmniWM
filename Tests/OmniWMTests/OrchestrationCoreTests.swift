@@ -722,5 +722,12 @@ private func makeOrchestrationSnapshot(
     )
     #expect(result.snapshot.focus.activeManagedRequest == activeRequest)
     #expect(result.snapshot.focus.pendingFocusedToken == requestedToken)
-    #expect(result.plan.actions.isEmpty)
+    #expect(result.plan.actions == [
+        .continueManagedFocusRequest(
+            requestId: 10,
+            reason: .pendingFocusUnmanagedToken,
+            source: .focusedWindowChanged,
+            origin: .probe
+        )
+    ])
 }

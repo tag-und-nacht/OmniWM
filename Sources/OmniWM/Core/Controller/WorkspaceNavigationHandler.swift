@@ -74,10 +74,10 @@ final class WorkspaceNavigationHandler {
     }
 
     private func plan(
-        _ intent: WorkspaceNavigationPlanner.Intent
-    ) -> WorkspaceNavigationPlanner.Plan? {
+        _ intent: WorkspaceNavigationKernel.Intent
+    ) -> WorkspaceNavigationKernel.Plan? {
         guard let controller else { return nil }
-        return WorkspaceNavigationPlanner.plan(
+        return WorkspaceNavigationKernel.plan(
             .capture(
                 controller: controller,
                 intent: intent
@@ -100,7 +100,7 @@ final class WorkspaceNavigationHandler {
     }
 
     private func commitWorkspaceTransition(
-        _ plan: WorkspaceNavigationPlanner.Plan,
+        _ plan: WorkspaceNavigationKernel.Plan,
         stopScrollAnimationOnTargetMonitor: Bool
     ) {
         guard let controller else { return }
@@ -138,8 +138,8 @@ final class WorkspaceNavigationHandler {
     }
 
     private func materializeTargetWorkspaceIfNeeded(
-        _ plan: WorkspaceNavigationPlanner.Plan
-    ) -> WorkspaceNavigationPlanner.Plan? {
+        _ plan: WorkspaceNavigationKernel.Plan
+    ) -> WorkspaceNavigationKernel.Plan? {
         guard let rawWorkspaceID = plan.materializeTargetWorkspaceRawID else {
             return plan
         }
@@ -165,7 +165,7 @@ final class WorkspaceNavigationHandler {
         return resolvedPlan
     }
 
-    private func hideFocusBorderIfNeeded(_ plan: WorkspaceNavigationPlanner.Plan, reason: String) {
+    private func hideFocusBorderIfNeeded(_ plan: WorkspaceNavigationKernel.Plan, reason: String) {
         guard plan.shouldHideFocusBorder, let controller else { return }
         controller.hideKeyboardFocusBorder(
             source: .workspaceActivation,
@@ -173,7 +173,7 @@ final class WorkspaceNavigationHandler {
         )
     }
 
-    private func activateTargetWorkspaceIfNeeded(_ plan: WorkspaceNavigationPlanner.Plan) -> Bool {
+    private func activateTargetWorkspaceIfNeeded(_ plan: WorkspaceNavigationKernel.Plan) -> Bool {
         guard let controller,
               let targetWorkspaceId = plan.targetWorkspaceId,
               let targetMonitorId = plan.targetMonitorId
@@ -191,7 +191,7 @@ final class WorkspaceNavigationHandler {
         return controller.workspaceManager.setActiveWorkspace(targetWorkspaceId, on: targetMonitorId)
     }
 
-    private func commitFocusPlan(_ plan: WorkspaceNavigationPlanner.Plan) {
+    private func commitFocusPlan(_ plan: WorkspaceNavigationKernel.Plan) {
         guard plan.shouldCommitWorkspaceTransition else {
             return
         }
@@ -212,7 +212,7 @@ final class WorkspaceNavigationHandler {
     }
 
     private func applySwitchPlan(
-        _ plan: WorkspaceNavigationPlanner.Plan,
+        _ plan: WorkspaceNavigationKernel.Plan,
         hideReason: String
     ) {
         guard plan.outcome == .execute else { return }
@@ -344,7 +344,7 @@ final class WorkspaceNavigationHandler {
     }
 
     private func performTransferFocus(
-        _ plan: WorkspaceNavigationPlanner.Plan,
+        _ plan: WorkspaceNavigationKernel.Plan,
         targetFocusToken: WindowToken,
         sourcePreferredNodeId: NodeId?,
         ensureTargetVisible: Bool,
@@ -435,7 +435,7 @@ final class WorkspaceNavigationHandler {
     }
 
     private func executeWindowTransferPlan(
-        _ plan: WorkspaceNavigationPlanner.Plan,
+        _ plan: WorkspaceNavigationKernel.Plan,
         rememberedTargetFocusToken: WindowToken,
         stopSourceScroll: Bool,
         markTransferringWindow: Bool
@@ -484,7 +484,7 @@ final class WorkspaceNavigationHandler {
     }
 
     private func executeColumnTransferPlan(
-        _ plan: WorkspaceNavigationPlanner.Plan,
+        _ plan: WorkspaceNavigationKernel.Plan,
         rememberedTargetFocusToken: WindowToken
     ) -> Bool {
         guard let controller,

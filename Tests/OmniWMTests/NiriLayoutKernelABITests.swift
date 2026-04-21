@@ -489,6 +489,68 @@ struct NiriTopologyKernelABITests {
         #expect(output.windows.map(\.id) == [10, 30])
     }
 
+    @Test func columnRemovalFallbackSkipsAllWindowsInRemovedColumn() {
+        var input = makeNiriTopologyInput(
+            operation: UInt32(OMNIWM_NIRI_TOPOLOGY_OP_COLUMN_REMOVAL),
+            selectedWindowId: 20,
+            targetIndex: 1
+        )
+        let columns = [
+            makeNiriTopologyColumn(id: 1, span: 500, windowStartIndex: 0, windowCount: 1),
+            makeNiriTopologyColumn(id: 2, span: 500, windowStartIndex: 1, windowCount: 2),
+            makeNiriTopologyColumn(id: 3, span: 500, windowStartIndex: 3, windowCount: 1)
+        ]
+        let windows = [10, 20, 21, 30].map { makeNiriTopologyWindow(id: UInt64($0)) }
+
+        let output = callNiriTopology(input: &input, columns: columns, windows: windows)
+
+        #expect(output.status == OMNIWM_KERNELS_STATUS_OK)
+        #expect(output.result.fallback_window_id == 10)
+        #expect(output.result.selected_window_id == 10)
+    }
+
+    @Test func syncRemovingFullColumnUsesFallbackOutsideRemovedColumn() {
+        var input = makeNiriTopologyInput(
+            operation: UInt32(OMNIWM_NIRI_TOPOLOGY_OP_SYNC_WINDOWS),
+            selectedWindowId: 20
+        )
+        let columns = [
+            makeNiriTopologyColumn(id: 1, span: 500, windowStartIndex: 0, windowCount: 1),
+            makeNiriTopologyColumn(id: 2, span: 500, windowStartIndex: 1, windowCount: 2),
+            makeNiriTopologyColumn(id: 3, span: 500, windowStartIndex: 3, windowCount: 1)
+        ]
+        let windows = [10, 20, 21, 30].map { makeNiriTopologyWindow(id: UInt64($0)) }
+
+        let output = callNiriTopology(
+            input: &input,
+            columns: columns,
+            windows: windows,
+            desiredIds: [10, 30],
+            removedIds: [20, 21]
+        )
+
+        #expect(output.status == OMNIWM_KERNELS_STATUS_OK)
+        #expect(output.result.fallback_window_id == 10)
+        #expect(output.windows.map(\.id) == [10, 30])
+    }
+
+    @Test func columnRemovalOfOnlyColumnHasNoFallback() {
+        var input = makeNiriTopologyInput(
+            operation: UInt32(OMNIWM_NIRI_TOPOLOGY_OP_COLUMN_REMOVAL),
+            selectedWindowId: 20,
+            targetIndex: 0
+        )
+        let columns = [
+            makeNiriTopologyColumn(id: 1, span: 500, windowStartIndex: 0, windowCount: 2)
+        ]
+        let windows = [20, 21].map { makeNiriTopologyWindow(id: UInt64($0)) }
+
+        let output = callNiriTopology(input: &input, columns: columns, windows: windows)
+
+        #expect(output.status == OMNIWM_KERNELS_STATUS_OK)
+        #expect(output.result.fallback_window_id == 0)
+    }
+
     @Test func ensureVisibleAppliesEdgePaddingWhenTargetColumnTouchesViewportBoundary() {
         var input = makeNiriTopologyInput(
             operation: UInt32(OMNIWM_NIRI_TOPOLOGY_OP_ENSURE_VISIBLE),

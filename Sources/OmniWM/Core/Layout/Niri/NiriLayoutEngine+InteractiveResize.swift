@@ -5,11 +5,18 @@ extension NiriLayoutEngine {
     func hitTestResize(
         point: CGPoint,
         in workspaceId: WorkspaceDescriptor.ID,
-        threshold: CGFloat? = nil
+        threshold: CGFloat? = nil,
+        workspaceWorkingFrame: CGRect? = nil
     ) -> ResizeHitTestResult? {
         guard let root = roots[workspaceId] else { return nil }
 
         let threshold = threshold ?? resizeConfiguration.edgeThreshold
+
+        if let workspaceWorkingFrame,
+           !workspaceWorkingFrame.insetBy(dx: -threshold, dy: -threshold).contains(point)
+        {
+            return nil
+        }
 
         for (colIdx, column) in root.columns.enumerated() {
             for child in column.children {
@@ -19,6 +26,9 @@ extension NiriLayoutEngine {
                 if window.isFullscreen {
                     continue
                 }
+
+                let expandedFrame = frame.insetBy(dx: -threshold, dy: -threshold)
+                guard expandedFrame.contains(point) else { continue }
 
                 let edges = detectEdges(point: point, frame: frame, threshold: threshold)
                 if !edges.isEmpty {

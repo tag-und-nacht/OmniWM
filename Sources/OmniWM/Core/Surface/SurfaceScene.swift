@@ -40,6 +40,7 @@ final class SurfaceScene {
     private var nodesByID: [String: SurfaceNode] = [:]
     private var windowIDByObject: [ObjectIdentifier: String] = [:]
     private var surfaceIDsByWindowNumber: [Int: Set<String>] = [:]
+    private var interactiveCandidateIds: Set<String> = []
 
     func register(window: NSWindow, node: SurfaceNode) {
         if let existingId = windowIDByObject[ObjectIdentifier(window)], existingId != node.id {
@@ -56,6 +57,7 @@ final class SurfaceScene {
         if let windowNumber = node.windowNumber, windowNumber > 0 {
             surfaceIDsByWindowNumber[windowNumber, default: []].insert(node.id)
         }
+        updateInteractiveCandidate(for: node)
     }
 
     func registerWindowNumber(node: SurfaceNode) {
@@ -64,6 +66,7 @@ final class SurfaceScene {
         if let windowNumber = node.windowNumber, windowNumber > 0 {
             surfaceIDsByWindowNumber[windowNumber, default: []].insert(node.id)
         }
+        updateInteractiveCandidate(for: node)
     }
 
     func unregister(window: NSWindow) {
@@ -84,6 +87,15 @@ final class SurfaceScene {
                 surfaceIDsByWindowNumber[windowNumber] = ids
             }
         }
+        interactiveCandidateIds.remove(id)
+    }
+
+    private func updateInteractiveCandidate(for node: SurfaceNode) {
+        if node.policy.hitTestPolicy == .interactive {
+            interactiveCandidateIds.insert(node.id)
+        } else {
+            interactiveCandidateIds.remove(node.id)
+        }
     }
 
     func contains(window: NSWindow?) -> Bool {
@@ -97,10 +109,14 @@ final class SurfaceScene {
     }
 
     func containsInteractive(point: CGPoint) -> Bool {
-        visibleNodes.contains { node in
-            guard node.policy.hitTestPolicy == .interactive else { return false }
-            return resolvedFrame(for: node)?.contains(point) == true
+        for id in interactiveCandidateIds {
+            guard let node = nodesByID[id] else { continue }
+            guard isVisible(node) else { continue }
+            if resolvedFrame(for: node)?.contains(point) == true {
+                return true
+            }
         }
+        return false
     }
 
     var hasFrontmostSuppressingWindow: Bool {
@@ -156,6 +172,7 @@ final class SurfaceScene {
         nodesByID.removeAll()
         windowIDByObject.removeAll()
         surfaceIDsByWindowNumber.removeAll()
+        interactiveCandidateIds.removeAll()
     }
 
     private func node(for window: NSWindow) -> SurfaceNode? {

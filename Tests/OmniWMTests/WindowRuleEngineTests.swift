@@ -509,6 +509,31 @@ private func makeWindowRuleFacts(
         #expect(decision.source == .heuristic)
     }
 
+    @Test func runtimeRegexCompilationUsesIPCValidationLimits() {
+        let engine = WindowRuleEngine()
+        let rule = AppRule(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000133")!,
+            bundleId: "com.example.expensive-regex",
+            titleRegex: "(a+)+",
+            layout: .float
+        )
+        engine.rebuild(rules: [rule])
+
+        #expect(engine.invalidRegexMessagesByRuleId[rule.id] == "Title regex contains nested repetition")
+
+        let decision = engine.decision(
+            for: makeWindowRuleFacts(
+                bundleId: "com.example.expensive-regex",
+                title: String(repeating: "a", count: 128)
+            ),
+            token: nil,
+            appFullscreen: false
+        )
+
+        #expect(decision.disposition == .managed)
+        #expect(decision.source == .heuristic)
+    }
+
     @Test func advancedOnlyRuleCompilesAndMatchesWithoutExplicitLayout() {
         let engine = WindowRuleEngine()
         let rule = AppRule(

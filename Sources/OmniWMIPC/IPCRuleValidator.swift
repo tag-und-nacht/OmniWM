@@ -15,6 +15,8 @@ public struct IPCRuleValidationReport: Equatable, Sendable {
 }
 
 public enum IPCRuleValidator {
+    public static let maximumTitleRegexLength = 256
+
     public static func bundleIdError(for bundleId: String) -> String? {
         switch ZigIPCSupport.bundleIDValidationCode(for: bundleId) {
         case ZigIPCSupport.bundleIDValidationNone:
@@ -32,6 +34,12 @@ public enum IPCRuleValidator {
         guard let pattern = pattern?.trimmingCharacters(in: .whitespacesAndNewlines), !pattern.isEmpty else {
             return nil
         }
+        guard pattern.count <= maximumTitleRegexLength else {
+            return "Title regex is too long"
+        }
+        if containsNestedQuantifier(in: pattern) {
+            return "Title regex contains nested repetition"
+        }
 
         do {
             _ = try NSRegularExpression(pattern: pattern)
@@ -39,6 +47,13 @@ public enum IPCRuleValidator {
         } catch {
             return error.localizedDescription
         }
+    }
+
+    private static func containsNestedQuantifier(in pattern: String) -> Bool {
+        pattern.range(
+            of: #"\([^)]*[*+][^)]*\)\s*[*+{]"#,
+            options: .regularExpression
+        ) != nil
     }
 
     public static func validate(_ rule: IPCRuleDefinition) -> IPCRuleValidationReport {

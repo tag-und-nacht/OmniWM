@@ -200,6 +200,10 @@ struct NodeId: Hashable, Equatable {
     init() {
         uuid = UUID()
     }
+
+    init(uuid: UUID) {
+        self.uuid = uuid
+    }
 }
 
 class NiriNode {

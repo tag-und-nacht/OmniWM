@@ -266,6 +266,24 @@ private func hasPendingNiriAnimationWork(
         )
     }
 
+    func syncAnimationRefreshRate(
+        for monitor: Monitor,
+        engine: NiriLayoutEngine,
+        state: inout ViewportState
+    ) {
+        let refreshRate = controller?.layoutRefreshController.layoutState.refreshRateByDisplay[monitor.displayId] ?? 60.0
+        syncAnimationRefreshRate(refreshRate, engine: engine, state: &state)
+    }
+
+    private func syncAnimationRefreshRate(
+        _ refreshRate: Double,
+        engine: NiriLayoutEngine,
+        state: inout ViewportState
+    ) {
+        engine.displayRefreshRate = refreshRate
+        state.displayRefreshRate = refreshRate
+    }
+
     private func buildOnDemandLayoutPlan(
         snapshot: NiriWorkspaceSnapshot,
         engine: NiriLayoutEngine,
@@ -387,7 +405,7 @@ private func hasPendingNiriAnimationWork(
         state: inout ViewportState,
         snapshot: NiriWorkspaceSnapshot
     ) -> TopologySyncResult {
-        state.displayRefreshRate = snapshot.displayRefreshRate
+        syncAnimationRefreshRate(snapshot.displayRefreshRate, engine: pass.engine, state: &state)
         let windowTokens = snapshot.windows.map(\.token)
         let existingHandleIds = pass.engine.root(for: pass.wsId)?.windowIdSet ?? []
         let newTokens = windowTokens.filter { !existingHandleIds.contains($0) }
@@ -723,7 +741,7 @@ private func hasPendingNiriAnimationWork(
                 continue
             }
             let previousOffscreenSide = window.hiddenState?.offscreenSide
-            if let side = hiddenHandles[token] {
+            if let side = hiddenHandles[token], !window.isRestoringNativeFullscreen {
                 guard let hiddenFrame = frames[token] else { continue }
                 let request = LayoutHideRequest(
                     token: token,
@@ -734,8 +752,13 @@ private func hasPendingNiriAnimationWork(
                     .layoutRefreshController
                     .hiddenOriginForComparison(request.hiddenFrame.origin, token: token)
                     ?? request.hiddenFrame.origin
-                let lastAppliedOrigin = controller?.layoutRefreshController.lastVerifiedHideOrigin(for: token)
-                if forceHiddenReapply || lastAppliedOrigin != roundedOrigin {
+                let lastAppliedOrigin = controller?.layoutRefreshController.lastAppliedHideOrigin(for: token)
+                let shouldEmitHide = if let lastAppliedOrigin {
+                    lastAppliedOrigin != roundedOrigin
+                } else {
+                    previousOffscreenSide != side
+                }
+                if forceHiddenReapply || shouldEmitHide {
                     diff.visibilityChanges.append(.hide(request))
                 }
                 continue
@@ -843,6 +866,7 @@ private func hasPendingNiriAnimationWork(
         let target = windows[storageIndex]
         var state = controller.workspaceManager.niriViewportState(for: workspaceId)
         if let monitor = controller.workspaceManager.monitor(for: workspaceId) {
+            syncAnimationRefreshRate(for: monitor, engine: engine, state: &state)
             let gap = CGFloat(controller.workspaceManager.gaps)
             engine.ensureSelectionVisible(
                 node: target,
@@ -908,6 +932,7 @@ private func hasPendingNiriAnimationWork(
         }
 
         guard let monitor = controller.workspaceManager.monitor(for: wsId) else { return }
+        syncAnimationRefreshRate(for: monitor, engine: engine, state: &state)
         let gap = CGFloat(controller.workspaceManager.gaps)
         let workingFrame = controller.insetWorkingFrame(for: monitor)
 
@@ -1111,6 +1136,7 @@ private func hasPendingNiriAnimationWork(
         }
 
         if options.ensureVisible, let monitor = controller.workspaceManager.monitor(for: workspaceId) {
+            syncAnimationRefreshRate(for: monitor, engine: engine, state: &state)
             let gap = CGFloat(controller.workspaceManager.gaps)
             let workingFrame = controller.insetWorkingFrame(for: monitor)
             engine.ensureSelectionVisible(
@@ -1196,6 +1222,7 @@ private func hasPendingNiriAnimationWork(
             else { return }
 
             guard let monitor = controller.workspaceManager.monitor(for: wsId) else { return }
+            syncAnimationRefreshRate(for: monitor, engine: engine, state: &state)
             let workingFrame = controller.insetWorkingFrame(for: monitor)
             let gaps = CGFloat(controller.workspaceManager.gaps)
 
@@ -1231,6 +1258,7 @@ private func hasPendingNiriAnimationWork(
         let workingFrame = controller.insetWorkingFrame(for: monitor)
         let gaps = CGFloat(controller.workspaceManager.gaps)
         controller.workspaceManager.withNiriViewportState(for: wsId) { state in
+            syncAnimationRefreshRate(for: monitor, engine: engine, state: &state)
             perform(engine, wsId, motion, &state, monitor, workingFrame, gaps)
         }
     }
@@ -1246,6 +1274,7 @@ private func hasPendingNiriAnimationWork(
         let workingFrame = controller.insetWorkingFrame(for: monitor)
         let gaps = CGFloat(controller.workspaceManager.gaps)
         controller.workspaceManager.withNiriViewportState(for: workspaceId) { state in
+            syncAnimationRefreshRate(for: monitor, engine: engine, state: &state)
             perform(engine, workspaceId, motion, &state, monitor, workingFrame, gaps)
         }
     }

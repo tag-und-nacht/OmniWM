@@ -64,6 +64,7 @@ final class ServiceLifecycleManager {
 
     private func startServices() {
         guard let controller, !controller.hasStartedServices else { return }
+        ScreenCoordinateSpace.invalidateDisplaySnapshot()
         controller.hasStartedServices = true
         controller.reconcileEnabledAndHotkeysState()
         controller.layoutRefreshController.setup()
@@ -181,6 +182,8 @@ final class ServiceLifecycleManager {
     ) {
         guard let controller else { return }
 
+        ScreenCoordinateSpace.invalidateDisplaySnapshot()
+        controller.settings.bumpMouseWarpMonitorsGeneration()
 
         controller.hideKeyboardFocusBorder(
             source: .monitorConfigurationChanged,
