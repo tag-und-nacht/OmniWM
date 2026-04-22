@@ -106,6 +106,8 @@ final class NiriLayoutEngine {
 
     var roots: [WorkspaceDescriptor.ID: NiriRoot] = [:]
 
+    private var workspaceBarProjectionInvalidatedWorkspaceIds: Set<WorkspaceDescriptor.ID> = []
+
     var tokenToNode: [WindowToken: NiriWindow] = [:]
 
     var closingTokens: Set<WindowToken> = []
@@ -143,6 +145,26 @@ final class NiriLayoutEngine {
         self.maxVisibleColumns = max(1, min(5, maxVisibleColumns))
         self.infiniteLoop = infiniteLoop
         centerFocusedColumn = .onOverflow
+    }
+
+    func markWorkspaceBarProjectionInvalidated(in workspaceId: WorkspaceDescriptor.ID) {
+        workspaceBarProjectionInvalidatedWorkspaceIds.insert(workspaceId)
+    }
+
+    func hasWorkspaceBarProjectionInvalidation(in workspaceId: WorkspaceDescriptor.ID) -> Bool {
+        workspaceBarProjectionInvalidatedWorkspaceIds.contains(workspaceId)
+    }
+
+    func pendingWorkspaceBarProjectionInvalidationIds() -> Set<WorkspaceDescriptor.ID> {
+        workspaceBarProjectionInvalidatedWorkspaceIds
+    }
+
+    func clearWorkspaceBarProjectionInvalidations<S: Sequence>(
+        for workspaceIds: S
+    ) where S.Element == WorkspaceDescriptor.ID {
+        for workspaceId in workspaceIds {
+            workspaceBarProjectionInvalidatedWorkspaceIds.remove(workspaceId)
+        }
     }
 
     func ensureRoot(for workspaceId: WorkspaceDescriptor.ID) -> NiriRoot {

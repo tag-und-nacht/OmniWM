@@ -48,6 +48,8 @@ extension NiriLayoutEngine {
         sourceState.selectedNodeId = fallbackSelection
 
         targetState.selectedNodeId = window.id
+        markWorkspaceBarProjectionInvalidated(in: sourceWorkspaceId)
+        markWorkspaceBarProjectionInvalidated(in: targetWorkspaceId)
 
         return WorkspaceMoveResult(
             newFocusNodeId: fallbackSelection,
@@ -96,6 +98,8 @@ extension NiriLayoutEngine {
         sourceState.selectedNodeId = fallbackSelection
 
         targetState.selectedNodeId = column.firstChild()?.id
+        markWorkspaceBarProjectionInvalidated(in: sourceWorkspaceId)
+        markWorkspaceBarProjectionInvalidated(in: targetWorkspaceId)
 
         let firstWindowHandle = column.windowNodes.first?.handle
 

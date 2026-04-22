@@ -154,6 +154,7 @@ struct RefreshVisibilityEffect {
 struct RefreshExecutionEffects {
     var visibility: RefreshVisibilityEffect?
     var requestWorkspaceBarRefresh: Bool = false
+    var workspaceBarProjectionInvalidatedWorkspaceIds: Set<WorkspaceDescriptor.ID> = []
     var updateTabbedOverlays: Bool = false
     var refreshFocusedBorderForVisibilityState: Bool = false
     var focusValidationWorkspaceIds: [WorkspaceDescriptor.ID] = []

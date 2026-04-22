@@ -37,4 +37,5 @@ Frameworks/
 .codex-cache/
 
 # Local documentation
-STABILITY_IMPROVEMENTS.md
+AGENTS.md
+CLAUDE.md

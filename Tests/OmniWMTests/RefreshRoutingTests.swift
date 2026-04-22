@@ -734,6 +734,142 @@ private func syncNiriWorkspaceStatesForRefreshTests(
     }
 }
 
+@MainActor
+private func prepareNiriColumnTopologyForRefreshTests(
+    on controller: WMController,
+    workspaceColumns: [WorkspaceDescriptor.ID: [[Int]]],
+    focusedWindowId: Int,
+    ensureWorkspaces: Set<WorkspaceDescriptor.ID> = [],
+    maxWindowsPerColumn: Int = 3
+) async -> [Int: WindowHandle] {
+    controller.enableNiriLayout(maxWindowsPerColumn: maxWindowsPerColumn)
+    await waitForRefreshWork(on: controller)
+    controller.syncMonitorsToNiriEngine()
+
+    let assignments = workspaceColumns.flatMap { workspaceId, columns in
+        columns.flatMap { column in
+            column.map { windowId in
+                (workspaceId: workspaceId, windowId: windowId)
+            }
+        }
+    }
+
+    var handlesByWindowId: [Int: WindowHandle] = [:]
+    var workspaceByWindowId: [Int: WorkspaceDescriptor.ID] = [:]
+    for assignment in assignments {
+        let token = controller.workspaceManager.addWindow(
+            makeRefreshTestWindow(windowId: assignment.windowId),
+            pid: getpid(),
+            windowId: assignment.windowId,
+            to: assignment.workspaceId
+        )
+        guard let handle = controller.workspaceManager.handle(for: token) else {
+            fatalError("Expected bridge handle for seeded Niri topology window")
+        }
+        handlesByWindowId[assignment.windowId] = handle
+        workspaceByWindowId[assignment.windowId] = assignment.workspaceId
+        _ = controller.workspaceManager.rememberFocus(handle, in: assignment.workspaceId)
+    }
+
+    guard let engine = controller.niriEngine else {
+        return handlesByWindowId
+    }
+
+    for handle in handlesByWindowId.values {
+        engine.tokenToNode[handle.id] = nil
+    }
+
+    let workspaceIds = Set(workspaceColumns.keys).union(ensureWorkspaces)
+    for workspaceId in workspaceIds {
+        guard let monitor = controller.workspaceManager.monitor(for: workspaceId) else { continue }
+
+        let root: NiriRoot
+        if let columns = workspaceColumns[workspaceId] {
+            root = NiriRoot(workspaceId: workspaceId)
+            let columnGroups = columns.isEmpty ? [[]] : columns
+            for windowIds in columnGroups {
+                let column = NiriContainer()
+                root.appendChild(column)
+                for windowId in windowIds {
+                    guard let handle = handlesByWindowId[windowId] else { continue }
+                    let window = NiriWindow(token: handle.id)
+                    column.appendChild(window)
+                    engine.tokenToNode[handle.id] = window
+                }
+            }
+            engine.roots[workspaceId] = root
+        } else {
+            root = engine.ensureRoot(for: workspaceId)
+        }
+
+        engine.ensureMonitor(for: monitor.id, monitor: monitor).workspaceRoots[workspaceId] = root
+        engine.prepareColumnWidths(
+            in: workspaceId,
+            workingAreaWidth: controller.insetWorkingFrame(for: monitor).width,
+            gaps: CGFloat(controller.workspaceManager.gaps)
+        )
+    }
+
+    if let focusedHandle = handlesByWindowId[focusedWindowId],
+       let focusedWorkspaceId = workspaceByWindowId[focusedWindowId],
+       let focusedMonitor = controller.workspaceManager.monitor(for: focusedWorkspaceId),
+       let focusedNode = engine.findNode(for: focusedHandle.id)
+    {
+        _ = controller.workspaceManager.setManagedFocus(
+            focusedHandle,
+            in: focusedWorkspaceId,
+            onMonitor: focusedMonitor.id
+        )
+        _ = controller.workspaceManager.commitWorkspaceSelection(
+            nodeId: focusedNode.id,
+            focusedToken: focusedHandle.id,
+            in: focusedWorkspaceId,
+            onMonitor: focusedMonitor.id
+        )
+        let activeColumnIndex = engine.findColumn(containing: focusedNode, in: focusedWorkspaceId)
+            .flatMap { engine.columnIndex(of: $0, in: focusedWorkspaceId) }
+            ?? 0
+        controller.workspaceManager.withNiriViewportState(for: focusedWorkspaceId) { state in
+            state.selectedNodeId = focusedNode.id
+            state.activeColumnIndex = activeColumnIndex
+            state.viewOffsetPixels = .static(0)
+        }
+    }
+
+    return handlesByWindowId
+}
+
+@MainActor
+private func expectSingleWorkspaceBarRefresh(
+    on controller: WMController,
+    after action: () -> Void
+) async {
+    controller.resetWorkspaceBarRefreshDebugStateForTests()
+
+    action()
+    await waitForRefreshWork(on: controller)
+    await controller.waitForWorkspaceBarRefreshForTests()
+
+    #expect(controller.workspaceBarRefreshDebugState.executionCount == 1)
+}
+
+@MainActor
+private func expectNoWorkspaceBarRefresh(
+    on controller: WMController,
+    after action: () -> Void
+) async {
+    controller.resetWorkspaceBarRefreshDebugStateForTests()
+
+    action()
+    await waitForRefreshWork(on: controller)
+    await controller.waitForWorkspaceBarRefreshForTests()
+
+    #expect(controller.workspaceBarRefreshDebugState.requestCount == 0)
+    #expect(controller.workspaceBarRefreshDebugState.scheduledCount == 0)
+    #expect(controller.workspaceBarRefreshDebugState.executionCount == 0)
+    #expect(!controller.workspaceBarRefreshDebugState.isQueued)
+}
+
 @Suite(.serialized) struct RefreshRoutingTests {
     @Test func relayoutPoliciesAreExplicit() {
         #expect(RefreshReason.axWindowChanged.relayoutSchedulingPolicy == .debounced(
@@ -953,6 +1089,250 @@ private func syncNiriWorkspaceStatesForRefreshTests(
 
         #expect(controller.workspaceBarRefreshDebugState.executionCount == 1)
         #expect(!controller.workspaceBarRefreshDebugState.isQueued)
+    }
+
+    @Test @MainActor func workspaceBarRefreshesOnMoveColumnInNiri() async {
+        let controller = makeRefreshTestController()
+        defer { cleanupRefreshTestController(controller) }
+
+        guard let workspaceId = controller.activeWorkspace()?.id else {
+            Issue.record("Missing active workspace for Niri move-column refresh test")
+            return
+        }
+
+        _ = await prepareNiriColumnTopologyForRefreshTests(
+            on: controller,
+            workspaceColumns: [workspaceId: [[701], [702]]],
+            focusedWindowId: 701
+        )
+
+        await expectSingleWorkspaceBarRefresh(on: controller) {
+            controller.commandHandler.handleCommand(.moveColumn(.right))
+        }
+    }
+
+    @Test @MainActor func workspaceBarRefreshesOnMoveWindowVerticalInNiri() async {
+        let controller = makeRefreshTestController()
+        defer { cleanupRefreshTestController(controller) }
+
+        guard let workspaceId = controller.activeWorkspace()?.id else {
+            Issue.record("Missing active workspace for Niri vertical move refresh test")
+            return
+        }
+
+        _ = await prepareNiriColumnTopologyForRefreshTests(
+            on: controller,
+            workspaceColumns: [workspaceId: [[711, 712]]],
+            focusedWindowId: 711
+        )
+
+        await expectSingleWorkspaceBarRefresh(on: controller) {
+            controller.commandHandler.handleCommand(.move(.up))
+        }
+    }
+
+    @Test @MainActor func workspaceBarRefreshesOnConsumeInNiri() async {
+        let controller = makeRefreshTestController()
+        defer { cleanupRefreshTestController(controller) }
+
+        guard let workspaceId = controller.activeWorkspace()?.id else {
+            Issue.record("Missing active workspace for Niri consume refresh test")
+            return
+        }
+
+        _ = await prepareNiriColumnTopologyForRefreshTests(
+            on: controller,
+            workspaceColumns: [workspaceId: [[721], [722]]],
+            focusedWindowId: 721
+        )
+
+        await expectSingleWorkspaceBarRefresh(on: controller) {
+            controller.commandHandler.handleCommand(.move(.right))
+        }
+    }
+
+    @Test @MainActor func workspaceBarRefreshesOnExpelInNiri() async {
+        let controller = makeRefreshTestController()
+        defer { cleanupRefreshTestController(controller) }
+
+        guard let workspaceId = controller.activeWorkspace()?.id else {
+            Issue.record("Missing active workspace for Niri expel refresh test")
+            return
+        }
+
+        _ = await prepareNiriColumnTopologyForRefreshTests(
+            on: controller,
+            workspaceColumns: [workspaceId: [[731, 732]]],
+            focusedWindowId: 732
+        )
+
+        await expectSingleWorkspaceBarRefresh(on: controller) {
+            controller.commandHandler.handleCommand(.move(.left))
+        }
+    }
+
+    @Test @MainActor func workspaceBarRefreshesOnMoveColumnToWorkspaceWithoutFocusHandoff() async {
+        let controller = makeRefreshTestController()
+        defer { cleanupRefreshTestController(controller) }
+
+        guard let sourceWorkspaceId = controller.activeWorkspace()?.id,
+              let targetWorkspaceId = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true)
+        else {
+            Issue.record("Missing source or target workspace for Niri column transfer refresh test")
+            return
+        }
+
+        controller.settings.focusFollowsWindowToMonitor = false
+        _ = await prepareNiriColumnTopologyForRefreshTests(
+            on: controller,
+            workspaceColumns: [sourceWorkspaceId: [[741], [742]]],
+            focusedWindowId: 741,
+            ensureWorkspaces: [targetWorkspaceId]
+        )
+
+        await expectSingleWorkspaceBarRefresh(on: controller) {
+            controller.workspaceNavigationHandler.moveColumnToWorkspace(rawWorkspaceID: "2")
+        }
+    }
+
+    @Test @MainActor func workspaceBarRefreshesOnMoveWindowToWorkspaceWithoutFocusHandoff() async {
+        let controller = makeRefreshTestController()
+        defer { cleanupRefreshTestController(controller) }
+
+        guard let sourceWorkspaceId = controller.activeWorkspace()?.id,
+              let targetWorkspaceId = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true)
+        else {
+            Issue.record("Missing source or target workspace for Niri window transfer refresh test")
+            return
+        }
+
+        controller.settings.focusFollowsWindowToMonitor = false
+        _ = await prepareNiriColumnTopologyForRefreshTests(
+            on: controller,
+            workspaceColumns: [sourceWorkspaceId: [[751], [752]]],
+            focusedWindowId: 751,
+            ensureWorkspaces: [targetWorkspaceId]
+        )
+
+        await expectSingleWorkspaceBarRefresh(on: controller) {
+            controller.workspaceNavigationHandler.moveFocusedWindow(toWorkspaceIndex: 1)
+        }
+    }
+
+    @Test @MainActor func workspaceBarDoesNotRefreshOnResizeColumnInNiri() async {
+        let controller = makeRefreshTestController()
+        defer { cleanupRefreshTestController(controller) }
+
+        guard let workspaceId = controller.activeWorkspace()?.id else {
+            Issue.record("Missing active workspace for Niri resize refresh test")
+            return
+        }
+
+        _ = await prepareNiriColumnTopologyForRefreshTests(
+            on: controller,
+            workspaceColumns: [workspaceId: [[761]]],
+            focusedWindowId: 761
+        )
+
+        await expectNoWorkspaceBarRefresh(on: controller) {
+            controller.commandHandler.handleCommand(.cycleColumnWidthForward)
+        }
+    }
+
+    @Test @MainActor func workspaceBarDoesNotRefreshOnToggleColumnTabbed() async {
+        let controller = makeRefreshTestController()
+        defer { cleanupRefreshTestController(controller) }
+
+        guard let workspaceId = controller.activeWorkspace()?.id else {
+            Issue.record("Missing active workspace for Niri tabbed-toggle refresh test")
+            return
+        }
+
+        _ = await prepareNiriColumnTopologyForRefreshTests(
+            on: controller,
+            workspaceColumns: [workspaceId: [[771, 772]]],
+            focusedWindowId: 771
+        )
+
+        await expectNoWorkspaceBarRefresh(on: controller) {
+            controller.commandHandler.handleCommand(.toggleColumnTabbed)
+        }
+    }
+
+    @Test @MainActor func workspaceBarDoesNotRefreshOnFocusOnlySessionStateChangeWhenProjectionIsUnchanged() async {
+        let controller = makeRefreshTestController()
+        defer { cleanupRefreshTestController(controller) }
+
+        guard let workspaceId = controller.activeWorkspace()?.id,
+              let monitor = controller.workspaceManager.monitor(for: workspaceId)
+        else {
+            Issue.record("Missing active workspace for focus-only projection refresh test")
+            return
+        }
+
+        let handles = await prepareNiriColumnTopologyForRefreshTests(
+            on: controller,
+            workspaceColumns: [workspaceId: [[781], [782]]],
+            focusedWindowId: 781
+        )
+
+        guard let secondHandle = handles[782] else {
+            Issue.record("Missing second handle for focus-only projection refresh test")
+            return
+        }
+
+        await expectNoWorkspaceBarRefresh(on: controller) {
+            _ = controller.workspaceManager.setManagedFocus(
+                secondHandle,
+                in: workspaceId,
+                onMonitor: monitor.id
+            )
+        }
+    }
+
+    @Test @MainActor func pendingWorkspaceBarProjectionInvalidationSurvivesSkippedScopedRelayout() async {
+        let controller = makeRefreshTestController()
+        defer { cleanupRefreshTestController(controller) }
+
+        guard let dirtyWorkspaceId = controller.activeWorkspace()?.id,
+              let otherWorkspaceId = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true)
+        else {
+            Issue.record("Missing workspaces for pending Niri projection invalidation test")
+            return
+        }
+
+        _ = await prepareNiriColumnTopologyForRefreshTests(
+            on: controller,
+            workspaceColumns: [dirtyWorkspaceId: [[791], [792]]],
+            focusedWindowId: 791,
+            ensureWorkspaces: [otherWorkspaceId]
+        )
+
+        guard let engine = controller.niriEngine else {
+            Issue.record("Missing Niri engine for pending projection invalidation test")
+            return
+        }
+
+        controller.resetWorkspaceBarRefreshDebugStateForTests()
+        controller.layoutRefreshController.debugHooks.onRelayout = { _, _ in true }
+        controller.commandHandler.handleCommand(.move(.right))
+        await waitForRefreshWork(on: controller)
+        await controller.waitForWorkspaceBarRefreshForTests()
+
+        #expect(controller.workspaceBarRefreshDebugState.executionCount == 0)
+        #expect(engine.hasWorkspaceBarProjectionInvalidation(in: dirtyWorkspaceId))
+
+        controller.layoutRefreshController.debugHooks.onRelayout = nil
+        controller.resetWorkspaceBarRefreshDebugStateForTests()
+        controller.layoutRefreshController.requestImmediateRelayout(
+            reason: .layoutCommand,
+            affectedWorkspaceIds: [otherWorkspaceId]
+        )
+        await waitForRefreshWork(on: controller)
+        await controller.waitForWorkspaceBarRefreshForTests()
+
+        #expect(controller.workspaceBarRefreshDebugState.executionCount == 1)
+        #expect(!engine.hasWorkspaceBarProjectionInvalidation(in: dirtyWorkspaceId))
     }
 
     @Test @MainActor func dwindleFocusNeighborEnqueuesImmediateRelayoutForActiveWorkspaceOnly() async {

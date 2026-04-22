@@ -520,6 +520,7 @@ extension NiriLayoutEngine {
             state.selectedNodeId = previousSelectedNodeId
             return nil
         }
+        markWorkspaceBarProjectionInvalidatedIfNeeded(plan, in: workspaceId)
 
         state.selectedNodeId = nil
         if plan.result.selected_window_id != 0,
@@ -534,6 +535,15 @@ extension NiriLayoutEngine {
 
     func applyTopologyPlan(_ plan: NiriTopologyKernelPlan, in workspaceId: WorkspaceDescriptor.ID) {
         applyTopology(plan, in: workspaceId)
+        markWorkspaceBarProjectionInvalidatedIfNeeded(plan, in: workspaceId)
+    }
+
+    private func markWorkspaceBarProjectionInvalidatedIfNeeded(
+        _ plan: NiriTopologyKernelPlan,
+        in workspaceId: WorkspaceDescriptor.ID
+    ) {
+        guard plan.didApply, plan.effectKind != .none else { return }
+        markWorkspaceBarProjectionInvalidated(in: workspaceId)
     }
 
     func findWindow(in plan: NiriTopologyKernelPlan, id: UInt64) -> NiriWindow? {

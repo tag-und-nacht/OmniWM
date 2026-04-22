@@ -503,6 +503,9 @@ import QuartzCore
 
         if plan.effects.requestWorkspaceBarRefresh {
             controller.requestWorkspaceBarRefresh()
+            controller.niriEngine?.clearWorkspaceBarProjectionInvalidations(
+                for: plan.effects.workspaceBarProjectionInvalidatedWorkspaceIds
+            )
         }
 
         if plan.effects.markInitialRefreshComplete {
@@ -1094,10 +1097,14 @@ import QuartzCore
         }
 
         var effects = RefreshExecutionEffects()
+        let pendingBarProjectionInvalidations =
+            controller.niriEngine?.pendingWorkspaceBarProjectionInvalidationIds() ?? []
         effects.visibility = .init(activeWorkspaceIds: activeWorkspaceIds)
+        effects.workspaceBarProjectionInvalidatedWorkspaceIds = pendingBarProjectionInvalidations
         effects.requestWorkspaceBarRefresh = shouldRequestWorkspaceBarRefresh(
             for: refresh,
-            workspacePlans: workspacePlans
+            workspacePlans: workspacePlans,
+            workspaceBarProjectionInvalidatedWorkspaceIds: pendingBarProjectionInvalidations
         )
         effects.updateTabbedOverlays = updateTabbedOverlays
         effects.nativeFullscreenRestoreWorkspaceIds = nativeFullscreenRestoreWorkspaceIds(
@@ -1117,8 +1124,13 @@ import QuartzCore
 
     private func shouldRequestWorkspaceBarRefresh(
         for refresh: ScheduledRefresh,
-        workspacePlans: [WorkspaceLayoutPlan]
+        workspacePlans: [WorkspaceLayoutPlan],
+        workspaceBarProjectionInvalidatedWorkspaceIds: Set<WorkspaceDescriptor.ID>
     ) -> Bool {
+        if !workspaceBarProjectionInvalidatedWorkspaceIds.isEmpty {
+            return true
+        }
+
         switch refresh.reason {
         case .workspaceTransition,
              .appActivationTransition,
