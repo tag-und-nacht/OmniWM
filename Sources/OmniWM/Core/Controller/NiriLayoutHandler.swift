@@ -378,7 +378,8 @@ private func hasPendingNiriAnimationWork(
 
         applyNativeFullscreenNiriState(
             restoreContexts,
-            in: engine
+            in: engine,
+            workspaceId: snapshot.workspaceId
         )
 
         return computeLayoutPlan(
@@ -645,7 +646,8 @@ private func hasPendingNiriAnimationWork(
             topologyDidApply: topologyDidApply
         )
         plan.persistManagedRestoreSnapshots = false
-        plan.skipFrameApplicationForAnimation = snapshot.useScrollAnimationPath
+        plan.skipFrameApplicationForAnimation = !suppressAnimationDirectives
+            && snapshot.useScrollAnimationPath
             && hasScrollAnimationRunning(in: snapshot.workspaceId)
         return plan
     }
@@ -1384,13 +1386,15 @@ private extension NiriLayoutHandler {
 
     func applyNativeFullscreenNiriState(
         _ restoreContexts: [WindowToken: NativeFullscreenRestoreContext],
-        in engine: NiriLayoutEngine
+        in engine: NiriLayoutEngine,
+        workspaceId: WorkspaceDescriptor.ID
     ) {
         for (token, restoreContext) in restoreContexts {
             applyNativeFullscreenNiriState(
                 restoreContext.niriState,
                 for: token,
-                in: engine
+                in: engine,
+                workspaceId: workspaceId
             )
         }
     }
@@ -1398,15 +1402,25 @@ private extension NiriLayoutHandler {
     func applyNativeFullscreenNiriState(
         _ niriState: ManagedWindowRestoreSnapshot.NiriState?,
         for token: WindowToken,
-        in engine: NiriLayoutEngine
+        in engine: NiriLayoutEngine,
+        workspaceId: WorkspaceDescriptor.ID
     ) {
-        guard let niriState,
-              let window = engine.findNode(for: token)
-        else {
+        guard let niriState else {
+            return
+        }
+        guard let window = engine.findNode(for: token) else {
             return
         }
 
-        if let column = engine.column(of: window) {
+        reconcileNativeFullscreenColumn(
+            restoringWindow: window,
+            niriState: niriState,
+            in: engine,
+            workspaceId: workspaceId
+        )
+
+        let currentColumn = engine.column(of: window)
+        if let column = currentColumn {
             let sizing = niriState.columnSizing
             column.widthAnimation = nil
             column.targetWidth = nil
@@ -1430,6 +1444,68 @@ private extension NiriLayoutHandler {
         window.resolvedHeight = nil
         window.resolvedWidth = nil
         window.stopMoveAnimations()
+    }
+
+    /// Native fullscreen exits often leave the restoring window in a fresh single-window
+    /// column because the macOS space transition removes it from the Niri tree and topology
+    /// sync re-adds it as a new column. If the captured `niriState` says the window shared a
+    /// column with one or more siblings, re-attach it to the column that currently hosts those
+    /// siblings so alt-left/right and visibility match the pre-fullscreen state.
+    private func reconcileNativeFullscreenColumn(
+        restoringWindow window: NiriWindow,
+        niriState: ManagedWindowRestoreSnapshot.NiriState,
+        in engine: NiriLayoutEngine,
+        workspaceId: WorkspaceDescriptor.ID
+    ) {
+        let storedMembers = niriState.columnWindowTokens
+        guard storedMembers.count > 1 else { return }
+        guard let currentColumn = engine.column(of: window) else { return }
+        let token = window.token
+        guard let currentRoot = currentColumn.findRoot(),
+              currentRoot.workspaceId == workspaceId
+        else { return }
+
+        let siblingTokens = storedMembers.filter { $0 != token }
+        var sameWorkspaceColumns: [ObjectIdentifier: NiriContainer] = [:]
+        var hasForeignSibling = false
+        for siblingToken in siblingTokens {
+            guard let siblingNode = engine.findNode(for: siblingToken),
+                  let siblingColumn = engine.column(of: siblingNode)
+            else {
+                continue
+            }
+            guard siblingColumn.findRoot()?.workspaceId == workspaceId else {
+                hasForeignSibling = true
+                continue
+            }
+            sameWorkspaceColumns[ObjectIdentifier(siblingColumn)] = siblingColumn
+        }
+
+        guard !hasForeignSibling else { return }
+        guard !sameWorkspaceColumns.isEmpty else { return }
+
+        guard sameWorkspaceColumns.count == 1,
+              let targetColumn = sameWorkspaceColumns.values.first
+        else { return }
+
+        guard targetColumn !== currentColumn else {
+            return
+        }
+
+        let storedIndex = niriState.tileIndex
+            ?? storedMembers.firstIndex(of: token)
+            ?? targetColumn.children.count
+        let insertIndex = max(0, min(storedIndex, targetColumn.children.count))
+
+        window.detach()
+        targetColumn.insertChild(window, at: insertIndex)
+
+        if currentColumn.children.isEmpty, currentColumn !== targetColumn {
+            currentColumn.remove()
+            if let root = engine.root(for: currentRoot.workspaceId), root.columns.isEmpty {
+                root.appendChild(NiriContainer())
+            }
+        }
     }
 
     func nativeFullscreenRestoreFinalizeTokens(

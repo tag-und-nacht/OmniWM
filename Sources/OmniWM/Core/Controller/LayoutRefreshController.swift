@@ -1263,6 +1263,19 @@ import QuartzCore
                 }
             }
 
+            // During native-FS space transitions, macOS can surface a
+            // destroyed AX ref in the enumeration for a brief window
+            // before the replacement-create notification fires. Admitting
+            // it here produces a zombie entry that the next destroy
+            // notification has to tear down again. Skip the enumeration
+            // hit and let `AXEventHandler.trackPreparedCreate` be the
+            // authoritative admission for the replacement window.
+            if controller.workspaceManager.entry(forPid: pid, windowId: winId) == nil,
+               controller.axEventHandler.isWindowRecentlyDestroyed(windowId: winId)
+            {
+                continue
+            }
+
             let token = WindowToken(pid: pid, windowId: winId)
             let appFullscreen = controller.axEventHandler.isFullscreenProvider?(ax) ?? AXWindowService.isFullscreen(ax)
             let evaluation = controller.evaluateWindowDisposition(
@@ -1408,7 +1421,10 @@ import QuartzCore
 
         for token in decisionBasedRemovals {
             discardHiddenTracking(for: token)
-            _ = controller.workspaceManager.removeWindow(pid: token.pid, windowId: token.windowId)
+            _ = controller.workspaceManager.removeWindow(
+                pid: token.pid,
+                windowId: token.windowId
+            )
         }
 
         let shouldPreserveMissingWindows = shouldPreserveMissingWindowsDuringNativeFullscreen(
@@ -1436,7 +1452,13 @@ import QuartzCore
             }
         }
 
-        controller.workspaceManager.removeMissing(keys: seenKeys, requiredConsecutiveMisses: 1)
+        // Defense in depth: AX enumeration occasionally drops windows for
+        // a single cycle even outside FS transitions (e.g. an app briefly
+        // stops responding, a burst of CGS events flushes the per-app
+        // context). Requiring two consecutive misses makes the missing-
+        // window purge robust to that noise at a cost of at most one
+        // extra rescan delay when a window is genuinely destroyed.
+        controller.workspaceManager.removeMissing(keys: seenKeys, requiredConsecutiveMisses: 2)
         controller.workspaceManager.garbageCollectUnusedWorkspaces(focusedWorkspaceId: focusedWorkspaceId)
 
         try Task.checkCancellation()
@@ -1490,7 +1512,19 @@ import QuartzCore
     private func shouldPreserveMissingWindowsDuringNativeFullscreen(
         controller: WMController
     ) -> Bool {
+        // A running FS lifecycle must shield every managed entry from the
+        // missing-window purge. But AX enumeration is also noisy *around*
+        // FS transitions — for a few hundred ms before a suspend record
+        // materializes and after a finalize clears it, non-active-space
+        // windows frequently fail to enumerate even though they still
+        // exist. `isWithinNativeFullscreenLifecycleGrace` extends the
+        // shield across those gaps, keyed off a monotonic timestamp that
+        // any NFR transition updates. Without this, a single missed
+        // enumeration during the transition tail was enough to purge
+        // tokens and have them re-admitted on the currently-active
+        // workspace, which is the bug we are fixing here.
         controller.workspaceManager.hasNativeFullscreenLifecycleContext
+            || controller.workspaceManager.isWithinNativeFullscreenLifecycleGrace
     }
 
     private func nativeFullscreenRestoreWorkspaceIds(
@@ -3122,7 +3156,10 @@ final class LayoutDiffExecutor {
         }
 
         var appliedFrameTokens: Set<WindowToken> = []
-        if !plan.skipFrameApplicationForAnimation && !frameUpdates.isEmpty {
+        let mustApplyForNativeFullscreenRestore = !nativeFullscreenRestoreFramesByToken.isEmpty
+        if (mustApplyForNativeFullscreenRestore || !plan.skipFrameApplicationForAnimation)
+            && !frameUpdates.isEmpty
+        {
             appliedFrameTokens.formUnion(
                 frameUpdates.map { WindowToken(pid: $0.pid, windowId: $0.windowId) }
             )

@@ -645,6 +645,162 @@ struct WorkspaceManagerTests {
         #expect(storedSnapshot?.niriState == resizedState)
     }
 
+    @Test func `niri state semantic equivalence tolerates animation drift and detects user resizes`() {
+        let token = WindowToken(pid: 99, windowId: 9901)
+        let frameTolerance: CGFloat = 0.5
+        let weightTolerance: CGFloat = 1e-3
+
+        let base = ManagedWindowRestoreSnapshot.NiriState(
+            nodeId: nil,
+            columnIndex: 3,
+            tileIndex: 0,
+            columnWindowTokens: [token],
+            columnSizing: .init(
+                width: .proportion(0.5),
+                cachedWidth: 1268.0,
+                presetWidthIdx: nil,
+                isFullWidth: false,
+                savedWidth: nil,
+                hasManualSingleWindowWidthOverride: false,
+                height: .proportion(1.0),
+                cachedHeight: 0.0,
+                isFullHeight: false,
+                savedHeight: nil
+            ),
+            windowSizing: .init(
+                height: .auto(weight: 1.0),
+                savedHeight: nil,
+                windowWidth: .auto(weight: 1.0),
+                sizingMode: .normal
+            )
+        )
+
+        // Sub-pixel cachedWidth drift and a 1e-4 weight drift (observed per
+        // animation tick) must be reported equivalent to avoid cache-write
+        // storms on every CADisplayLink tick.
+        let driftedAnimationTick = ManagedWindowRestoreSnapshot.NiriState(
+            nodeId: base.nodeId,
+            columnIndex: base.columnIndex,
+            tileIndex: base.tileIndex,
+            columnWindowTokens: base.columnWindowTokens,
+            columnSizing: .init(
+                width: base.columnSizing.width,
+                cachedWidth: 1268.12,
+                presetWidthIdx: base.columnSizing.presetWidthIdx,
+                isFullWidth: base.columnSizing.isFullWidth,
+                savedWidth: base.columnSizing.savedWidth,
+                hasManualSingleWindowWidthOverride:
+                    base.columnSizing.hasManualSingleWindowWidthOverride,
+                height: base.columnSizing.height,
+                cachedHeight: base.columnSizing.cachedHeight,
+                isFullHeight: base.columnSizing.isFullHeight,
+                savedHeight: base.columnSizing.savedHeight
+            ),
+            windowSizing: .init(
+                height: .auto(weight: 1.0003),
+                savedHeight: base.windowSizing.savedHeight,
+                windowWidth: base.windowSizing.windowWidth,
+                sizingMode: base.windowSizing.sizingMode
+            )
+        )
+        #expect(
+            base.isSemanticallyEquivalent(
+                to: driftedAnimationTick,
+                frameTolerance: frameTolerance,
+                weightTolerance: weightTolerance
+            )
+        )
+
+        // A user-initiated resize that pushes the tile weight to 3.0 must be
+        // reported as a genuine change so the cache refreshes.
+        let userResized = ManagedWindowRestoreSnapshot.NiriState(
+            nodeId: base.nodeId,
+            columnIndex: base.columnIndex,
+            tileIndex: base.tileIndex,
+            columnWindowTokens: base.columnWindowTokens,
+            columnSizing: base.columnSizing,
+            windowSizing: .init(
+                height: .auto(weight: 3.0),
+                savedHeight: base.windowSizing.savedHeight,
+                windowWidth: base.windowSizing.windowWidth,
+                sizingMode: base.windowSizing.sizingMode
+            )
+        )
+        #expect(
+            !base.isSemanticallyEquivalent(
+                to: userResized,
+                frameTolerance: frameTolerance,
+                weightTolerance: weightTolerance
+            )
+        )
+
+        // Niri's fullscreen-width toggle flips isFullWidth — must not be
+        // masked by the tolerance.
+        let fullWidthToggled = ManagedWindowRestoreSnapshot.NiriState(
+            nodeId: base.nodeId,
+            columnIndex: base.columnIndex,
+            tileIndex: base.tileIndex,
+            columnWindowTokens: base.columnWindowTokens,
+            columnSizing: .init(
+                width: base.columnSizing.width,
+                cachedWidth: base.columnSizing.cachedWidth,
+                presetWidthIdx: base.columnSizing.presetWidthIdx,
+                isFullWidth: true,
+                savedWidth: base.columnSizing.savedWidth,
+                hasManualSingleWindowWidthOverride:
+                    base.columnSizing.hasManualSingleWindowWidthOverride,
+                height: base.columnSizing.height,
+                cachedHeight: base.columnSizing.cachedHeight,
+                isFullHeight: base.columnSizing.isFullHeight,
+                savedHeight: base.columnSizing.savedHeight
+            ),
+            windowSizing: base.windowSizing
+        )
+        #expect(
+            !base.isSemanticallyEquivalent(
+                to: fullWidthToggled,
+                frameTolerance: frameTolerance,
+                weightTolerance: weightTolerance
+            )
+        )
+
+        // Tile re-ordering in the column (tileIndex 0 → 1) is a structural
+        // change and must always register even with no drift.
+        let reorderedTile = ManagedWindowRestoreSnapshot.NiriState(
+            nodeId: base.nodeId,
+            columnIndex: base.columnIndex,
+            tileIndex: 1,
+            columnWindowTokens: base.columnWindowTokens,
+            columnSizing: base.columnSizing,
+            windowSizing: base.windowSizing
+        )
+        #expect(
+            !base.isSemanticallyEquivalent(
+                to: reorderedTile,
+                frameTolerance: frameTolerance,
+                weightTolerance: weightTolerance
+            )
+        )
+
+        // nil ↔ non-nil asymmetry stays strict.
+        #expect(
+            !ManagedWindowRestoreSnapshot.NiriState.isSemanticallyEquivalent(
+                nil,
+                base,
+                frameTolerance: frameTolerance,
+                weightTolerance: weightTolerance
+            )
+        )
+        #expect(
+            ManagedWindowRestoreSnapshot.NiriState.isSemanticallyEquivalent(
+                nil,
+                nil,
+                frameTolerance: frameTolerance,
+                weightTolerance: weightTolerance
+            )
+        )
+    }
+
     @Test @MainActor func `equal distance remap uses deterministic tie break`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)

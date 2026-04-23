@@ -69,6 +69,23 @@ final class WMController {
     @ObservationIgnored
     private var managedRestoreFastPathIdentitiesByWindowId: [Int: ManagedRestoreFastPathIdentity] =
         [:]
+
+    private struct LastKnownNiriStateCacheEntry {
+        var state: ManagedWindowRestoreSnapshot.NiriState
+        var workspaceId: WorkspaceDescriptor.ID
+        var topologyProfile: TopologyProfile
+    }
+
+    // Last-known Niri column context per managed token. Survives temporary
+    // Niri-tree absence (e.g. when a macOS native fullscreen transition removes
+    // the window from the tree before the AX fullscreen-enter observation
+    // resolves its restore seed). Written from `captureNiriRestoreState` on
+    // success, retained across destroy, migrated on rekey, and overwritten on
+    // any later successful capture. Reads are validated against the current
+    // workspace and topology before restore code trusts cached membership.
+    @ObservationIgnored
+    private var lastKnownNiriStateByToken: [WindowToken: LastKnownNiriStateCacheEntry] =
+        [:]
     let windowRuleEngine = WindowRuleEngine()
 
     var niriEngine: NiriLayoutEngine?
@@ -178,8 +195,8 @@ final class WMController {
         }
         self.workspaceManager.onWindowRekeyed = { [weak self] oldToken, newToken in
             self?.invalidateManagedRestoreFastPathIdentityForRekey(
-                fromWindowId: oldToken.windowId,
-                toWindowId: newToken.windowId
+                from: oldToken,
+                to: newToken
             )
         }
         tabbedOverlayManager.onSelect = { [weak self] workspaceId, columnId, visualIndex in
@@ -819,6 +836,28 @@ final class WMController {
 
     func managedRestoreFastPathCacheWindowIdsForTests() -> Set<Int> {
         Set(managedRestoreFastPathIdentitiesByWindowId.keys)
+    }
+
+    func lastKnownNiriStateForTests(
+        token: WindowToken
+    ) -> ManagedWindowRestoreSnapshot.NiriState? {
+        lastKnownNiriStateByToken[token]?.state
+    }
+
+    func setLastKnownNiriStateForTests(
+        _ state: ManagedWindowRestoreSnapshot.NiriState,
+        for token: WindowToken,
+        workspaceId: WorkspaceDescriptor.ID? = nil,
+        topologyProfile: TopologyProfile? = nil
+    ) {
+        guard let cacheWorkspaceId = workspaceId ?? workspaceManager.workspace(for: token) else {
+            return
+        }
+        lastKnownNiriStateByToken[token] = LastKnownNiriStateCacheEntry(
+            state: state,
+            workspaceId: cacheWorkspaceId,
+            topologyProfile: topologyProfile ?? workspaceManager.topologyProfile
+        )
     }
 
     func configureWorkspaceBarManagerForTests(
@@ -1686,6 +1725,17 @@ final class WMController {
             let axRef = liveWindowsByToken[token] ?? existingEntry?.axRef
             guard let axRef else { continue }
 
+            // Same guard as in the full-rescan path: when CGS just
+            // destroyed this windowId, the stale AX ref we still hold
+            // shouldn't be used to re-admit the window under a
+            // synthetic entry. Let `trackPreparedCreate` admit the
+            // genuine replacement when it arrives.
+            if existingEntry == nil,
+               axEventHandler.isWindowRecentlyDestroyed(windowId: token.windowId)
+            {
+                continue
+            }
+
             evaluatedAnyWindow = true
             let evaluation = evaluateWindowDisposition(axRef: axRef, pid: token.pid)
 
@@ -1696,7 +1746,10 @@ final class WMController {
                 if let existingEntry {
                     affectedWorkspaceIds.insert(existingEntry.workspaceId)
                     layoutRefreshController.discardHiddenTracking(for: existingEntry.token)
-                    _ = workspaceManager.removeWindow(pid: token.pid, windowId: token.windowId)
+                    _ = workspaceManager.removeWindow(
+                        pid: token.pid,
+                        windowId: token.windowId
+                    )
                     relayoutNeeded = true
                 }
                 continue
@@ -1859,7 +1912,10 @@ final class WMController {
             existingEntry: entry
         ) else {
             layoutRefreshController.discardHiddenTracking(for: token)
-            _ = workspaceManager.removeWindow(pid: token.pid, windowId: token.windowId)
+            _ = workspaceManager.removeWindow(
+                pid: token.pid,
+                windowId: token.windowId
+            )
             layoutRefreshController.requestRelayout(
                 reason: .windowRuleReevaluation,
                 affectedWorkspaceIds: [entry.workspaceId]
@@ -2678,15 +2734,65 @@ extension WMController {
 
     private func invalidateManagedRestoreFastPathIdentity(forWindowId windowId: Int) {
         managedRestoreFastPathIdentitiesByWindowId.removeValue(forKey: windowId)
+        // `lastKnownNiriStateByToken` is intentionally NOT cleared here. Its
+        // whole reason to exist is to survive transient Niri-tree absence
+        // during a macOS native fullscreen transition — if a brief
+        // removal/re-add cycle fires on the token between "capture succeeded
+        // pre-fullscreen" and "suspend resolves the restore seed", dropping
+        // the entry on removal would defeat the cache. Stale entries are
+        // overwritten on any future successful capture.
     }
 
     private func invalidateManagedRestoreFastPathIdentityForRekey(
-        fromWindowId oldWindowId: Int,
-        toWindowId newWindowId: Int
+        from oldToken: WindowToken,
+        to newToken: WindowToken
     ) {
-        managedRestoreFastPathIdentitiesByWindowId.removeValue(forKey: oldWindowId)
-        guard newWindowId != oldWindowId else { return }
-        managedRestoreFastPathIdentitiesByWindowId.removeValue(forKey: newWindowId)
+        managedRestoreFastPathIdentitiesByWindowId.removeValue(forKey: oldToken.windowId)
+        guard newToken != oldToken else { return }
+        managedRestoreFastPathIdentitiesByWindowId.removeValue(forKey: newToken.windowId)
+        migrateLastKnownNiriState(from: oldToken, to: newToken)
+    }
+
+    private func migrateLastKnownNiriState(
+        from oldToken: WindowToken,
+        to newToken: WindowToken
+    ) {
+        guard let cacheEntry = lastKnownNiriStateByToken.removeValue(forKey: oldToken) else {
+            return
+        }
+        let state = cacheEntry.state
+        let migratedState = ManagedWindowRestoreSnapshot.NiriState(
+            nodeId: state.nodeId,
+            columnIndex: state.columnIndex,
+            tileIndex: state.tileIndex,
+            columnWindowTokens: state.columnWindowTokens.map { member in
+                member == oldToken ? newToken : member
+            },
+            columnSizing: state.columnSizing,
+            windowSizing: state.windowSizing
+        )
+        lastKnownNiriStateByToken[newToken] = LastKnownNiriStateCacheEntry(
+            state: migratedState,
+            workspaceId: cacheEntry.workspaceId,
+            topologyProfile: cacheEntry.topologyProfile
+        )
+    }
+
+    private func lastKnownNiriState(
+        for token: WindowToken,
+        workspaceId: WorkspaceDescriptor.ID? = nil,
+        topologyProfile: TopologyProfile? = nil
+    ) -> ManagedWindowRestoreSnapshot.NiriState? {
+        guard let cacheEntry = lastKnownNiriStateByToken[token] else { return nil }
+        let expectedWorkspaceId = workspaceId ?? workspaceManager.workspace(for: token)
+        let expectedTopologyProfile = topologyProfile ?? workspaceManager.topologyProfile
+        guard let expectedWorkspaceId,
+              cacheEntry.workspaceId == expectedWorkspaceId,
+              cacheEntry.topologyProfile == expectedTopologyProfile
+        else {
+            return nil
+        }
+        return cacheEntry.state
     }
 
     private func provisionalManagedRestoreReplacementMetadata(
@@ -2803,11 +2909,16 @@ extension WMController {
             return nil
         }
 
+        guard column.findRoot()?.workspaceId == workspaceId else {
+            return nil
+        }
+
         let columnWindowTokens = column.windowNodes.map(\.token)
         let tileIndex = columnWindowTokens.firstIndex(of: token)
-        return ManagedWindowRestoreSnapshot.NiriState(
+        let columnIndex = engine.columnIndex(of: column, in: workspaceId)
+        let niriState = ManagedWindowRestoreSnapshot.NiriState(
             nodeId: node.id,
-            columnIndex: engine.columnIndex(of: column, in: workspaceId),
+            columnIndex: columnIndex,
             tileIndex: tileIndex,
             columnWindowTokens: columnWindowTokens,
             columnSizing: ManagedWindowRestoreSnapshot.NiriState.ColumnSizing(
@@ -2829,6 +2940,28 @@ extension WMController {
                 sizingMode: node.sizingMode
             )
         )
+        let previous = lastKnownNiriStateByToken[token]
+        let topologyProfile = workspaceManager.topologyProfile
+        // Gate cache writes on a tolerance-aware comparison:
+        // niri's kernel re-derives cached widths and tile weights every
+        // animation tick, which structural `==` would report as "changed"
+        // on every frame. The tolerance here must stay below the minimum
+        // delta of a deliberate user resize.
+        let isEquivalentToPrevious = previous?.workspaceId == workspaceId
+            && previous?.topologyProfile == topologyProfile
+            && ManagedWindowRestoreSnapshot.NiriState.isSemanticallyEquivalent(
+                previous?.state,
+                niriState,
+                frameTolerance: WorkspaceManager.managedRestoreSnapshotFrameTolerance
+        )
+        if !isEquivalentToPrevious {
+            lastKnownNiriStateByToken[token] = LastKnownNiriStateCacheEntry(
+                state: niriState,
+                workspaceId: workspaceId,
+                topologyProfile: topologyProfile
+            )
+        }
+        return niriState
     }
 
     private func captureManagedRestoreFastPathNiriState(
@@ -2839,6 +2972,9 @@ extension WMController {
               let node = engine.findNode(for: token),
               let column = engine.column(of: node)
         else {
+            return nil
+        }
+        guard column.findRoot()?.workspaceId == workspaceId else {
             return nil
         }
 
@@ -2881,6 +3017,27 @@ extension WMController {
             niriState: snapshot.niriState,
             replacementMetadata: snapshot.replacementMetadata
         )
+    }
+
+    // Tolerance used when checking whether a managed restore snapshot's frame
+    // matches the window's display bounds (i.e. the snapshot was captured
+    // after the window had already entered macOS native fullscreen). Values
+    // within 1pt cover typical rounding between AX frames and screen bounds
+    // without producing false positives for legitimate full-tile columns.
+    private static let managedSnapshotDisplayBoundsMatchTolerance: CGFloat = 1.0
+
+    private func frameMatchesTokenDisplayBounds(
+        _ frame: CGRect,
+        token: WindowToken
+    ) -> Bool {
+        guard let entry = workspaceManager.entry(for: token),
+              let monitor = workspaceManager.monitor(for: entry.workspaceId)
+        else {
+            return false
+        }
+        let tolerance = Self.managedSnapshotDisplayBoundsMatchTolerance
+        return frame.approximatelyEqual(to: monitor.frame, tolerance: tolerance)
+            || frame.approximatelyEqual(to: monitor.visibleFrame, tolerance: tolerance)
     }
 
     private func preservedManagedGeometryFrame(
@@ -2966,25 +3123,45 @@ extension WMController {
         frame: CGRect
     ) -> WorkspaceManager.NativeFullscreenRecord.RestoreSnapshot {
         if let snapshot = makeManagedWindowRestoreSnapshot(for: token, frame: frame) {
-            _ = workspaceManager.setManagedRestoreSnapshot(snapshot, for: token)
-            return nativeFullscreenRestoreSnapshot(from: snapshot)
+            // Only persist if we captured a non-nil niriState. Persisting a
+            // nil-niriState snapshot would pin that nil in place via
+            // `shouldShortCircuitManagedRestoreSnapshot`, poisoning every
+            // future fullscreen restore for this window.
+            if snapshot.niriState != nil {
+                _ = workspaceManager.setManagedRestoreSnapshot(snapshot, for: token)
+            }
+            let cachedNiriState = lastKnownNiriState(
+                for: token,
+                workspaceId: snapshot.workspaceId,
+                topologyProfile: snapshot.topologyProfile
+            )
+            let effectiveNiriState = snapshot.niriState ?? cachedNiriState
+            return WorkspaceManager.NativeFullscreenRecord.RestoreSnapshot(
+                frame: snapshot.frame,
+                topologyProfile: snapshot.topologyProfile,
+                niriState: effectiveNiriState,
+                replacementMetadata: snapshot.replacementMetadata
+            )
         }
-        return WorkspaceManager.NativeFullscreenRecord.RestoreSnapshot(frame: frame, topologyProfile: workspaceManager.topologyProfile)
+        let effectiveNiriState = lastKnownNiriState(
+            for: token
+        )
+        return WorkspaceManager.NativeFullscreenRecord.RestoreSnapshot(
+            frame: frame,
+            topologyProfile: workspaceManager.topologyProfile,
+            niriState: effectiveNiriState,
+            replacementMetadata: workspaceManager.managedReplacementMetadata(for: token)
+        )
     }
 
-    private func logIrrecoverableNativeFullscreenRestore(
-        token: WindowToken,
+    private func nativeFullscreenRestoreFailure(
         path: NativeFullscreenRestoreSeedPath,
         detail: String
     ) -> WorkspaceManager.NativeFullscreenRecord.RestoreFailure {
-        let failure = WorkspaceManager.NativeFullscreenRecord.RestoreFailure(
+        WorkspaceManager.NativeFullscreenRecord.RestoreFailure(
             path: path.rawValue,
             detail: detail
         )
-        let message =
-            "[NativeFullscreenRestore] path=\(failure.path) token=\(token) detail=\(failure.detail)"
-        fputs("\(message)\n", stderr)
-        return failure
     }
 
     private func resolveNativeFullscreenRestoreSeed(
@@ -2996,11 +3173,59 @@ extension WMController {
             return .init(restoreSnapshot: existingSnapshot, restoreFailure: nil)
         }
 
+        let cachedNiriState = lastKnownNiriState(
+            for: token
+        )
+
         if let managedSnapshot = workspaceManager.managedRestoreSnapshot(for: token) {
-            return .init(
-                restoreSnapshot: nativeFullscreenRestoreSnapshot(from: managedSnapshot),
-                restoreFailure: nil
+            // The cache reflects the most recent successful Niri capture and
+            // is strictly more recent than the persisted snapshot, so it wins
+            // whenever it is available. If the persisted snapshot was saved
+            // at a moment when `captureNiriRestoreState` returned nil (e.g. a
+            // transient Niri-tree absence), managedSnapshot.niriState is nil
+            // and the fast-path identity short-circuit can pin that nil in
+            // place indefinitely — the cache is how we still recover.
+            let effectiveNiriState = cachedNiriState ?? managedSnapshot.niriState
+            // If the snapshot was first captured while the window was already
+            // in macOS native fullscreen (app launched fullscreen, Space/Mission
+            // Control handoff, etc.), `managedSnapshot.frame` was recorded as
+            // the display rect — restoring to it later would be a no-op. In
+            // that case, if the niri cache still says the column is not
+            // full-width, prefer the niri-cache enrichment path below, which
+            // reads the pre-fullscreen tile geometry from niri's layout engine.
+            let managedFrameMatchesDisplayBounds =
+                frameMatchesTokenDisplayBounds(managedSnapshot.frame, token: token)
+            let niriIndicatesTiledColumn =
+                effectiveNiriState.map { !$0.columnSizing.isFullWidth } ?? false
+            if !(managedFrameMatchesDisplayBounds && niriIndicatesTiledColumn) {
+                return .init(
+                    restoreSnapshot: WorkspaceManager.NativeFullscreenRecord.RestoreSnapshot(
+                        frame: managedSnapshot.frame,
+                        topologyProfile: managedSnapshot.topologyProfile,
+                        niriState: effectiveNiriState,
+                        replacementMetadata: managedSnapshot.replacementMetadata
+                    ),
+                    restoreFailure: nil
+                )
+            }
+        }
+
+        // The managed restore snapshot write can be gated off (e.g. when AX
+        // facts for the app have not yet loaded), so we may have a last-known
+        // Niri column context cached even though the full snapshot never made
+        // it to disk. Pair it with any preserved managed geometry we can still
+        // find so the fullscreen restore has column-membership information the
+        // frame-only fallback would otherwise drop.
+        if let cachedNiriState,
+           let preservedFrame = preservedManagedGeometryFrame(for: token)
+        {
+            let snapshot = WorkspaceManager.NativeFullscreenRecord.RestoreSnapshot(
+                frame: preservedFrame,
+                topologyProfile: workspaceManager.topologyProfile,
+                niriState: cachedNiriState,
+                replacementMetadata: workspaceManager.managedReplacementMetadata(for: token)
             )
+            return .init(restoreSnapshot: snapshot, restoreFailure: nil)
         }
 
         if strategy == .preTransitionCapture,
@@ -3035,8 +3260,7 @@ extension WMController {
 
         return .init(
             restoreSnapshot: nil,
-            restoreFailure: logIrrecoverableNativeFullscreenRestore(
-                token: token,
+            restoreFailure: nativeFullscreenRestoreFailure(
                 path: path,
                 detail: detail
             )
@@ -3086,6 +3310,17 @@ extension WMController {
         _ token: WindowToken,
         path: NativeFullscreenRestoreSeedPath
     ) -> Bool {
+        // The OS re-asserts fullscreen on every rescan cycle (and AX
+        // notifications can fire more than once per transition), which
+        // previously ran the seed-resolution / suspend pipeline in a tight
+        // loop. Once the record is already `.suspended` with a seed snapshot
+        // in place, there is nothing for a follow-up call to change.
+        if let record = workspaceManager.nativeFullscreenRecord(for: token),
+           record.transition == .suspended,
+           record.restoreSnapshot != nil
+        {
+            return false
+        }
         let seed = resolveNativeFullscreenRestoreSeed(
             for: token,
             path: path,

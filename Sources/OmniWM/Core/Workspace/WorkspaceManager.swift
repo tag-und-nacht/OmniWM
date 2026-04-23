@@ -560,7 +560,10 @@ final class WorkspaceManager {
         }
 
         if entry.workspaceId != hydration.workspaceId {
-            windows.updateWorkspace(for: token, workspace: hydration.workspaceId)
+            windows.updateWorkspace(
+                for: token,
+                workspace: hydration.workspaceId
+            )
         }
 
         let focusChanged = applyWindowModeMutationWithoutReconcile(
@@ -665,6 +668,13 @@ final class WorkspaceManager {
         for entry in windows.allEntries() {
             guard let metadata = entry.managedReplacementMetadata,
                   let key = PersistedWindowRestoreKey(metadata: metadata),
+                  // Never persist a nil-title key: it becomes a
+                  // catch-all that matches any later admission whose
+                  // metadata still has nil title (AX facts not yet
+                  // populated), silently consuming itself without doing
+                  // any useful restore. Titled keys are re-created the
+                  // next time a real title is available.
+                  key.isIdentifying,
                   let persistedRestoreIntent = persistedRestoreIntent(for: entry)
             else {
                 continue
@@ -689,7 +699,7 @@ final class WorkspaceManager {
             }
 
             let candidatesByTitle = Dictionary(grouping: candidates, by: { $0.key.title })
-            for (title, titledCandidates) in candidatesByTitle where title != nil && titledCandidates.count == 1 {
+            for (_, titledCandidates) in candidatesByTitle where titledCandidates.count == 1 {
                 if let candidate = titledCandidates.first {
                     persistedEntries.append(candidate.entry)
                 }
@@ -787,6 +797,26 @@ final class WorkspaceManager {
 
     var hasNativeFullscreenLifecycleContext: Bool {
         sessionState.focus.isAppFullscreenActive || !nativeFullscreenRecordsByOriginalToken.isEmpty
+    }
+
+    /// Grace window kept after any native-FS lifecycle transition
+    /// (suspend, begin, finalize) during which missing-window purges must be
+    /// suppressed. macOS's AX enumeration is frequently incomplete for
+    /// windows on non-active spaces for several hundred ms around any
+    /// fullscreen-related space transition; a single missed enumeration must
+    /// not be treated as "window destroyed". 400 ms comfortably covers
+    /// roughly six rescan cycles at the current cadence.
+    private static let nativeFullscreenLifecycleGrace: Duration = .milliseconds(400)
+
+    private var lastNativeFullscreenLifecycleTransitionAt: ContinuousClock.Instant?
+
+    var isWithinNativeFullscreenLifecycleGrace: Bool {
+        guard let last = lastNativeFullscreenLifecycleTransitionAt else { return false }
+        return ContinuousClock.now - last < Self.nativeFullscreenLifecycleGrace
+    }
+
+    fileprivate func markNativeFullscreenLifecycleTransition() {
+        lastNativeFullscreenLifecycleTransitionAt = ContinuousClock.now
     }
 
     func scratchpadToken() -> WindowToken? {
@@ -1186,6 +1216,7 @@ final class WorkspaceManager {
             changed = true
         }
         changed = enterNonManagedFocus(appFullscreen: true) || changed
+        markNativeFullscreenLifecycleTransition()
         return changed
     }
 
@@ -1401,7 +1432,10 @@ final class WorkspaceManager {
             if layoutReason(for: record.currentToken) == .nativeFullscreen {
                 _ = restoreFromNativeState(for: record.currentToken)
             }
-            if let removed = removeWindow(pid: record.currentToken.pid, windowId: record.currentToken.windowId) {
+            if let removed = removeWindow(
+                pid: record.currentToken.pid,
+                windowId: record.currentToken.windowId
+            ) {
                 removedEntries.append(removed)
             }
         }
@@ -2624,7 +2658,10 @@ final class WorkspaceManager {
     }
 
     @discardableResult
-    func removeWindow(pid: pid_t, windowId: Int) -> WindowModel.Entry? {
+    func removeWindow(
+        pid: pid_t,
+        windowId: Int
+    ) -> WindowModel.Entry? {
         guard let entry = windows.entry(forPid: pid, windowId: windowId) else { return nil }
         let removedEntry = removeTrackedWindow(entry)
         schedulePersistedWindowRestoreCatalogSave()
@@ -3335,9 +3372,7 @@ extension WorkspaceManager {
 
     @discardableResult
     func beginNativeFullscreenRestore(for token: WindowToken) -> NativeFullscreenRecord? {
-        guard var record = nativeFullscreenRecord(for: token) else {
-            return nil
-        }
+        guard var record = nativeFullscreenRecord(for: token) else { return nil }
 
         let resolvedToken = record.currentToken == token ? record.currentToken : token
         var changed = false
@@ -3369,6 +3404,7 @@ extension WorkspaceManager {
             upsertNativeFullscreenRecord(record)
         }
 
+        markNativeFullscreenLifecycleTransition()
         _ = restoreFromNativeState(for: resolvedToken)
         return nativeFullscreenRecordsByOriginalToken[record.originalToken]
     }
@@ -3377,14 +3413,13 @@ extension WorkspaceManager {
     func finalizeNativeFullscreenRestore(for token: WindowToken) -> ParentKind? {
         guard let record = nativeFullscreenRecord(for: token),
               record.transition == .restoring
-        else {
-            return nil
-        }
+        else { return nil }
 
         let removed = removeNativeFullscreenRecord(originalToken: record.originalToken)
         if nativeFullscreenRecordsByOriginalToken.isEmpty {
             _ = setManagedAppFullscreen(false)
         }
+        markNativeFullscreenLifecycleTransition()
         return removed.flatMap { _ in
             restoreFromNativeState(for: record.currentToken)
         }
@@ -3441,12 +3476,10 @@ extension WorkspaceManager {
             "[NativeFullscreenRestore] path=\(failure.path) token=\(record.currentToken) original=\(record.originalToken) detail=\(failure.detail)"
         if record.restoreFailure == nil {
             assertionFailure(message)
-            fputs("\(message)\n", stderr)
             record.restoreFailure = failure
             return true
         }
 
-        fputs("\(message)\n", stderr)
         return false
     }
 }

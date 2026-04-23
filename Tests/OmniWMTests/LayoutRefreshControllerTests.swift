@@ -633,6 +633,83 @@ private func makeUnavailableLayoutPlanTestWindow(windowId: Int) -> AXWindowRef {
         #expect(controller.axManager.lastAppliedFrame(for: 112) == frozenFrame)
     }
 
+    @Test @MainActor func nativeFullscreenRestoreAppliesFrameDespiteSkipFrameApplicationForAnimation() {
+        let controller = makeLayoutPlanTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing monitor or active workspace for skip-animation-gate restore test")
+            return
+        }
+
+        let token = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 113)
+        let frozenFrame = CGRect(x: 200, y: 140, width: 860, height: 600)
+        var submittedRequests: [AXFrameApplicationRequest] = []
+        controller.axManager.frameApplyOverrideForTests = { requests in
+            submittedRequests.append(contentsOf: requests)
+            return requests.map { request in
+                AXFrameApplyResult(
+                    requestId: request.requestId,
+                    pid: request.pid,
+                    windowId: request.windowId,
+                    targetFrame: request.frame,
+                    currentFrameHint: request.currentFrameHint,
+                    writeResult: AXFrameWriteResult(
+                        targetFrame: request.frame,
+                        observedFrame: request.frame,
+                        writeOrder: AXWindowService.frameWriteOrder(
+                            currentFrame: request.currentFrameHint,
+                            targetFrame: request.frame
+                        ),
+                        sizeError: .success,
+                        positionError: .success,
+                        failureReason: nil
+                    )
+                )
+            }
+        }
+
+        controller.axManager.applyFramesParallel([(token.pid, token.windowId, frozenFrame)])
+        submittedRequests.removeAll()
+
+        let restoreSnapshot = WorkspaceManager.NativeFullscreenRecord.RestoreSnapshot(
+            frame: frozenFrame,
+            topologyProfile: controller.workspaceManager.topologyProfile
+        )
+        _ = controller.workspaceManager.requestNativeFullscreenEnter(
+            token,
+            in: workspaceId,
+            restoreSnapshot: restoreSnapshot
+        )
+        _ = controller.workspaceManager.markNativeFullscreenSuspended(
+            token,
+            restoreSnapshot: restoreSnapshot
+        )
+        _ = controller.workspaceManager.requestNativeFullscreenExit(token, initiatedByCommand: true)
+        _ = controller.workspaceManager.beginNativeFullscreenRestore(for: token)
+
+        var diff = WorkspaceLayoutDiff()
+        diff.frameChanges = [LayoutFrameChange(token: token, frame: frozenFrame, forceApply: true)]
+
+        var plan = WorkspaceLayoutPlan(
+            workspaceId: workspaceId,
+            monitor: controller.layoutRefreshController.buildMonitorSnapshot(for: monitor),
+            sessionPatch: WorkspaceSessionPatch(workspaceId: workspaceId),
+            diff: diff
+        )
+        plan.nativeFullscreenRestoreFinalizeTokens = [token]
+        plan.skipFrameApplicationForAnimation = true
+
+        controller.layoutRefreshController.executeLayoutPlan(plan)
+
+        #expect(submittedRequests.count == 1)
+        #expect(submittedRequests.first?.windowId == 113)
+        #expect(submittedRequests.first?.frame == frozenFrame)
+        #expect(controller.axManager.lastAppliedFrame(for: 113) == frozenFrame)
+        #expect(controller.workspaceManager.nativeFullscreenRecord(for: token) == nil)
+        #expect(controller.workspaceManager.isAppFullscreenActive == false)
+    }
+
     @Test @MainActor func executeLayoutPlanPreservesHiddenStateOnHideAndClearsItOnShow() async {
         let controller = makeLayoutPlanTestController()
         guard let monitor = controller.workspaceManager.monitors.first,

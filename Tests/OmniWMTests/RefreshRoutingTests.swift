@@ -5588,7 +5588,11 @@ private func expectNoWorkspaceBarRefresh(
         #expect(controller.workspaceManager.layoutReason(for: handle) == .standard)
     }
 
-    @Test @MainActor func fullRescanRemovesMissingTrackedWindowOnFirstVerifiedMiss() async {
+    @Test @MainActor func fullRescanRemovesMissingTrackedWindowAfterConsecutiveVerifiedMisses() async {
+        // The full rescan now requires two consecutive enumeration misses
+        // before purging a tracked entry (defense in depth against
+        // transient AX enumeration gaps during space transitions). One
+        // miss keeps the entry; the second confirms it and removes.
         let controller = makeRefreshTestController()
         controller.axManager.currentWindowsAsyncOverride = { [] }
         guard let workspaceId = controller.activeWorkspace()?.id else {
@@ -5602,7 +5606,10 @@ private func expectNoWorkspaceBarRefresh(
 
         controller.layoutRefreshController.requestFullRescan(reason: .startup)
         await waitForRefreshWork(on: controller)
+        #expect(controller.workspaceManager.entry(forPid: pid, windowId: windowId) != nil)
 
+        controller.layoutRefreshController.requestFullRescan(reason: .startup)
+        await waitForRefreshWork(on: controller)
         #expect(controller.workspaceManager.entry(forPid: pid, windowId: windowId) == nil)
     }
 
@@ -5658,6 +5665,11 @@ private func expectNoWorkspaceBarRefresh(
             )
         }
 
+        // Two consecutive rescans are needed to clear the missing entry
+        // because `removeMissing` requires two consecutive verified
+        // misses — see `buildFullRefreshExecutionPlan`.
+        controller.layoutRefreshController.requestFullRescan(reason: .startup)
+        await waitForRefreshWork(on: controller)
         controller.layoutRefreshController.requestFullRescan(reason: .startup)
         await waitForRefreshWork(on: controller)
 

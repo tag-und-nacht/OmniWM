@@ -111,6 +111,58 @@ struct ManagedWindowRestoreSnapshot: Equatable {
         let columnWindowTokens: [WindowToken]
         let columnSizing: ColumnSizing
         let windowSizing: WindowSizing
+
+        // Niri's layout kernel re-derives cached widths and tile weights on
+        // every animation tick (CADisplayLink driven), producing sub-pixel
+        // and ~1e-4 drift that structural `==` reports as "changed". We use
+        // this tolerance for gating cache-writes / snapshot persistence so
+        // animation noise does not churn the managed-restore cache, while
+        // deliberate user resizes (which move weights by much more) still
+        // register.
+        static let defaultSemanticWeightTolerance: CGFloat = 1e-3
+
+        static func isSemanticallyEquivalent(
+            _ lhs: NiriState?,
+            _ rhs: NiriState?,
+            frameTolerance: CGFloat,
+            weightTolerance: CGFloat = defaultSemanticWeightTolerance
+        ) -> Bool {
+            switch (lhs, rhs) {
+            case (nil, nil):
+                return true
+            case (nil, _?), (_?, nil):
+                return false
+            case let (a?, b?):
+                return a.isSemanticallyEquivalent(
+                    to: b,
+                    frameTolerance: frameTolerance,
+                    weightTolerance: weightTolerance
+                )
+            }
+        }
+
+        func isSemanticallyEquivalent(
+            to other: NiriState,
+            frameTolerance: CGFloat,
+            weightTolerance: CGFloat = defaultSemanticWeightTolerance
+        ) -> Bool {
+            guard nodeId == other.nodeId,
+                  columnIndex == other.columnIndex,
+                  tileIndex == other.tileIndex,
+                  columnWindowTokens == other.columnWindowTokens
+            else {
+                return false
+            }
+            return columnSizing.isSemanticallyEquivalent(
+                to: other.columnSizing,
+                frameTolerance: frameTolerance,
+                weightTolerance: weightTolerance
+            ) && windowSizing.isSemanticallyEquivalent(
+                to: other.windowSizing,
+                frameTolerance: frameTolerance,
+                weightTolerance: weightTolerance
+            )
+        }
     }
 
     let token: WindowToken
@@ -122,12 +174,18 @@ struct ManagedWindowRestoreSnapshot: Equatable {
 
     func isSemanticallyEquivalent(
         to other: ManagedWindowRestoreSnapshot,
-        frameTolerance: CGFloat
+        frameTolerance: CGFloat,
+        weightTolerance: CGFloat = NiriState.defaultSemanticWeightTolerance
     ) -> Bool {
         workspaceId == other.workspaceId
             && frame.approximatelyEqual(to: other.frame, tolerance: frameTolerance)
             && topologyProfile == other.topologyProfile
-            && niriState == other.niriState
+            && ManagedWindowRestoreSnapshot.NiriState.isSemanticallyEquivalent(
+                niriState,
+                other.niriState,
+                frameTolerance: frameTolerance,
+                weightTolerance: weightTolerance
+            )
             && replacementMetadata?.restoreIdentity == other.replacementMetadata?.restoreIdentity
     }
 
@@ -163,6 +221,139 @@ struct ManagedWindowRestoreSnapshot: Equatable {
                 )
             },
             replacementMetadata: replacementMetadata ?? self.replacementMetadata
+        )
+    }
+}
+
+extension ManagedWindowRestoreSnapshot.NiriState.ColumnSizing {
+    func isSemanticallyEquivalent(
+        to other: ManagedWindowRestoreSnapshot.NiriState.ColumnSizing,
+        frameTolerance: CGFloat,
+        weightTolerance: CGFloat
+    ) -> Bool {
+        guard isFullWidth == other.isFullWidth,
+              isFullHeight == other.isFullHeight,
+              presetWidthIdx == other.presetWidthIdx,
+              hasManualSingleWindowWidthOverride == other.hasManualSingleWindowWidthOverride
+        else {
+            return false
+        }
+        guard abs(cachedWidth - other.cachedWidth) < frameTolerance,
+              abs(cachedHeight - other.cachedHeight) < frameTolerance
+        else {
+            return false
+        }
+        return proportionalSizesSemanticallyEquivalent(
+            width, other.width,
+            frameTolerance: frameTolerance,
+            weightTolerance: weightTolerance
+        ) && proportionalSizesSemanticallyEquivalent(
+            height, other.height,
+            frameTolerance: frameTolerance,
+            weightTolerance: weightTolerance
+        ) && optionalProportionalSizesSemanticallyEquivalent(
+            savedWidth, other.savedWidth,
+            frameTolerance: frameTolerance,
+            weightTolerance: weightTolerance
+        ) && optionalProportionalSizesSemanticallyEquivalent(
+            savedHeight, other.savedHeight,
+            frameTolerance: frameTolerance,
+            weightTolerance: weightTolerance
+        )
+    }
+}
+
+extension ManagedWindowRestoreSnapshot.NiriState.WindowSizing {
+    func isSemanticallyEquivalent(
+        to other: ManagedWindowRestoreSnapshot.NiriState.WindowSizing,
+        frameTolerance: CGFloat,
+        weightTolerance: CGFloat
+    ) -> Bool {
+        guard sizingMode == other.sizingMode else { return false }
+        return weightedSizesSemanticallyEquivalent(
+            height, other.height,
+            frameTolerance: frameTolerance,
+            weightTolerance: weightTolerance
+        ) && weightedSizesSemanticallyEquivalent(
+            windowWidth, other.windowWidth,
+            frameTolerance: frameTolerance,
+            weightTolerance: weightTolerance
+        ) && optionalWeightedSizesSemanticallyEquivalent(
+            savedHeight, other.savedHeight,
+            frameTolerance: frameTolerance,
+            weightTolerance: weightTolerance
+        )
+    }
+}
+
+private func proportionalSizesSemanticallyEquivalent(
+    _ lhs: ProportionalSize,
+    _ rhs: ProportionalSize,
+    frameTolerance: CGFloat,
+    weightTolerance: CGFloat
+) -> Bool {
+    switch (lhs, rhs) {
+    case let (.proportion(a), .proportion(b)):
+        return abs(a - b) < weightTolerance
+    case let (.fixed(a), .fixed(b)):
+        return abs(a - b) < frameTolerance
+    default:
+        return false
+    }
+}
+
+private func optionalProportionalSizesSemanticallyEquivalent(
+    _ lhs: ProportionalSize?,
+    _ rhs: ProportionalSize?,
+    frameTolerance: CGFloat,
+    weightTolerance: CGFloat
+) -> Bool {
+    switch (lhs, rhs) {
+    case (nil, nil):
+        return true
+    case (nil, _?), (_?, nil):
+        return false
+    case let (a?, b?):
+        return proportionalSizesSemanticallyEquivalent(
+            a, b,
+            frameTolerance: frameTolerance,
+            weightTolerance: weightTolerance
+        )
+    }
+}
+
+private func weightedSizesSemanticallyEquivalent(
+    _ lhs: WeightedSize,
+    _ rhs: WeightedSize,
+    frameTolerance: CGFloat,
+    weightTolerance: CGFloat
+) -> Bool {
+    switch (lhs, rhs) {
+    case let (.auto(a), .auto(b)):
+        return abs(a - b) < weightTolerance
+    case let (.fixed(a), .fixed(b)):
+        return abs(a - b) < frameTolerance
+    default:
+        return false
+    }
+}
+
+private func optionalWeightedSizesSemanticallyEquivalent(
+    _ lhs: WeightedSize?,
+    _ rhs: WeightedSize?,
+    frameTolerance: CGFloat,
+    weightTolerance: CGFloat
+) -> Bool {
+    switch (lhs, rhs) {
+    case (nil, nil):
+        return true
+    case (nil, _?), (_?, nil):
+        return false
+    case let (a?, b?):
+        return weightedSizesSemanticallyEquivalent(
+            a, b,
+            frameTolerance: frameTolerance,
+            weightTolerance: weightTolerance
         )
     }
 }

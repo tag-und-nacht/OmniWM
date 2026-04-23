@@ -6430,6 +6430,91 @@ private func makeCenteredCrossMonitorFixture(
         #expect(lastAppliedBorderWindowIdForLayoutPlanTests(on: controller) == 601)
     }
 
+    @Test @MainActor func nativeFullscreenRestoreDoesNotReattachToCachedSiblingOnOtherWorkspace() async throws {
+        let fixture = makeTwoMonitorLayoutPlanTestController()
+        let controller = fixture.controller
+        controller.enableNiriLayout(maxWindowsPerColumn: 1)
+        await waitForLayoutPlanRefreshWork(on: controller)
+        controller.syncMonitorsToNiriEngine()
+
+        let primaryToken = addLayoutPlanTestWindow(
+            on: controller,
+            workspaceId: fixture.primaryWorkspaceId,
+            windowId: 603
+        )
+        let secondaryToken = addLayoutPlanTestWindow(
+            on: controller,
+            workspaceId: fixture.secondaryWorkspaceId,
+            windowId: 604
+        )
+
+        let activeWorkspaceIds: Set<WorkspaceDescriptor.ID> = [
+            fixture.primaryWorkspaceId,
+            fixture.secondaryWorkspaceId,
+        ]
+        let initialPlans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
+            activeWorkspaces: activeWorkspaceIds
+        )
+        controller.layoutRefreshController.executeLayoutPlans(initialPlans)
+        await waitForLayoutPlanRefreshWork(on: controller)
+
+        guard let engine = controller.niriEngine,
+              let primaryNode = engine.findNode(for: primaryToken),
+              let secondaryNode = engine.findNode(for: secondaryToken)
+        else {
+            Issue.record("Expected both test windows to be present in the Niri tree")
+            return
+        }
+        #expect(primaryNode.findRoot()?.workspaceId == fixture.primaryWorkspaceId)
+        #expect(secondaryNode.findRoot()?.workspaceId == fixture.secondaryWorkspaceId)
+
+        let staleCrossWorkspaceNiriState = ManagedWindowRestoreSnapshot.NiriState(
+            nodeId: primaryNode.id,
+            columnIndex: 0,
+            tileIndex: 0,
+            columnWindowTokens: [primaryToken, secondaryToken],
+            columnSizing: .init(
+                width: .proportion(0.5),
+                cachedWidth: 960,
+                presetWidthIdx: nil,
+                isFullWidth: false,
+                savedWidth: nil,
+                hasManualSingleWindowWidthOverride: false,
+                height: .proportion(1.0),
+                cachedHeight: 1080,
+                isFullHeight: false,
+                savedHeight: nil
+            ),
+            windowSizing: .init(
+                height: .auto(weight: 1.0),
+                savedHeight: nil,
+                windowWidth: .auto(weight: 1.0),
+                sizingMode: .normal
+            )
+        )
+        let restoreSnapshot = WorkspaceManager.NativeFullscreenRecord.RestoreSnapshot(
+            frame: fixture.primaryMonitor.visibleFrame,
+            topologyProfile: controller.workspaceManager.topologyProfile,
+            niriState: staleCrossWorkspaceNiriState
+        )
+        _ = controller.workspaceManager.markNativeFullscreenSuspended(
+            primaryToken,
+            restoreSnapshot: restoreSnapshot
+        )
+        _ = controller.workspaceManager.requestNativeFullscreenExit(
+            primaryToken,
+            initiatedByCommand: true
+        )
+        _ = controller.workspaceManager.beginNativeFullscreenRestore(for: primaryToken)
+
+        _ = try await controller.niriLayoutHandler.layoutWithNiriEngine(
+            activeWorkspaces: activeWorkspaceIds
+        )
+
+        #expect(engine.findNode(for: primaryToken)?.findRoot()?.workspaceId == fixture.primaryWorkspaceId)
+        #expect(engine.findNode(for: secondaryToken)?.findRoot()?.workspaceId == fixture.secondaryWorkspaceId)
+    }
+
     @Test @MainActor func directBorderUpdateUsesConfirmedFocusInsteadOfRememberedFocus() async throws {
         let controller = makeLayoutPlanTestController()
         guard let monitor = controller.workspaceManager.monitors.first,

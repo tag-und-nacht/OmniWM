@@ -116,6 +116,26 @@ final class AXEventHandler: CGSEventDelegate {
     private static let stabilizationRetryDelay: Duration = .milliseconds(100)
     private static let createdWindowRetryLimit = 5
 
+    /// After a CGS `windowDestroyed` notification, AX enumeration for the
+    /// same `windowId` can briefly continue to return the destroyed ref.
+    /// That happens most visibly during native-FS space transitions, where
+    /// macOS thrashes a window's AX identity: destroy → enumeration still
+    /// shows it → second destroy → fresh create. The full-rescan path is
+    /// driven by AX enumeration, so it would re-admit the zombie entry
+    /// between the two destroys. Suppressing re-admission makes the
+    /// follow-up `windowCreated` notification the single source of truth
+    /// for the replacement window.
+    ///
+    /// The TTL is the upper bound the guard can survive without a
+    /// confirming `windowCreated` signal. `trackPreparedCreate` clears
+    /// the mark as soon as a replacement admission is observed, so the
+    /// TTL only matters when macOS never sends the matching create —
+    /// e.g. the window was actually destroyed for good. Two seconds
+    /// comfortably covers the observed space-transition thrash window
+    /// without pinning stale ids forever.
+    private static let recentlyDestroyedWindowTTL: Duration = .seconds(2)
+    private var recentlyDestroyedWindowIds: [Int: ContinuousClock.Instant] = [:]
+
     weak var controller: WMController?
     private var deferredCreatedWindowIds: Set<UInt32> = []
     private var deferredCreatedWindowOrder: [UInt32] = []
@@ -421,6 +441,12 @@ final class AXEventHandler: CGSEventDelegate {
         guard let controller else { return }
         cancelCreatedWindowRetry(windowId: candidate.windowId)
 
+        // A genuine AX create notification is the authoritative "the
+        // replacement window is here" signal; drop the recently-destroyed
+        // guard immediately so subsequent rescans admit this window
+        // normally instead of waiting out the remainder of the TTL.
+        clearRecentlyDestroyedWindow(windowId: candidate.token.windowId)
+
         if restoreNativeFullscreenReplacementIfNeeded(
             token: candidate.token,
             windowId: candidate.windowId,
@@ -655,7 +681,11 @@ final class AXEventHandler: CGSEventDelegate {
         }
 
         controller.layoutRefreshController.discardHiddenTracking(for: token)
-        _ = controller.workspaceManager.removeWindow(pid: token.pid, windowId: token.windowId)
+        _ = controller.workspaceManager.removeWindow(
+            pid: token.pid,
+            windowId: token.windowId
+        )
+        markWindowRecentlyDestroyed(windowId: token.windowId)
         controller.clearManualWindowOverride(for: token)
         _ = controller.renderKeyboardFocusBorder(
             policy: .direct,
@@ -1568,6 +1598,14 @@ final class AXEventHandler: CGSEventDelegate {
         windowId: UInt32,
         pidHint: pid_t?
     ) {
+        // Refresh the recently-destroyed mark for every destroy signal,
+        // even ones that don't reach `handleRemoved(token:)` (e.g. the
+        // second destroy of a native-FS ping-pong, where the entry is
+        // already gone and no candidate can be prepared). Without this,
+        // a later full rescan would re-admit a windowId whose
+        // destruction macOS kept repeating.
+        markWindowRecentlyDestroyed(windowId: Int(windowId))
+
         let resolvedToken = resolveTrackedToken(windowId)
             ?? pidHint.map { WindowToken(pid: $0, windowId: Int(windowId)) }
         if let resolvedToken {
@@ -2107,6 +2145,41 @@ final class AXEventHandler: CGSEventDelegate {
     private func cancelCreatedWindowRetry(windowId: UInt32) {
         pendingCreatedWindowRetryTasks.removeValue(forKey: windowId)?.cancel()
         createdWindowRetryCountById.removeValue(forKey: windowId)
+    }
+
+    private func markWindowRecentlyDestroyed(windowId: Int) {
+        recentlyDestroyedWindowIds[windowId] = ContinuousClock.now
+        pruneRecentlyDestroyedWindowIds()
+    }
+
+    private func clearRecentlyDestroyedWindow(windowId: Int) {
+        recentlyDestroyedWindowIds.removeValue(forKey: windowId)
+    }
+
+    /// Returns true if the given windowId was destroyed via a CGS
+    /// `windowDestroyed` notification within
+    /// `recentlyDestroyedWindowTTL`. The full-rescan admission path uses
+    /// this to ignore stale AX enumeration hits during native-FS space
+    /// transitions, letting the follow-up `windowCreated` notification
+    /// be the single source of truth.
+    func isWindowRecentlyDestroyed(windowId: Int) -> Bool {
+        guard let destroyedAt = recentlyDestroyedWindowIds[windowId] else {
+            return false
+        }
+        let elapsed = ContinuousClock.now - destroyedAt
+        if elapsed >= Self.recentlyDestroyedWindowTTL {
+            recentlyDestroyedWindowIds.removeValue(forKey: windowId)
+            return false
+        }
+        return true
+    }
+
+    private func pruneRecentlyDestroyedWindowIds() {
+        guard !recentlyDestroyedWindowIds.isEmpty else { return }
+        let now = ContinuousClock.now
+        recentlyDestroyedWindowIds = recentlyDestroyedWindowIds.filter { _, timestamp in
+            now - timestamp < Self.recentlyDestroyedWindowTTL
+        }
     }
 
     private func resetCreatedWindowRetryState() {
