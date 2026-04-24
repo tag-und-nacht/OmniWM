@@ -6538,6 +6538,103 @@ private func makeCenteredCrossMonitorFixture(
         }
     }
 
+    @Test @MainActor func staticFocusedRemovalSuppressesCoalescedCreateMotion() async throws {
+        let controller = makeLayoutPlanTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing monitor or active workspace for static removal coalesced-create test")
+            return
+        }
+
+        controller.enableNiriLayout(maxWindowsPerColumn: 1)
+        await waitForLayoutPlanRefreshWork(on: controller)
+        controller.syncMonitorsToNiriEngine()
+
+        let sameAppPid: pid_t = 7_621
+        for windowId in 7621 ... 7623 {
+            _ = addLayoutPlanTestWindow(
+                on: controller,
+                workspaceId: workspaceId,
+                windowId: windowId,
+                pid: sameAppPid
+            )
+        }
+
+        let initialPlans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
+            activeWorkspaces: [workspaceId]
+        )
+        controller.layoutRefreshController.executeLayoutPlans(initialPlans)
+
+        guard let engine = controller.niriEngine else {
+            Issue.record("Expected Niri engine for static removal coalesced-create test")
+            return
+        }
+        let columns = engine.columns(in: workspaceId)
+        guard columns.count >= 3,
+              let adjacentLeftNode = columns.dropLast().last?.windowNodes.first,
+              let removedNode = columns.last?.windowNodes.first
+        else {
+            Issue.record("Expected three Niri columns for static removal coalesced-create test")
+            return
+        }
+        let adjacentLeftToken = adjacentLeftNode.token
+        let newToken = WindowToken(pid: sameAppPid, windowId: 7624)
+        let oldFrames = engine.captureWindowFrames(in: workspaceId)
+
+        _ = controller.workspaceManager.removeWindow(
+            pid: removedNode.token.pid,
+            windowId: removedNode.token.windowId
+        )
+        _ = addLayoutPlanTestWindow(
+            on: controller,
+            workspaceId: workspaceId,
+            windowId: newToken.windowId,
+            pid: newToken.pid
+        )
+
+        var diagnostics: [NiriRemovalAnimationDiagnostic] = []
+        controller.layoutRefreshController.debugHooks.onNiriRemovalAnimationDiagnostic = { diagnostic in
+            diagnostics.append(diagnostic)
+        }
+
+        let plans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
+            activeWorkspaces: [workspaceId],
+            useScrollAnimationPath: true,
+            removalSeeds: [
+                workspaceId: NiriWindowRemovalSeed(
+                    removedNodeIds: [removedNode.id],
+                    oldFrames: oldFrames,
+                    removedWindow: removedNode.token,
+                    selectedRemovalAnchorNodeId: removedNode.id,
+                    revealSide: .right,
+                    shouldRecoverFocus: true,
+                    animationPolicy: .staticViewportPreserving,
+                    diagnosticRemovedNodeId: removedNode.id
+                )
+            ]
+        )
+        guard let plan = plans.first else {
+            Issue.record("Expected Niri layout plan after static removal with coalesced create")
+            return
+        }
+
+        #expect(plan.sessionPatch.rememberedFocusToken == adjacentLeftToken)
+        #expect(plan.sessionPatch.viewportState?.selectedNodeId == adjacentLeftNode.id)
+        #expect(hasFocusIntent(plan.focusIntents, token: adjacentLeftToken))
+        #expect(!hasNiriScrollDirective(plan.animationDirectives, workspaceId: workspaceId))
+        #expect(!hasActivationDirective(plan.animationDirectives, token: newToken))
+        #expect(!engine.hasAnyWindowAnimationsRunning(in: workspaceId))
+        #expect(!engine.hasAnyColumnAnimationsRunning(in: workspaceId))
+        #expect(diagnostics.contains { diagnostic in
+            diagnostic.phase == .animationDirectives
+                && diagnostic.animationPolicy == .staticViewportPreserving
+                && !diagnostic.startNiriScroll
+                && !diagnostic.survivorMoveAnimation
+                && !diagnostic.columnAnimation
+        })
+    }
+
     @Test @MainActor func ordinaryRemovalWithAnimationsDisabledAppliesFramesImmediately() async throws {
         let controller = makeLayoutPlanTestController()
         guard let monitor = controller.workspaceManager.monitors.first,
@@ -6728,6 +6825,11 @@ private func makeCenteredCrossMonitorFixture(
             windowId: latestRemovedNode.token.windowId
         )
 
+        var diagnostics: [NiriRemovalAnimationDiagnostic] = []
+        controller.layoutRefreshController.debugHooks.onNiriRemovalAnimationDiagnostic = { diagnostic in
+            diagnostics.append(diagnostic)
+        }
+
         let executionPlan = try await controller.layoutRefreshController
             .buildWindowRemovalExecutionPlanForTests(
                 payloads: [
@@ -6735,6 +6837,7 @@ private func makeCenteredCrossMonitorFixture(
                         workspaceId: workspaceId,
                         layoutType: .niri,
                         removedNodeId: firstRemovedNode.id,
+                        removedWindow: firstRemovedNode.token,
                         niriOldFrames: oldFrames,
                         niriRevealSide: .left,
                         shouldRecoverFocus: true,
@@ -6744,6 +6847,7 @@ private func makeCenteredCrossMonitorFixture(
                         workspaceId: workspaceId,
                         layoutType: .niri,
                         removedNodeId: latestRemovedNode.id,
+                        removedWindow: latestRemovedNode.token,
                         niriOldFrames: oldFrames,
                         niriRevealSide: .right,
                         shouldRecoverFocus: true,
@@ -6759,6 +6863,13 @@ private func makeCenteredCrossMonitorFixture(
         #expect(plan.sessionPatch.rememberedFocusToken == latestLeftNode.token)
         #expect(plan.sessionPatch.viewportState?.selectedNodeId == latestLeftNode.id)
         #expect(hasFocusIntent(plan.focusIntents, token: latestLeftNode.token))
+        #expect(diagnostics.contains { diagnostic in
+            diagnostic.phase == .topologyPlanning
+                && diagnostic.removedNodeId == latestRemovedNode.id
+                && diagnostic.removedWindow == latestRemovedNode.token
+        })
+        #expect(plan.niriRemovalAnimationDiagnostic?.removedNodeId == latestRemovedNode.id)
+        #expect(plan.niriRemovalAnimationDiagnostic?.removedWindow == latestRemovedNode.token)
     }
 
     @Test @MainActor func inactiveWorkspaceFocusedRemovalDoesNotEmitRecoveryFocusDirective() async throws {

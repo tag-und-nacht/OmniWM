@@ -969,6 +969,15 @@ private func waitUntilAXEventTest(
             in: workspaceId,
             onMonitor: monitor.id
         )
+        controller.axEventHandler.windowInfoProvider = { windowId in
+            guard windowId == UInt32(removedToken.windowId) else { return nil }
+            return WindowServerInfo(
+                id: windowId,
+                pid: sameAppPid,
+                level: 0,
+                frame: CGRect(x: 100, y: 80, width: 900, height: 700)
+            )
+        }
         controller.workspaceManager.withNiriViewportState(for: workspaceId) { state in
             state.selectedNodeId = removedNode.id
             state.activeColumnIndex = columns.count - 1
@@ -1000,6 +1009,469 @@ private func waitUntilAXEventTest(
                 && diagnostic.animationPolicy == .staticViewportPreserving
                 && !diagnostic.closeAnimation
         })
+    }
+
+    @Test @MainActor func samePidBackgroundNiriDestroyKeepsOrdinaryRemovalPolicy() async throws {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
+        let controller = makeAXEventTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing workspace for same-PID background removal regression test")
+            return
+        }
+
+        controller.hasStartedServices = true
+        controller.enableNiriLayout(maxWindowsPerColumn: 1)
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+        controller.syncMonitorsToNiriEngine()
+
+        let sameAppPid: pid_t = 8_951
+        for windowId in 8951 ... 8954 {
+            _ = addLayoutPlanTestWindow(
+                on: controller,
+                workspaceId: workspaceId,
+                windowId: windowId,
+                pid: sameAppPid
+            )
+        }
+
+        let initialPlans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
+            activeWorkspaces: [workspaceId]
+        )
+        controller.layoutRefreshController.executeLayoutPlans(initialPlans)
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+
+        guard let engine = controller.niriEngine else {
+            Issue.record("Expected Niri engine for same-PID background removal regression test")
+            return
+        }
+        let columns = engine.columns(in: workspaceId)
+        guard columns.count >= 4,
+              let focusedNode = columns.first?.windowNodes.first,
+              let removedNode = columns.last?.windowNodes.first
+        else {
+            Issue.record("Expected four Niri columns for same-PID background removal regression test")
+            return
+        }
+
+        _ = controller.workspaceManager.setManagedFocus(
+            focusedNode.token,
+            in: workspaceId,
+            onMonitor: monitor.id
+        )
+        controller.workspaceManager.withNiriViewportState(for: workspaceId) { state in
+            state.selectedNodeId = focusedNode.id
+            state.activeColumnIndex = 0
+        }
+        AXWindowService.fastFrameProviderForTests = { axRef in
+            guard axRef.windowId == removedNode.token.windowId else { return nil }
+            return CGRect(x: 100, y: 80, width: 900, height: 700)
+        }
+        defer { AXWindowService.fastFrameProviderForTests = nil }
+
+        var diagnostics: [NiriRemovalAnimationDiagnostic] = []
+        controller.layoutRefreshController.debugHooks.onNiriRemovalAnimationDiagnostic = { diagnostic in
+            diagnostics.append(diagnostic)
+        }
+
+        controller.axEventHandler.handleRemoved(token: removedNode.token)
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+
+        #expect(controller.workspaceManager.preferredFocusToken(in: workspaceId) == focusedNode.token)
+        #expect(diagnostics.contains { diagnostic in
+            diagnostic.phase == .intake
+                && diagnostic.removedWindow == removedNode.token
+                && diagnostic.animationPolicy == .ordinary
+                && diagnostic.closeAnimation
+        })
+    }
+
+    @Test @MainActor func focusedRemovalSuppressesUnmanagedSamePidActivation() async throws {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
+        let controller = makeAXEventTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing workspace for unmanaged same-PID suppression regression test")
+            return
+        }
+
+        controller.hasStartedServices = true
+        controller.enableNiriLayout(maxWindowsPerColumn: 1)
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+        controller.syncMonitorsToNiriEngine()
+
+        let sameAppPid: pid_t = 8_961
+        for windowId in 8961 ... 8963 {
+            _ = addLayoutPlanTestWindow(
+                on: controller,
+                workspaceId: workspaceId,
+                windowId: windowId,
+                pid: sameAppPid
+            )
+        }
+
+        let initialPlans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
+            activeWorkspaces: [workspaceId]
+        )
+        controller.layoutRefreshController.executeLayoutPlans(initialPlans)
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+
+        guard let engine = controller.niriEngine,
+              let removedNode = engine.columns(in: workspaceId).last?.windowNodes.first
+        else {
+            Issue.record("Expected Niri removal node for unmanaged same-PID suppression regression test")
+            return
+        }
+
+        _ = controller.workspaceManager.setManagedFocus(
+            removedNode.token,
+            in: workspaceId,
+            onMonitor: monitor.id
+        )
+        controller.workspaceManager.withNiriViewportState(for: workspaceId) { state in
+            state.selectedNodeId = removedNode.id
+            state.activeColumnIndex = engine.columns(in: workspaceId).count - 1
+        }
+
+        let unmanagedReplacement = WindowToken(pid: sameAppPid, windowId: 89_640)
+        controller.axEventHandler.isFullscreenProvider = { _ in false }
+        controller.axEventHandler.focusedWindowRefProvider = { pid in
+            guard pid == sameAppPid else { return nil }
+            return AXWindowRef(
+                element: AXUIElementCreateSystemWide(),
+                windowId: unmanagedReplacement.windowId
+            )
+        }
+
+        controller.axEventHandler.handleRemoved(token: removedNode.token)
+        controller.axEventHandler.handleAppActivation(
+            pid: sameAppPid,
+            source: .focusedWindowChanged
+        )
+
+        #expect(controller.workspaceManager.isNonManagedFocusActive == false)
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+    }
+
+    @Test @MainActor func focusedRemovalSuppressionClearsWhenSuppressedAppTerminates() async throws {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
+        let controller = makeAXEventTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing workspace for terminated-app suppression regression test")
+            return
+        }
+
+        controller.hasStartedServices = true
+        controller.enableNiriLayout(maxWindowsPerColumn: 1)
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+        controller.syncMonitorsToNiriEngine()
+
+        let sameAppPid: pid_t = 8_971
+        for windowId in 8971 ... 8973 {
+            _ = addLayoutPlanTestWindow(
+                on: controller,
+                workspaceId: workspaceId,
+                windowId: windowId,
+                pid: sameAppPid
+            )
+        }
+
+        let initialPlans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
+            activeWorkspaces: [workspaceId]
+        )
+        controller.layoutRefreshController.executeLayoutPlans(initialPlans)
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+
+        guard let engine = controller.niriEngine,
+              let removedNode = engine.columns(in: workspaceId).last?.windowNodes.first
+        else {
+            Issue.record("Expected Niri removal node for terminated-app suppression regression test")
+            return
+        }
+
+        _ = controller.workspaceManager.setManagedFocus(
+            removedNode.token,
+            in: workspaceId,
+            onMonitor: monitor.id
+        )
+        controller.workspaceManager.withNiriViewportState(for: workspaceId) { state in
+            state.selectedNodeId = removedNode.id
+            state.activeColumnIndex = engine.columns(in: workspaceId).count - 1
+        }
+
+        let laterSamePidWindow = WindowToken(pid: sameAppPid, windowId: 89_740)
+        controller.axEventHandler.isFullscreenProvider = { _ in false }
+        controller.axEventHandler.focusedWindowRefProvider = { pid in
+            guard pid == sameAppPid else { return nil }
+            return AXWindowRef(
+                element: AXUIElementCreateSystemWide(),
+                windowId: laterSamePidWindow.windowId
+            )
+        }
+
+        controller.axEventHandler.handleRemoved(token: removedNode.token)
+        controller.axEventHandler.cleanupFocusStateForTerminatedApp(pid: sameAppPid)
+        controller.axEventHandler.handleAppActivation(
+            pid: sameAppPid,
+            source: .focusedWindowChanged
+        )
+
+        #expect(controller.workspaceManager.isNonManagedFocusActive)
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+    }
+
+    @Test @MainActor func focusedRemovalSuppressesMissingSamePidFocusedWindow() async throws {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
+        let controller = makeAXEventTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing workspace for missing-focused-window suppression regression test")
+            return
+        }
+
+        controller.hasStartedServices = true
+        controller.enableNiriLayout(maxWindowsPerColumn: 1)
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+        controller.syncMonitorsToNiriEngine()
+
+        let sameAppPid: pid_t = 8_981
+        for windowId in 8981 ... 8983 {
+            _ = addLayoutPlanTestWindow(
+                on: controller,
+                workspaceId: workspaceId,
+                windowId: windowId,
+                pid: sameAppPid
+            )
+        }
+
+        let initialPlans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
+            activeWorkspaces: [workspaceId]
+        )
+        controller.layoutRefreshController.executeLayoutPlans(initialPlans)
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+
+        guard let engine = controller.niriEngine,
+              let removedNode = engine.columns(in: workspaceId).last?.windowNodes.first
+        else {
+            Issue.record("Expected Niri removal node for missing-focused-window suppression regression test")
+            return
+        }
+
+        _ = controller.workspaceManager.setManagedFocus(
+            removedNode.token,
+            in: workspaceId,
+            onMonitor: monitor.id
+        )
+        controller.workspaceManager.withNiriViewportState(for: workspaceId) { state in
+            state.selectedNodeId = removedNode.id
+            state.activeColumnIndex = engine.columns(in: workspaceId).count - 1
+        }
+
+        controller.axEventHandler.focusedWindowRefProvider = { pid in
+            guard pid == sameAppPid else { return nil }
+            return nil
+        }
+        controller.axEventHandler.isFullscreenProvider = { _ in false }
+
+        controller.axEventHandler.handleRemoved(token: removedNode.token)
+        controller.axEventHandler.handleAppActivation(
+            pid: sameAppPid,
+            source: .focusedWindowChanged
+        )
+
+        #expect(controller.workspaceManager.isNonManagedFocusActive == false)
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+    }
+
+    @Test @MainActor func sameAppPreemptionSurvivesDuplicateFocusBeforeDestroy() async throws {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
+        var focusedWindows: [(pid_t, UInt32)] = []
+        let operations = WindowFocusOperations(
+            activateApp: { _ in },
+            focusSpecificWindow: { pid, windowId, _ in
+                focusedWindows.append((pid, windowId))
+            },
+            raiseWindow: { _ in }
+        )
+        let controller = makeAXEventTestController(windowFocusOperations: operations)
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing workspace for duplicate-preemption regression test")
+            return
+        }
+
+        controller.hasStartedServices = true
+        controller.enableNiriLayout(maxWindowsPerColumn: 1)
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+        controller.syncMonitorsToNiriEngine()
+
+        let sameAppPid: pid_t = 8_991
+        for windowId in 8991 ... 8994 {
+            _ = addLayoutPlanTestWindow(
+                on: controller,
+                workspaceId: workspaceId,
+                windowId: windowId,
+                pid: sameAppPid
+            )
+        }
+
+        let initialPlans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
+            activeWorkspaces: [workspaceId]
+        )
+        controller.layoutRefreshController.executeLayoutPlans(initialPlans)
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+
+        guard let engine = controller.niriEngine else {
+            Issue.record("Expected Niri engine for duplicate-preemption regression test")
+            return
+        }
+        let columns = engine.columns(in: workspaceId)
+        guard columns.count >= 4,
+              let replacementNode = columns.first?.windowNodes.first,
+              let adjacentLeftNode = columns.dropLast().last?.windowNodes.first,
+              let removedNode = columns.last?.windowNodes.first
+        else {
+            Issue.record("Expected four Niri columns for duplicate-preemption regression test")
+            return
+        }
+
+        _ = controller.workspaceManager.setManagedFocus(
+            removedNode.token,
+            in: workspaceId,
+            onMonitor: monitor.id
+        )
+        controller.workspaceManager.withNiriViewportState(for: workspaceId) { state in
+            state.selectedNodeId = replacementNode.id
+            state.activeColumnIndex = 0
+        }
+        controller.axEventHandler.focusedWindowRefProvider = { pid in
+            guard pid == sameAppPid else { return nil }
+            return AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: replacementNode.token.windowId)
+        }
+        controller.axEventHandler.isFullscreenProvider = { _ in false }
+
+        controller.axEventHandler.handleAppActivation(
+            pid: sameAppPid,
+            source: .focusedWindowChanged
+        )
+        controller.axEventHandler.handleAppActivation(
+            pid: sameAppPid,
+            source: .focusedWindowChanged
+        )
+        controller.axEventHandler.handleRemoved(token: removedNode.token)
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+
+        #expect(controller.workspaceManager.preferredFocusToken(in: workspaceId) == adjacentLeftNode.token)
+        #expect(focusedWindows.contains { $0.0 == adjacentLeftNode.token.pid && $0.1 == UInt32(adjacentLeftNode.token.windowId) })
+    }
+
+    @Test @MainActor func sameAppPreemptionClearsAfterUnmanagedFallbackBeforeDestroy() async throws {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
+        defer { axHooksLease.release() }
+
+        var focusedWindows: [(pid_t, UInt32)] = []
+        let operations = WindowFocusOperations(
+            activateApp: { _ in },
+            focusSpecificWindow: { pid, windowId, _ in
+                focusedWindows.append((pid, windowId))
+            },
+            raiseWindow: { _ in }
+        )
+        let controller = makeAXEventTestController(windowFocusOperations: operations)
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing workspace for stale-preemption regression test")
+            return
+        }
+
+        controller.hasStartedServices = true
+        controller.enableNiriLayout(maxWindowsPerColumn: 1)
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+        controller.syncMonitorsToNiriEngine()
+
+        let sameAppPid: pid_t = 9_001
+        for windowId in 9001 ... 9004 {
+            _ = addLayoutPlanTestWindow(
+                on: controller,
+                workspaceId: workspaceId,
+                windowId: windowId,
+                pid: sameAppPid
+            )
+        }
+
+        let initialPlans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
+            activeWorkspaces: [workspaceId]
+        )
+        controller.layoutRefreshController.executeLayoutPlans(initialPlans)
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+
+        guard let engine = controller.niriEngine else {
+            Issue.record("Expected Niri engine for stale-preemption regression test")
+            return
+        }
+        let columns = engine.columns(in: workspaceId)
+        guard columns.count >= 4,
+              let replacementNode = columns.first?.windowNodes.first,
+              let adjacentLeftNode = columns.dropLast().last?.windowNodes.first,
+              let removedNode = columns.last?.windowNodes.first
+        else {
+            Issue.record("Expected four Niri columns for stale-preemption regression test")
+            return
+        }
+
+        _ = controller.workspaceManager.setManagedFocus(
+            removedNode.token,
+            in: workspaceId,
+            onMonitor: monitor.id
+        )
+        controller.workspaceManager.withNiriViewportState(for: workspaceId) { state in
+            state.selectedNodeId = replacementNode.id
+            state.activeColumnIndex = 0
+        }
+        let unmanagedPid: pid_t = 90_010
+        let unmanagedWindowId = 90_011
+        controller.axEventHandler.focusedWindowRefProvider = { pid in
+            if pid == sameAppPid {
+                return AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: replacementNode.token.windowId)
+            }
+            if pid == unmanagedPid {
+                return AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: unmanagedWindowId)
+            }
+            return nil
+        }
+        controller.axEventHandler.isFullscreenProvider = { _ in false }
+
+        controller.axEventHandler.handleAppActivation(
+            pid: sameAppPid,
+            source: .focusedWindowChanged
+        )
+        controller.axEventHandler.handleAppActivation(
+            pid: unmanagedPid,
+            source: .focusedWindowChanged
+        )
+        #expect(controller.workspaceManager.isNonManagedFocusActive)
+
+        controller.axEventHandler.handleRemoved(token: removedNode.token)
+        await controller.layoutRefreshController.waitForRefreshWorkForTests()
+
+        #expect(!focusedWindows.contains { $0.0 == adjacentLeftNode.token.pid && $0.1 == UInt32(adjacentLeftNode.token.windowId) })
     }
 
     @Test @MainActor func newAppActivationWaitsForFocusedWindowBeforeLeavingManagedFocus() async throws {

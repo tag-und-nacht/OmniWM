@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
 import AppKit
 import Foundation
+import OSLog
 import QuartzCore
+
+private let niriRemovalDiagnosticsLog = Logger(
+    subsystem: "com.barut.OmniWM",
+    category: "niri-removal"
+)
 
 @MainActor final class LayoutRefreshController: NSObject {
     typealias PostLayoutAction = RefreshScheduler.PostLayoutAction
@@ -283,6 +289,18 @@ import QuartzCore
     }
 
     func emitNiriRemovalAnimationDiagnostic(_ diagnostic: NiriRemovalAnimationDiagnostic) {
+        niriRemovalDiagnosticsLog.info(
+            """
+            phase=\(String(describing: diagnostic.phase), privacy: .public) \
+            workspace=\(diagnostic.workspaceId.uuidString, privacy: .private) \
+            removedWindow=\(diagnostic.removedWindow?.windowId ?? 0, privacy: .private) \
+            recoveryWindow=\(diagnostic.recoveryTarget?.windowId ?? 0, privacy: .private) \
+            policy=\(String(describing: diagnostic.animationPolicy), privacy: .public) \
+            viewport=\(String(describing: diagnostic.viewportAction), privacy: .public) \
+            scroll=\(diagnostic.startNiriScroll, privacy: .public) \
+            skipFrames=\(diagnostic.skipFrameApplicationForAnimation, privacy: .public)
+            """
+        )
         debugHooks.onNiriRemovalAnimationDiagnostic?(diagnostic)
     }
 
@@ -666,20 +684,25 @@ import QuartzCore
     }
 
     private func applyManagedFocus(_ token: WindowToken, on controller: WMController) {
+        guard let entry = controller.workspaceManager.entry(for: token) else { return }
         guard !controller.shouldSuppressManagedFocusRecovery,
               !controller.workspaceManager.hasPendingNativeFullscreenTransition
         else {
-            if let entry = controller.workspaceManager.entry(for: token) {
-                controller.axEventHandler.completeFocusedRemovalRecovery(
-                    workspaceId: entry.workspaceId,
-                    target: token
-                )
-            }
+            controller.axEventHandler.completeFocusedRemovalRecovery(
+                workspaceId: entry.workspaceId,
+                target: token
+            )
             return
         }
 
         controller.axEventHandler.noteFocusedRemovalRecoveryFocusRequested(token)
         controller.focusWindow(token)
+        if controller.focusBridge.activeManagedRequest(for: token) == nil {
+            controller.axEventHandler.completeFocusedRemovalRecovery(
+                workspaceId: entry.workspaceId,
+                target: token
+            )
+        }
     }
 
     func cancelActiveAnimations(for workspaceId: WorkspaceDescriptor.ID) {
@@ -742,6 +765,7 @@ import QuartzCore
         )
     }
 
+    @discardableResult
     func requestWindowRemoval(
         workspaceId: WorkspaceDescriptor.ID,
         layoutType: LayoutType,
@@ -752,25 +776,25 @@ import QuartzCore
         shouldRecoverFocus: Bool,
         niriAnimationPolicy: NiriRemovalAnimationPolicy = .ordinary,
         postLayout: PostLayoutAction? = nil
-    ) {
+    ) -> RefreshCycleId? {
         assert(RefreshReason.windowDestroyed.requestRoute == .windowRemoval, "Invalid window-removal reason")
-        enqueueRefresh(
-            makeScheduledRefresh(
-                kind: .windowRemoval,
-                reason: .windowDestroyed,
-                postLayoutAttachmentIds: registerPostLayoutAttachments(postLayout),
-                windowRemovalPayload: .init(
-                    workspaceId: workspaceId,
-                    layoutType: layoutType,
-                    removedNodeId: removedNodeId,
-                    removedWindow: removedWindow,
-                    niriOldFrames: niriOldFrames,
-                    niriRevealSide: niriRevealSide,
-                    shouldRecoverFocus: shouldRecoverFocus,
-                    niriAnimationPolicy: niriAnimationPolicy
-                )
+        let refresh = makeScheduledRefresh(
+            kind: .windowRemoval,
+            reason: .windowDestroyed,
+            postLayoutAttachmentIds: registerPostLayoutAttachments(postLayout),
+            windowRemovalPayload: .init(
+                workspaceId: workspaceId,
+                layoutType: layoutType,
+                removedNodeId: removedNodeId,
+                removedWindow: removedWindow,
+                niriOldFrames: niriOldFrames,
+                niriRevealSide: niriRevealSide,
+                shouldRecoverFocus: shouldRecoverFocus,
+                niriAnimationPolicy: niriAnimationPolicy
             )
         )
+        guard let result = enqueueRefresh(refresh) else { return nil }
+        return scheduledWindowRemovalCycleId(from: result)
     }
 
     func commitWorkspaceTransition(
@@ -1237,34 +1261,9 @@ import QuartzCore
             case .dwindle:
                 dwindleWorkspaces.insert(payload.workspaceId)
             case .defaultLayout, .niri:
-                var removedNodeIds = niriRemovalSeeds[payload.workspaceId]?.removedNodeIds ?? []
-                if let removedNodeId = payload.removedNodeId {
-                    removedNodeIds.append(removedNodeId)
-                }
-                let existingSeed = niriRemovalSeeds[payload.workspaceId]
-                let existingOldFrames = existingSeed?.oldFrames ?? [:]
-                let shouldRecoverFocus = existingSeed?.shouldRecoverFocus == true || payload.shouldRecoverFocus
-                let animationPolicy = existingSeed?.animationPolicy
-                    .merging(payload.niriAnimationPolicy)
-                    ?? payload.niriAnimationPolicy
-                let selectedRemovalAnchorNodeId = if payload.shouldRecoverFocus {
-                    payload.removedNodeId ?? existingSeed?.selectedRemovalAnchorNodeId
-                } else {
-                    existingSeed?.selectedRemovalAnchorNodeId
-                }
-                let revealSide = if payload.shouldRecoverFocus {
-                    payload.niriRevealSide ?? existingSeed?.revealSide
-                } else {
-                    existingSeed?.revealSide ?? payload.niriRevealSide
-                }
-                niriRemovalSeeds[payload.workspaceId] = NiriWindowRemovalSeed(
-                    removedNodeIds: removedNodeIds,
-                    oldFrames: existingOldFrames.merging(payload.niriOldFrames) { current, _ in current },
-                    removedWindow: existingSeed?.removedWindow ?? payload.removedWindow,
-                    selectedRemovalAnchorNodeId: selectedRemovalAnchorNodeId,
-                    revealSide: revealSide,
-                    shouldRecoverFocus: shouldRecoverFocus,
-                    animationPolicy: animationPolicy
+                niriRemovalSeeds[payload.workspaceId] = mergedNiriRemovalSeed(
+                    existing: niriRemovalSeeds[payload.workspaceId],
+                    payload: payload
                 )
             }
 
@@ -1318,6 +1317,53 @@ import QuartzCore
         effects.focusValidationWorkspaceIds = focusValidationWorkspaceIds
 
         return RefreshExecutionPlan(workspacePlans: workspacePlans, effects: effects)
+    }
+
+    private func mergedNiriRemovalSeed(
+        existing: NiriWindowRemovalSeed?,
+        payload: WindowRemovalPayload
+    ) -> NiriWindowRemovalSeed {
+        var removedNodeIds = existing?.removedNodeIds ?? []
+        if let removedNodeId = payload.removedNodeId {
+            removedNodeIds.append(removedNodeId)
+        }
+
+        let payloadSuppliesRecoveryPolicy = payload.shouldRecoverFocus
+            || payload.niriAnimationPolicy == .staticViewportPreserving
+        let selectedRemovalAnchorNodeId = if payload.shouldRecoverFocus {
+            payload.removedNodeId ?? existing?.selectedRemovalAnchorNodeId
+        } else {
+            existing?.selectedRemovalAnchorNodeId
+        }
+        let diagnosticRemovedNodeId = if payloadSuppliesRecoveryPolicy {
+            payload.removedNodeId ?? existing?.diagnosticRemovedNodeId
+        } else {
+            existing?.diagnosticRemovedNodeId ?? payload.removedNodeId
+        }
+        let removedWindow = if payloadSuppliesRecoveryPolicy {
+            payload.removedWindow ?? existing?.removedWindow
+        } else {
+            existing?.removedWindow ?? payload.removedWindow
+        }
+        let revealSide = if payload.shouldRecoverFocus {
+            payload.niriRevealSide ?? existing?.revealSide
+        } else {
+            existing?.revealSide ?? payload.niriRevealSide
+        }
+
+        return NiriWindowRemovalSeed(
+            removedNodeIds: removedNodeIds,
+            oldFrames: (existing?.oldFrames ?? [:])
+                .merging(payload.niriOldFrames) { current, _ in current },
+            removedWindow: removedWindow,
+            selectedRemovalAnchorNodeId: selectedRemovalAnchorNodeId,
+            revealSide: revealSide,
+            shouldRecoverFocus: existing?.shouldRecoverFocus == true || payload.shouldRecoverFocus,
+            animationPolicy: existing?.animationPolicy
+                .merging(payload.niriAnimationPolicy)
+                ?? payload.niriAnimationPolicy,
+            diagnosticRemovedNodeId: diagnosticRemovedNodeId
+        )
     }
 
     private func buildFullRefreshExecutionPlan() async throws -> RefreshExecutionPlan {
@@ -1737,14 +1783,15 @@ import QuartzCore
         return backingScale(for: monitor)
     }
 
+    @discardableResult
     private func enqueueRefresh(
         _ refresh: ScheduledRefresh,
         shouldDropWhileBusy: Bool = false
-    ) {
+    ) -> OrchestrationResult? {
         recordRefreshRequest(refresh.reason)
         debugHooks.onRefreshEnqueued?(refresh)
         if let runtime = controller?.runtime {
-            _ = runtime.requestRefresh(
+            return runtime.requestRefresh(
                 .init(
                     refresh: refresh,
                     shouldDropWhileBusy: shouldDropWhileBusy,
@@ -1754,7 +1801,6 @@ import QuartzCore
                         || !dwindleHandler.dwindleAnimationByDisplay.isEmpty
                 )
             )
-            return
         }
 
         let refreshSnapshot = refreshPlanningSnapshot()
@@ -1772,6 +1818,24 @@ import QuartzCore
             )
         )
         applyRuntimeRefreshResult(result)
+        return result
+    }
+
+    private func scheduledWindowRemovalCycleId(from result: OrchestrationResult) -> RefreshCycleId? {
+        switch result.decision {
+        case let .refreshQueued(cycleId, kind),
+             let .refreshMerged(cycleId, kind):
+            return kind == .windowRemoval ? cycleId : nil
+
+        case let .refreshSuperseded(_, pendingCycleId):
+            let pending = result.snapshot.refresh.pendingRefresh
+            return pending?.kind == .windowRemoval && pending?.cycleId == pendingCycleId
+                ? pendingCycleId
+                : nil
+
+        default:
+            return nil
+        }
     }
 
     func applyRuntimeRefreshResult(_ result: OrchestrationResult) {
@@ -1789,11 +1853,16 @@ import QuartzCore
             storeRefreshPlanningSnapshot(snapshot)
         }
         synchronizeRefreshCycleCounter()
+        controller?.axEventHandler.reconcileFocusedRemovalActivationSuppression(
+            activeCycleId: snapshot.activeRefresh?.cycleId,
+            pendingCycleId: snapshot.pendingRefresh?.cycleId
+        )
 
         for action in actions {
             switch action {
             case let .cancelActiveRefresh(cycleId):
                 guard refreshPlanningSnapshot().activeRefresh?.cycleId == cycleId else { continue }
+                controller?.axEventHandler.cancelFocusedRemovalActivationSuppression(refreshCycleId: cycleId)
                 layoutState.activeRefreshTask?.cancel()
             case let .startRefresh(refresh):
                 startRefreshTask(refresh)

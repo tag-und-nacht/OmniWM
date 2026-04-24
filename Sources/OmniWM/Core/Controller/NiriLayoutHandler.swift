@@ -39,22 +39,6 @@ private func fixedViewportRemovalOldFrames(
     return adjusted
 }
 
-private func strictLeftSelectionOnRemoval(
-    removing nodeId: NodeId,
-    columns: [NiriContainer]
-) -> NodeId? {
-    guard let removedColumnIndex = columns.firstIndex(where: { column in
-        column.windowNodes.contains { $0.id == nodeId }
-    }),
-        removedColumnIndex > 0
-    else {
-        return nil
-    }
-
-    let leftColumn = columns[removedColumnIndex - 1]
-    return leftColumn.activeWindow?.id ?? leftColumn.windowNodes.first?.id
-}
-
 @MainActor final class NiriLayoutHandler {
     weak var controller: WMController?
 
@@ -524,9 +508,8 @@ private func strictLeftSelectionOnRemoval(
             ? CGFloat(0)
             : state.viewPosPixels(columns: preSyncColumns, gap: pass.gap)
         let removalAnchorNodeId = snapshot.removalSeed?.selectedRemovalAnchorNodeId
-        let removalFallbackNodeId = removalAnchorNodeId.flatMap {
-            strictLeftSelectionOnRemoval(removing: $0, columns: preSyncColumns)
-        }
+        let removalAnimationPolicy = snapshot.removalSeed?.animationPolicy ?? .ordinary
+        let suppressStaticRemovalCreateMotion = snapshot.removalSeed?.suppressesCoalescedCreateMotion ?? false
 
         let resetForSingleWindow = windowTokens.count == 1
             && pass.engine.effectiveSingleWindowAspectRatio(in: pass.wsId).ratio != nil
@@ -539,6 +522,8 @@ private func strictLeftSelectionOnRemoval(
             focusedToken: snapshot.preferredFocusToken,
             desiredTokens: windowTokens,
             removedNodeIds: snapshot.removalSeed?.removedNodeIds ?? [],
+            removalAnchorNodeId: removalAnchorNodeId,
+            removalRecoveryPolicy: snapshot.removalSeed?.topologyRecoveryPolicy ?? .none,
             resetForSingleWindow: resetForSingleWindow,
             motion: motion,
             isActiveWorkspace: snapshot.isActiveWorkspace,
@@ -580,39 +565,15 @@ private func strictLeftSelectionOnRemoval(
             gaps: pass.gap
         )
 
-        if removalAnchorNodeId != nil {
-            let columns = pass.engine.columns(in: pass.wsId)
-            let fallbackWindow = removalFallbackNodeId
-                .flatMap { pass.engine.findNode(by: $0) as? NiriWindow }
-            if let fallbackWindow,
-               let fallbackColumn = pass.engine.column(of: fallbackWindow),
-               let fallbackColumnIndex = pass.engine.columnIndex(of: fallbackColumn, in: pass.wsId)
-            {
-                state.activeColumnIndex = fallbackColumnIndex
-                state.selectedNodeId = fallbackWindow.id
-                pass.engine.activateWindow(fallbackWindow.id)
-            } else if !columns.isEmpty {
-                state.activeColumnIndex = state.activeColumnIndex.clamped(to: 0 ... (columns.count - 1))
-                state.selectedNodeId = nil
-            }
-
-            if !columns.isEmpty {
-                let activePosition = state.columnPlanningX(
-                    at: state.activeColumnIndex,
-                    columns: columns,
-                    gap: pass.gap
-                )
-                state.viewOffsetPixels = .static(preSyncViewPos - activePosition)
-            }
-        }
-        if snapshot.removalSeed?.animationPolicy == .staticViewportPreserving {
+        if removalAnimationPolicy == .staticViewportPreserving {
             state.cancelAnimation()
             pass.engine.cancelAllMotionAnimations(in: pass.wsId)
         }
 
         if !existingHandleIds.isEmpty,
            plan.effectKind == .addColumn,
-           plan.result.target_column_index >= 0
+           plan.result.target_column_index >= 0,
+           !suppressStaticRemovalCreateMotion
         {
             pass.engine.animateColumnsForAddition(
                 columnIndex: Int(plan.result.target_column_index),
@@ -636,7 +597,8 @@ private func strictLeftSelectionOnRemoval(
         }
         let newWindowToken: WindowToken? = if snapshot.hasCompletedInitialRefresh,
                                               snapshot.isActiveWorkspace,
-                                              plan.result.new_window_id != 0
+                                              plan.result.new_window_id != 0,
+                                              !suppressStaticRemovalCreateMotion
         {
             pass.engine.findWindow(in: plan, id: plan.result.new_window_id)?.token
         } else {
@@ -646,7 +608,7 @@ private func strictLeftSelectionOnRemoval(
             pass.engine.updateFocusTimestamp(for: selectedId)
         }
         if let removalSeed = snapshot.removalSeed,
-           let removedNodeId = removalSeed.removedNodeIds.first
+           let removedNodeId = removalSeed.diagnosticRemovedNodeId ?? removalSeed.removedNodeIds.first
         {
             let viewportAction: NiriRemovalViewportAction = if state.viewOffsetPixels.isAnimating {
                 .animated
@@ -684,7 +646,8 @@ private func strictLeftSelectionOnRemoval(
 
         if snapshot.hasCompletedInitialRefresh,
            snapshot.isActiveWorkspace,
-           !newTokens.isEmpty
+           !newTokens.isEmpty,
+           !suppressStaticRemovalCreateMotion
         {
             let reduceMotionScale: CGFloat = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0.25 : 1.0
             let appearOffset = 16.0 * reduceMotionScale
@@ -841,7 +804,7 @@ private func strictLeftSelectionOnRemoval(
         let willStartNiriScrollAnimation = motion.animationsEnabled
             && hasNiriScrollDirective(directives, workspaceId: pass.wsId)
         if let removalSeed = snapshot.removalSeed,
-           let removedNodeId = removalSeed.removedNodeIds.first
+           let removedNodeId = removalSeed.diagnosticRemovedNodeId ?? removalSeed.removedNodeIds.first
         {
             let diagnostic = NiriRemovalAnimationDiagnostic(
                 phase: .animationDirectives,

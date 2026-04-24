@@ -83,6 +83,7 @@ private func makeOrchestrationSnapshot(
 
 @Test func cancelledWindowRemovalPreservesRemovalPayloadBeforeRestart() {
     let workspaceId = WorkspaceDescriptor.ID()
+    let removedWindow = WindowToken(pid: 44, windowId: 55)
     let cancelledRefresh = makeOrchestrationRefresh(
         cycleId: 21,
         kind: .windowRemoval,
@@ -92,9 +93,11 @@ private func makeOrchestrationSnapshot(
             workspaceId: workspaceId,
             layoutType: .niri,
             removedNodeId: nil,
+            removedWindow: removedWindow,
             niriOldFrames: [:],
             niriRevealSide: .right,
-            shouldRecoverFocus: true
+            shouldRecoverFocus: true,
+            niriAnimationPolicy: .staticViewportPreserving
         )
     )
     let queuedRefresh = makeOrchestrationRefresh(
@@ -126,8 +129,47 @@ private func makeOrchestrationSnapshot(
     #expect(restartedRefresh.kind == .windowRemoval)
     #expect(restartedRefresh.windowRemovalPayloads.count == 1)
     #expect(restartedRefresh.windowRemovalPayloads.first?.niriRevealSide == .right)
+    #expect(restartedRefresh.windowRemovalPayloads.first?.removedWindow == removedWindow)
+    #expect(restartedRefresh.windowRemovalPayloads.first?.niriAnimationPolicy == .staticViewportPreserving)
     #expect(restartedRefresh.postLayoutAttachmentIds == [5])
     #expect(result.plan.actions.contains(.startRefresh(restartedRefresh)))
+}
+
+@Test func queuedWindowRemovalPreservesStaticRemovalMetadata() {
+    let workspaceId = WorkspaceDescriptor.ID()
+    let removedWindow = WindowToken(pid: 45, windowId: 56)
+    let payload = WindowRemovalPayload(
+        workspaceId: workspaceId,
+        layoutType: .niri,
+        removedNodeId: NodeId(),
+        removedWindow: removedWindow,
+        niriOldFrames: [:],
+        niriRevealSide: .left,
+        shouldRecoverFocus: true,
+        niriAnimationPolicy: .staticViewportPreserving
+    )
+    let refresh = makeOrchestrationRefresh(
+        cycleId: 30,
+        kind: .windowRemoval,
+        reason: .windowDestroyed,
+        windowRemovalPayload: payload
+    )
+
+    let result = OrchestrationCore.step(
+        snapshot: makeOrchestrationSnapshot(),
+        event: .refreshRequested(
+            .init(
+                refresh: refresh,
+                shouldDropWhileBusy: false,
+                isIncrementalRefreshInProgress: false,
+                isImmediateLayoutInProgress: false,
+                hasActiveAnimationRefreshes: false
+            )
+        )
+    )
+
+    #expect(result.decision == .refreshQueued(cycleId: 30, kind: .windowRemoval))
+    #expect(result.snapshot.refresh.activeRefresh?.windowRemovalPayloads == [payload])
 }
 
 @Test func focusRequestSupersedesExistingManagedRequest() {

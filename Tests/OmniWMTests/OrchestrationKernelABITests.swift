@@ -328,12 +328,18 @@ struct OrchestrationKernelABITests {
         let workspaceId = makeOrchestrationKernelUUID(high: 20, low: 21)
 
         let attachments: [UInt64] = [5]
+        let removedWindow = makeOrchestrationKernelToken(pid: 44, windowId: 55)
         let payloads = [
             omniwm_orchestration_window_removal_payload(
                 workspace_id: workspaceId,
                 removed_node_id: omniwm_uuid(),
+                removed_window: removedWindow,
                 layout_kind: UInt32(OMNIWM_ORCHESTRATION_LAYOUT_KIND_NIRI),
+                niri_animation_policy: UInt32(
+                    OMNIWM_ORCHESTRATION_NIRI_REMOVAL_ANIMATION_STATIC_VIEWPORT_PRESERVING
+                ),
                 has_removed_node_id: 0,
+                has_removed_window: 1,
                 should_recover_focus: 1,
                 niri_reveal_side: UInt8(OMNIWM_ORCHESTRATION_NIRI_REMOVAL_REVEAL_SIDE_RIGHT),
                 reserved0: 0,
@@ -402,6 +408,13 @@ struct OrchestrationKernelABITests {
                 output.snapshot_window_removal_payloads?.pointee.niri_reveal_side
                     == UInt8(OMNIWM_ORCHESTRATION_NIRI_REMOVAL_REVEAL_SIDE_RIGHT)
             )
+            #expect(
+                output.snapshot_window_removal_payloads?.pointee.niri_animation_policy
+                    == UInt32(OMNIWM_ORCHESTRATION_NIRI_REMOVAL_ANIMATION_STATIC_VIEWPORT_PRESERVING)
+            )
+            #expect(output.snapshot_window_removal_payloads?.pointee.has_removed_window == 1)
+            #expect(output.snapshot_window_removal_payloads?.pointee.removed_window.pid == removedWindow.pid)
+            #expect(output.snapshot_window_removal_payloads?.pointee.removed_window.window_id == removedWindow.window_id)
             #expect(output.action_count == 1)
             #expect(
                 actions.prefix(Int(output.action_count)).first?.kind

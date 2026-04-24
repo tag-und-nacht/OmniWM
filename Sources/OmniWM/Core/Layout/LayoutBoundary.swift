@@ -94,6 +94,11 @@ enum NiriRemovalAnimationPolicy: Equatable {
     }
 }
 
+enum NiriRemovalRecoveryPolicy: Equatable {
+    case none
+    case strictLeftPreserveViewport
+}
+
 enum NiriRemovalDiagnosticPhase: Equatable {
     case intake
     case topologyPlanning
@@ -170,6 +175,15 @@ struct NiriWindowRemovalSeed {
     let revealSide: NiriRemovalRevealSide?
     let shouldRecoverFocus: Bool
     var animationPolicy: NiriRemovalAnimationPolicy = .ordinary
+    var diagnosticRemovedNodeId: NodeId? = nil
+
+    var topologyRecoveryPolicy: NiriRemovalRecoveryPolicy {
+        selectedRemovalAnchorNodeId == nil ? .none : .strictLeftPreserveViewport
+    }
+
+    var suppressesCoalescedCreateMotion: Bool {
+        animationPolicy == .staticViewportPreserving && shouldRecoverFocus
+    }
 }
 
 struct NiriWorkspaceSnapshot {
