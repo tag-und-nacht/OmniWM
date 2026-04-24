@@ -93,6 +93,7 @@ private func makeOrchestrationSnapshot(
             layoutType: .niri,
             removedNodeId: nil,
             niriOldFrames: [:],
+            niriRevealSide: .right,
             shouldRecoverFocus: true
         )
     )
@@ -124,6 +125,7 @@ private func makeOrchestrationSnapshot(
     #expect(result.decision == .refreshCompleted(cycleId: 21, didComplete: false))
     #expect(restartedRefresh.kind == .windowRemoval)
     #expect(restartedRefresh.windowRemovalPayloads.count == 1)
+    #expect(restartedRefresh.windowRemovalPayloads.first?.niriRevealSide == .right)
     #expect(restartedRefresh.postLayoutAttachmentIds == [5])
     #expect(result.plan.actions.contains(.startRefresh(restartedRefresh)))
 }
@@ -544,6 +546,7 @@ private func makeOrchestrationSnapshot(
             layoutType: .niri,
             removedNodeId: nil,
             niriOldFrames: [:],
+            niriRevealSide: nil,
             shouldRecoverFocus: true
         )
         let result = OrchestrationCore.step(

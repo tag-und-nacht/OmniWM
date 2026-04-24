@@ -49,9 +49,25 @@ struct WorkspaceRefreshInput {
     let isActiveWorkspace: Bool
 }
 
+enum NiriRemovalRevealSide: Equatable {
+    case left
+    case right
+
+    static func closestHorizontalEdge(
+        to frame: CGRect,
+        in viewport: CGRect
+    ) -> NiriRemovalRevealSide {
+        let viewportMidX = viewport.midX
+        return frame.midX <= viewportMidX ? .left : .right
+    }
+}
+
 struct NiriWindowRemovalSeed {
     let removedNodeIds: [NodeId]
     let oldFrames: [WindowToken: CGRect]
+    let selectedRemovalAnchorNodeId: NodeId?
+    let revealSide: NiriRemovalRevealSide?
+    let shouldRecoverFocus: Bool
 }
 
 struct NiriWorkspaceSnapshot {
@@ -148,6 +164,11 @@ enum AnimationDirective {
     case updateTabbedOverlays
 }
 
+enum LayoutFocusIntent {
+    case focusWindow(token: WindowToken)
+    case completeFocusedRemovalRecovery(workspaceId: WorkspaceDescriptor.ID, target: WindowToken?)
+}
+
 struct RefreshVisibilityEffect {
     let activeWorkspaceIds: Set<WorkspaceDescriptor.ID>
 }
@@ -176,6 +197,7 @@ struct WorkspaceLayoutPlan {
     var sessionPatch: WorkspaceSessionPatch
     var diff: WorkspaceLayoutDiff
     var animationDirectives: [AnimationDirective] = []
+    var focusIntents: [LayoutFocusIntent] = []
     var nativeFullscreenRestoreFinalizeTokens: [WindowToken] = []
     var managedRestoreMaterialStateChanges: [ManagedRestoreMaterialStateChange] = []
     var persistManagedRestoreSnapshots: Bool = true

@@ -117,6 +117,18 @@ private func hasActivationDirective(
     }
 }
 
+private func hasFocusIntent(
+    _ intents: [LayoutFocusIntent],
+    token: WindowToken
+) -> Bool {
+    intents.contains { intent in
+        if case let .focusWindow(candidate) = intent {
+            return candidate == token
+        }
+        return false
+    }
+}
+
 private func hasHiddenVisibilityChange(_ changes: [LayoutVisibilityChange]) -> Bool {
     changes.contains { change in
         if case .hide = change {
@@ -6380,7 +6392,10 @@ private func makeCenteredCrossMonitorFixture(
             removalSeeds: [
                 workspaceId: NiriWindowRemovalSeed(
                     removedNodeIds: [removedNodeId],
-                    oldFrames: oldFrames
+                    oldFrames: oldFrames,
+                    selectedRemovalAnchorNodeId: nil,
+                    revealSide: nil,
+                    shouldRecoverFocus: false
                 )
             ]
         )
@@ -6401,6 +6416,352 @@ private func makeCenteredCrossMonitorFixture(
         #expect(plan.sessionPatch.rememberedFocusToken == survivingToken)
         #expect(plan.sessionPatch.viewportState?.selectedNodeId == survivingNodeId)
         #expect(hasNiriScrollDirective(plan.animationDirectives, workspaceId: workspaceId))
+    }
+
+    @Test @MainActor func focusedRemovalSeedOverridesSameAppPreemptedSelection() async throws {
+        let controller = makeLayoutPlanTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing monitor or active workspace for Niri focused-removal regression test")
+            return
+        }
+
+        controller.enableNiriLayout(maxWindowsPerColumn: 1)
+        await waitForLayoutPlanRefreshWork(on: controller)
+        controller.syncMonitorsToNiriEngine()
+
+        let sameAppPid: pid_t = 7_601
+        for windowId in 7601 ... 7604 {
+            _ = addLayoutPlanTestWindow(
+                on: controller,
+                workspaceId: workspaceId,
+                windowId: windowId,
+                pid: sameAppPid
+            )
+        }
+
+        let initialPlans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
+            activeWorkspaces: [workspaceId]
+        )
+        controller.layoutRefreshController.executeLayoutPlans(initialPlans)
+
+        guard let engine = controller.niriEngine
+        else {
+            Issue.record("Expected Niri engine for focused-removal regression test")
+            return
+        }
+        let columns = engine.columns(in: workspaceId)
+        guard columns.count >= 4,
+              let displacedNode = columns.first?.windowNodes.first,
+              let adjacentLeftNode = columns.dropLast().last?.windowNodes.first,
+              let removedNode = columns.last?.windowNodes.first
+        else {
+            Issue.record("Expected four Niri columns for focused-removal regression test")
+            return
+        }
+        let displacedToken = displacedNode.token
+        let adjacentLeftToken = adjacentLeftNode.token
+        let removedToken = removedNode.token
+
+        controller.workspaceManager.withNiriViewportState(for: workspaceId) { state in
+            state.selectedNodeId = displacedNode.id
+            state.activeColumnIndex = 0
+        }
+        _ = controller.workspaceManager.setManagedFocus(
+            displacedToken,
+            in: workspaceId,
+            onMonitor: monitor.id
+        )
+        let gap = CGFloat(controller.workspaceManager.gaps)
+        let preRemovalViewStart = planningViewportStart(
+            for: controller.workspaceManager.niriViewportState(for: workspaceId),
+            columns: columns,
+            gap: gap
+        )
+        let oldFrames = engine.captureWindowFrames(in: workspaceId)
+
+        _ = controller.workspaceManager.removeWindow(
+            pid: removedToken.pid,
+            windowId: removedToken.windowId
+        )
+
+        let plans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
+            activeWorkspaces: [workspaceId],
+            useScrollAnimationPath: true,
+            removalSeeds: [
+                workspaceId: NiriWindowRemovalSeed(
+                    removedNodeIds: [removedNode.id],
+                    oldFrames: oldFrames,
+                    selectedRemovalAnchorNodeId: removedNode.id,
+                    revealSide: .right,
+                    shouldRecoverFocus: true
+                )
+            ]
+        )
+        guard let plan = plans.first else {
+            Issue.record("Expected Niri layout plan after focused removal")
+            return
+        }
+
+        #expect(plan.sessionPatch.rememberedFocusToken == adjacentLeftToken)
+        #expect(plan.sessionPatch.viewportState?.selectedNodeId == adjacentLeftNode.id)
+        #expect(hasFocusIntent(plan.focusIntents, token: adjacentLeftToken))
+        if let postState = plan.sessionPatch.viewportState {
+            let postViewStart = planningViewportStart(
+                for: postState,
+                columns: engine.columns(in: workspaceId),
+                gap: gap
+            )
+            #expect(abs(postViewStart - preRemovalViewStart) < 0.6)
+            if case .spring = postState.viewOffsetPixels {
+                Issue.record("Focused removal should not create a viewport spring")
+            }
+        } else {
+            Issue.record("Expected viewport patch after focused removal")
+        }
+    }
+
+    @Test @MainActor func focusedRemovalSeedDoesNotFallbackRightWhenNoLeftColumnExists() async throws {
+        let controller = makeLayoutPlanTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing monitor or active workspace for strict-left no-fallback regression test")
+            return
+        }
+
+        controller.enableNiriLayout(maxWindowsPerColumn: 1)
+        await waitForLayoutPlanRefreshWork(on: controller)
+        controller.syncMonitorsToNiriEngine()
+
+        let sameAppPid: pid_t = 7_651
+        for windowId in 7651 ... 7653 {
+            _ = addLayoutPlanTestWindow(
+                on: controller,
+                workspaceId: workspaceId,
+                windowId: windowId,
+                pid: sameAppPid
+            )
+        }
+
+        let initialPlans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
+            activeWorkspaces: [workspaceId]
+        )
+        controller.layoutRefreshController.executeLayoutPlans(initialPlans)
+
+        guard let engine = controller.niriEngine else {
+            Issue.record("Expected Niri engine for strict-left no-fallback regression test")
+            return
+        }
+        let columns = engine.columns(in: workspaceId)
+        guard columns.count >= 3,
+              let removedNode = columns.first?.windowNodes.first,
+              let rightNode = columns.dropFirst().first?.windowNodes.first
+        else {
+            Issue.record("Expected three Niri columns for strict-left no-fallback regression test")
+            return
+        }
+
+        controller.workspaceManager.withNiriViewportState(for: workspaceId) { state in
+            state.selectedNodeId = removedNode.id
+            state.activeColumnIndex = 0
+        }
+        let oldFrames = engine.captureWindowFrames(in: workspaceId)
+
+        _ = controller.workspaceManager.removeWindow(
+            pid: removedNode.token.pid,
+            windowId: removedNode.token.windowId
+        )
+
+        let plans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
+            activeWorkspaces: [workspaceId],
+            useScrollAnimationPath: true,
+            removalSeeds: [
+                workspaceId: NiriWindowRemovalSeed(
+                    removedNodeIds: [removedNode.id],
+                    oldFrames: oldFrames,
+                    selectedRemovalAnchorNodeId: removedNode.id,
+                    revealSide: .left,
+                    shouldRecoverFocus: true
+                )
+            ]
+        )
+        guard let plan = plans.first else {
+            Issue.record("Expected Niri layout plan after strict-left no-fallback removal")
+            return
+        }
+
+        #expect(plan.sessionPatch.rememberedFocusToken == nil)
+        #expect(plan.sessionPatch.viewportState?.selectedNodeId == nil)
+        #expect(!hasFocusIntent(plan.focusIntents, token: rightNode.token))
+        #expect(plan.focusIntents.contains { intent in
+            if case .completeFocusedRemovalRecovery = intent {
+                return true
+            }
+            return false
+        })
+    }
+
+    @Test @MainActor func coalescedFocusedRemovalsUseLatestRecoveryAnchor() async throws {
+        let controller = makeLayoutPlanTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing monitor or active workspace for coalesced focused-removal regression test")
+            return
+        }
+
+        controller.enableNiriLayout(maxWindowsPerColumn: 1)
+        await waitForLayoutPlanRefreshWork(on: controller)
+        controller.syncMonitorsToNiriEngine()
+
+        let sameAppPid: pid_t = 7_671
+        for windowId in 7671 ... 7675 {
+            _ = addLayoutPlanTestWindow(
+                on: controller,
+                workspaceId: workspaceId,
+                windowId: windowId,
+                pid: sameAppPid
+            )
+        }
+
+        let initialPlans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
+            activeWorkspaces: [workspaceId]
+        )
+        controller.layoutRefreshController.executeLayoutPlans(initialPlans)
+
+        guard let engine = controller.niriEngine else {
+            Issue.record("Expected Niri engine for coalesced focused-removal regression test")
+            return
+        }
+        let columns = engine.columns(in: workspaceId)
+        guard columns.count >= 5,
+              let firstRemovedNode = columns.first?.windowNodes.first,
+              let latestLeftNode = columns.dropLast().last?.windowNodes.first,
+              let latestRemovedNode = columns.last?.windowNodes.first
+        else {
+            Issue.record("Expected five Niri columns for coalesced focused-removal regression test")
+            return
+        }
+        let oldFrames = engine.captureWindowFrames(in: workspaceId)
+
+        _ = controller.workspaceManager.removeWindow(
+            pid: firstRemovedNode.token.pid,
+            windowId: firstRemovedNode.token.windowId
+        )
+        _ = controller.workspaceManager.removeWindow(
+            pid: latestRemovedNode.token.pid,
+            windowId: latestRemovedNode.token.windowId
+        )
+
+        let executionPlan = try await controller.layoutRefreshController
+            .buildWindowRemovalExecutionPlanForTests(
+                payloads: [
+                    WindowRemovalPayload(
+                        workspaceId: workspaceId,
+                        layoutType: .niri,
+                        removedNodeId: firstRemovedNode.id,
+                        niriOldFrames: oldFrames,
+                        niriRevealSide: .left,
+                        shouldRecoverFocus: true
+                    ),
+                    WindowRemovalPayload(
+                        workspaceId: workspaceId,
+                        layoutType: .niri,
+                        removedNodeId: latestRemovedNode.id,
+                        niriOldFrames: oldFrames,
+                        niriRevealSide: .right,
+                        shouldRecoverFocus: true
+                    )
+                ]
+            )
+        guard let plan = executionPlan.workspacePlans.first else {
+            Issue.record("Expected coalesced Niri removal plan")
+            return
+        }
+
+        #expect(plan.sessionPatch.rememberedFocusToken == latestLeftNode.token)
+        #expect(plan.sessionPatch.viewportState?.selectedNodeId == latestLeftNode.id)
+        #expect(hasFocusIntent(plan.focusIntents, token: latestLeftNode.token))
+    }
+
+    @Test @MainActor func inactiveWorkspaceFocusedRemovalDoesNotEmitRecoveryFocusDirective() async throws {
+        let controller = makeLayoutPlanTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let activeWorkspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id,
+              let inactiveWorkspaceId = controller.workspaceManager.workspaceId(for: "2", createIfMissing: false)
+        else {
+            Issue.record("Missing same-monitor workspaces for inactive focused-removal regression test")
+            return
+        }
+        #expect(activeWorkspaceId != inactiveWorkspaceId)
+
+        controller.enableNiriLayout(maxWindowsPerColumn: 1)
+        await waitForLayoutPlanRefreshWork(on: controller)
+        controller.syncMonitorsToNiriEngine()
+
+        let sameAppPid: pid_t = 7_701
+        for windowId in 7701 ... 7703 {
+            _ = addLayoutPlanTestWindow(
+                on: controller,
+                workspaceId: inactiveWorkspaceId,
+                windowId: windowId,
+                pid: sameAppPid
+            )
+        }
+
+        let initialPlans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
+            activeWorkspaces: [inactiveWorkspaceId]
+        )
+        controller.layoutRefreshController.executeLayoutPlans(initialPlans)
+
+        guard let engine = controller.niriEngine else {
+            Issue.record("Expected Niri engine for inactive focused-removal regression test")
+            return
+        }
+        let columns = engine.columns(in: inactiveWorkspaceId)
+        guard columns.count >= 3,
+              let displacedNode = columns.first?.windowNodes.first,
+              let adjacentLeftNode = columns.dropLast().last?.windowNodes.first,
+              let removedNode = columns.last?.windowNodes.first
+        else {
+            Issue.record("Expected three Niri columns for inactive focused-removal regression test")
+            return
+        }
+
+        controller.workspaceManager.withNiriViewportState(for: inactiveWorkspaceId) { state in
+            state.selectedNodeId = displacedNode.id
+            state.activeColumnIndex = 0
+        }
+        let oldFrames = engine.captureWindowFrames(in: inactiveWorkspaceId)
+
+        _ = controller.workspaceManager.removeWindow(
+            pid: removedNode.token.pid,
+            windowId: removedNode.token.windowId
+        )
+
+        let plans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
+            activeWorkspaces: [inactiveWorkspaceId],
+            useScrollAnimationPath: true,
+            removalSeeds: [
+                inactiveWorkspaceId: NiriWindowRemovalSeed(
+                    removedNodeIds: [removedNode.id],
+                    oldFrames: oldFrames,
+                    selectedRemovalAnchorNodeId: removedNode.id,
+                    revealSide: .right,
+                    shouldRecoverFocus: true
+                )
+            ]
+        )
+        guard let plan = plans.first else {
+            Issue.record("Expected a Niri layout plan after inactive focused removal")
+            return
+        }
+
+        #expect(plan.sessionPatch.rememberedFocusToken == adjacentLeftNode.token)
+        #expect(plan.sessionPatch.viewportState?.selectedNodeId == adjacentLeftNode.id)
+        #expect(plan.focusIntents.isEmpty)
     }
 
     @Test @MainActor func nonFocusedWorkspacePlanDoesNotClearFocusedBorder() async throws {

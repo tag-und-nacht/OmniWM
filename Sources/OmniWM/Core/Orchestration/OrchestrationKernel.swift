@@ -293,8 +293,8 @@ enum OrchestrationKernel {
             layout_kind: rawLayoutKind(payload.layoutType),
             has_removed_node_id: payload.removedNodeId == nil ? 0 : 1,
             should_recover_focus: payload.shouldRecoverFocus ? 1 : 0,
+            niri_reveal_side: rawNiriRemovalRevealSide(payload.niriRevealSide),
             reserved0: 0,
-            reserved1: 0,
             old_frame_offset: frameRange.offset,
             old_frame_count: frameRange.count
         )
@@ -427,6 +427,7 @@ enum OrchestrationKernel {
             layoutType: layoutType(rawValue: payload.layout_kind),
             removedNodeId: payload.has_removed_node_id == 0 ? nil : NodeId(uuid: decode(uuid: payload.removed_node_id)),
             niriOldFrames: Dictionary(uniqueKeysWithValues: frameRecords.map { (decode(token: $0.token), decode(rect: $0.frame)) }),
+            niriRevealSide: niriRemovalRevealSide(rawValue: payload.niri_reveal_side),
             shouldRecoverFocus: payload.should_recover_focus != 0
         )
     }
@@ -699,6 +700,23 @@ enum OrchestrationKernel {
         case UInt32(OMNIWM_ORCHESTRATION_LAYOUT_KIND_NIRI): .niri
         case UInt32(OMNIWM_ORCHESTRATION_LAYOUT_KIND_DWINDLE): .dwindle
         default: KernelContract.require(nil as LayoutType?, "Unknown orchestration layout kind \(rawValue)")
+        }
+    }
+
+    private static func rawNiriRemovalRevealSide(_ side: NiriRemovalRevealSide?) -> UInt8 {
+        switch side {
+        case nil: UInt8(OMNIWM_ORCHESTRATION_NIRI_REMOVAL_REVEAL_SIDE_NONE)
+        case .some(.left): UInt8(OMNIWM_ORCHESTRATION_NIRI_REMOVAL_REVEAL_SIDE_LEFT)
+        case .some(.right): UInt8(OMNIWM_ORCHESTRATION_NIRI_REMOVAL_REVEAL_SIDE_RIGHT)
+        }
+    }
+
+    private static func niriRemovalRevealSide(rawValue: UInt8) -> NiriRemovalRevealSide? {
+        switch rawValue {
+        case UInt8(OMNIWM_ORCHESTRATION_NIRI_REMOVAL_REVEAL_SIDE_NONE): nil
+        case UInt8(OMNIWM_ORCHESTRATION_NIRI_REMOVAL_REVEAL_SIDE_LEFT): .left
+        case UInt8(OMNIWM_ORCHESTRATION_NIRI_REMOVAL_REVEAL_SIDE_RIGHT): .right
+        default: KernelContract.require(nil as NiriRemovalRevealSide?, "Unknown Niri removal reveal side \(rawValue)")
         }
     }
 

@@ -15,6 +15,7 @@ struct WindowRemovalPayload: Equatable {
     let layoutType: LayoutType
     let removedNodeId: NodeId?
     let niriOldFrames: [WindowToken: CGRect]
+    let niriRevealSide: NiriRemovalRevealSide?
     let shouldRecoverFocus: Bool
 }
 

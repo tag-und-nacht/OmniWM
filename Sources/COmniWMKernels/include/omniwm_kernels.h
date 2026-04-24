@@ -1581,6 +1581,12 @@ enum {
 };
 
 enum {
+    OMNIWM_ORCHESTRATION_NIRI_REMOVAL_REVEAL_SIDE_NONE = 0,
+    OMNIWM_ORCHESTRATION_NIRI_REMOVAL_REVEAL_SIDE_LEFT = 1,
+    OMNIWM_ORCHESTRATION_NIRI_REMOVAL_REVEAL_SIDE_RIGHT = 2,
+};
+
+enum {
     OMNIWM_ORCHESTRATION_REFRESH_KIND_RELAYOUT = 0,
     OMNIWM_ORCHESTRATION_REFRESH_KIND_IMMEDIATE_RELAYOUT = 1,
     OMNIWM_ORCHESTRATION_REFRESH_KIND_VISIBILITY_REFRESH = 2,
@@ -1692,8 +1698,8 @@ typedef struct {
     uint32_t layout_kind;
     uint8_t has_removed_node_id;
     uint8_t should_recover_focus;
+    uint8_t niri_reveal_side;
     uint8_t reserved0;
-    uint8_t reserved1;
     size_t old_frame_offset;
     size_t old_frame_count;
 } omniwm_orchestration_window_removal_payload;

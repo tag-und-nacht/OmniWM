@@ -335,8 +335,8 @@ struct OrchestrationKernelABITests {
                 layout_kind: UInt32(OMNIWM_ORCHESTRATION_LAYOUT_KIND_NIRI),
                 has_removed_node_id: 0,
                 should_recover_focus: 1,
+                niri_reveal_side: UInt8(OMNIWM_ORCHESTRATION_NIRI_REMOVAL_REVEAL_SIDE_RIGHT),
                 reserved0: 0,
-                reserved1: 0,
                 old_frame_offset: 0,
                 old_frame_count: 0
             )
@@ -398,6 +398,10 @@ struct OrchestrationKernelABITests {
             )
             #expect(output.snapshot.refresh.active_refresh.post_layout_attachment_count == 1)
             #expect(output.snapshot.refresh.active_refresh.window_removal_payload_count == 1)
+            #expect(
+                output.snapshot_window_removal_payloads?.pointee.niri_reveal_side
+                    == UInt8(OMNIWM_ORCHESTRATION_NIRI_REMOVAL_REVEAL_SIDE_RIGHT)
+            )
             #expect(output.action_count == 1)
             #expect(
                 actions.prefix(Int(output.action_count)).first?.kind

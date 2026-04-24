@@ -13,6 +13,10 @@ const layout_default: u32 = 0;
 const layout_niri: u32 = 1;
 const layout_dwindle: u32 = 2;
 
+const niri_reveal_side_none: u8 = 0;
+const niri_reveal_side_left: u8 = 1;
+const niri_reveal_side_right: u8 = 2;
+
 const refresh_relayout: u32 = 0;
 const refresh_immediate_relayout: u32 = 1;
 const refresh_visibility: u32 = 2;
@@ -106,8 +110,8 @@ const WindowRemovalPayload = extern struct {
     layout_kind: u32,
     has_removed_node_id: u8,
     should_recover_focus: u8,
+    niri_reveal_side: u8,
     reserved0: u8,
-    reserved1: u8,
     old_frame_offset: usize,
     old_frame_count: usize,
 };
@@ -392,6 +396,12 @@ fn isLayoutKind(value: u32) bool {
     return value == layout_default or
         value == layout_niri or
         value == layout_dwindle;
+}
+
+fn isNiriRemovalRevealSide(value: u8) bool {
+    return value == niri_reveal_side_none or
+        value == niri_reveal_side_left or
+        value == niri_reveal_side_right;
 }
 
 fn isEventKind(value: u32) bool {
@@ -979,7 +989,8 @@ fn encodeManagedRequest(value: ManagedRequestValue) ManagedRequest {
 fn validateWindowRemovalPayload(raw: WindowRemovalPayload, input_ctx: *const InputContext) !void {
     if (!isLayoutKind(raw.layout_kind) or
         !isFlag(raw.has_removed_node_id) or
-        !isFlag(raw.should_recover_focus))
+        !isFlag(raw.should_recover_focus) or
+        !isNiriRemovalRevealSide(raw.niri_reveal_side))
     {
         return error.InvalidArgument;
     }
@@ -2667,8 +2678,8 @@ test "orchestration step preserves cancelled window removal before restart" {
         .layout_kind = layout_niri,
         .has_removed_node_id = 0,
         .should_recover_focus = 1,
+        .niri_reveal_side = niri_reveal_side_right,
         .reserved0 = 0,
-        .reserved1 = 0,
         .old_frame_offset = 0,
         .old_frame_count = 0,
     };
@@ -2734,6 +2745,7 @@ test "orchestration step preserves cancelled window removal before restart" {
     try std.testing.expectEqual(refresh_window_removal, output.snapshot.refresh.active_refresh.kind);
     try std.testing.expectEqual(@as(usize, 1), output.snapshot.refresh.active_refresh.post_layout_attachment_count);
     try std.testing.expectEqual(@as(usize, 1), output.snapshot.refresh.active_refresh.window_removal_payload_count);
+    try std.testing.expectEqual(niri_reveal_side_right, output.snapshot_window_removal_payloads.?[0].niri_reveal_side);
     try std.testing.expectEqual(@as(usize, 1), output.action_count);
     try std.testing.expectEqual(action_start_refresh, output.actions.?[0].kind);
 }
