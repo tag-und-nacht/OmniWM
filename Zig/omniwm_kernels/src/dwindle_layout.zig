@@ -4,6 +4,7 @@ const std = @import("std");
 const kernel_ok: i32 = 0;
 const kernel_invalid_argument: i32 = 1;
 const kernel_allocation_failed: i32 = 2;
+const kernel_buffer_too_small: i32 = 3;
 const node_kind_split: u32 = 0;
 const node_kind_leaf: u32 = 1;
 const orientation_horizontal: u32 = 0;
@@ -506,8 +507,11 @@ pub export fn omniwm_dwindle_solve(
     if (node_count == 0) {
         return kernel_ok;
     }
-    if (input_ptr == null or nodes_ptr == null or outputs_ptr == null or output_count < node_count) {
+    if (input_ptr == null or nodes_ptr == null or outputs_ptr == null) {
         return kernel_invalid_argument;
+    }
+    if (output_count < node_count) {
+        return kernel_buffer_too_small;
     }
 
     const input = input_ptr[0];

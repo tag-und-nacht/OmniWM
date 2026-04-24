@@ -2,7 +2,6 @@
 import Foundation
 
 struct CanonicalTOMLConfig: Codable, Equatable {
-    var version: Int
     var general: General
     var focus: Focus
     var mouseWarp: MouseWarp
@@ -23,6 +22,7 @@ struct CanonicalTOMLConfig: Codable, Equatable {
     var monitorOrientationOverrides: [MonitorOrientationSettings]
     var monitorNiriOverrides: [MonitorNiriSettings]
     var monitorDwindleOverrides: [MonitorDwindleSettings]
+    var capabilityOverrides: [WindowCapabilityProfileTOMLOverride]? = nil
 
     struct General: Codable, Equatable {
         var hotkeysEnabled: Bool
@@ -162,7 +162,6 @@ struct CanonicalTOMLConfig: Codable, Equatable {
 
 extension CanonicalTOMLConfig {
     init(export: SettingsExport) {
-        version = export.version
         general = General(
             hotkeysEnabled: export.hotkeysEnabled,
             defaultLayoutType: export.defaultLayoutType,
@@ -281,6 +280,7 @@ extension CanonicalTOMLConfig {
         hotkeys = export.hotkeyBindings
         workspaces = export.workspaceConfigurations
         appRules = export.appRules
+        capabilityOverrides = export.capabilityOverrides.isEmpty ? nil : export.capabilityOverrides
         monitorBarOverrides = export.monitorBarSettings
         monitorOrientationOverrides = export.monitorOrientationSettings
         monitorNiriOverrides = export.monitorNiriSettings
@@ -292,7 +292,6 @@ extension CanonicalTOMLConfig {
             QuakeTerminalFrameExport(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
         }
         return SettingsExport(
-            version: version,
             hotkeysEnabled: general.hotkeysEnabled,
             focusFollowsMouse: focus.followsMouse,
             moveMouseToFocusedWindow: focus.moveMouseToFocusedWindow,
@@ -379,7 +378,8 @@ extension CanonicalTOMLConfig {
             quakeTerminalMonitorMode: quakeTerminal.monitorMode,
             quakeTerminalUseCustomFrame: quakeTerminal.useCustomFrame,
             quakeTerminalCustomFrame: customFrame,
-            appearanceMode: appearance.mode
+            appearanceMode: appearance.mode,
+            capabilityOverrides: capabilityOverrides ?? []
         )
     }
 }

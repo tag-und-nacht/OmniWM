@@ -74,7 +74,6 @@ enum IPCRuleProjection {
             titleRegex: normalized.titleRegex,
             axRole: normalized.axRole,
             axSubrole: normalized.axSubrole,
-            manage: nil,
             layout: windowRuleLayout(from: normalized.layout),
             assignToWorkspace: normalized.assignToWorkspace,
             minWidth: normalized.minWidth,

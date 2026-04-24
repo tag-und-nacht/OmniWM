@@ -1,0 +1,236 @@
+// SPDX-License-Identifier: GPL-2.0-only
+//
+// ABI-07 (Phase 06): generated Zig parity assertions for the kernel ABI.
+//
+// GENERATED FILE — do not edit by hand. Regenerate with:
+//
+//     make regen-kernel-abi-goldens
+//
+// Imports `omniwm_kernels.h` via `@cImport` and pins every typedef's
+// `@sizeOf` / `@alignOf` against the schema's literal goldens at
+// `comptime`. Wired into `root.zig` so `make kernels-test` enforces the
+// parity check on every Zig build.
+
+const std = @import("std");
+const c = @cImport({
+    @cInclude("omniwm_kernels.h");
+});
+
+pub const ABI_SCHEMA_VERSION: u32 = 1;
+
+comptime {
+    std.debug.assert(@sizeOf(c.omniwm_axis_input) == 40);
+    std.debug.assert(@alignOf(c.omniwm_axis_input) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_axis_output) == 16);
+    std.debug.assert(@alignOf(c.omniwm_axis_output) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_dwindle_layout_input) == 160);
+    std.debug.assert(@alignOf(c.omniwm_dwindle_layout_input) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_dwindle_node_input) == 48);
+    std.debug.assert(@alignOf(c.omniwm_dwindle_node_input) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_dwindle_node_frame) == 40);
+    std.debug.assert(@alignOf(c.omniwm_dwindle_node_frame) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_niri_layout_input) == 144);
+    std.debug.assert(@alignOf(c.omniwm_niri_layout_input) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_niri_container_input) == 40);
+    std.debug.assert(@alignOf(c.omniwm_niri_container_input) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_niri_window_input) == 56);
+    std.debug.assert(@alignOf(c.omniwm_niri_window_input) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_niri_hidden_placement_monitor) == 64);
+    std.debug.assert(@alignOf(c.omniwm_niri_hidden_placement_monitor) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_niri_container_output) == 64);
+    std.debug.assert(@alignOf(c.omniwm_niri_container_output) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_niri_window_output) == 80);
+    std.debug.assert(@alignOf(c.omniwm_niri_window_output) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_niri_topology_column_input) == 32);
+    std.debug.assert(@alignOf(c.omniwm_niri_topology_column_input) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_niri_topology_window_input) == 16);
+    std.debug.assert(@alignOf(c.omniwm_niri_topology_window_input) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_geometry_snap_target_result) == 16);
+    std.debug.assert(@alignOf(c.omniwm_geometry_snap_target_result) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_niri_topology_input) == 160);
+    std.debug.assert(@alignOf(c.omniwm_niri_topology_input) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_niri_topology_column_output) == 24);
+    std.debug.assert(@alignOf(c.omniwm_niri_topology_column_output) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_niri_topology_window_output) == 8);
+    std.debug.assert(@alignOf(c.omniwm_niri_topology_window_output) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_niri_topology_result) == 120);
+    std.debug.assert(@alignOf(c.omniwm_niri_topology_result) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_overview_context) == 120);
+    std.debug.assert(@alignOf(c.omniwm_overview_context) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_overview_workspace_input) == 16);
+    std.debug.assert(@alignOf(c.omniwm_overview_workspace_input) == 4);
+    std.debug.assert(@sizeOf(c.omniwm_overview_generic_window_input) == 48);
+    std.debug.assert(@alignOf(c.omniwm_overview_generic_window_input) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_overview_niri_tile_input) == 8);
+    std.debug.assert(@alignOf(c.omniwm_overview_niri_tile_input) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_overview_niri_column_input) == 40);
+    std.debug.assert(@alignOf(c.omniwm_overview_niri_column_input) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_overview_section_output) == 136);
+    std.debug.assert(@alignOf(c.omniwm_overview_section_output) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_overview_generic_window_output) == 40);
+    std.debug.assert(@alignOf(c.omniwm_overview_generic_window_output) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_overview_niri_tile_output) == 40);
+    std.debug.assert(@alignOf(c.omniwm_overview_niri_tile_output) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_overview_niri_column_output) == 48);
+    std.debug.assert(@alignOf(c.omniwm_overview_niri_column_output) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_overview_drop_zone_output) == 40);
+    std.debug.assert(@alignOf(c.omniwm_overview_drop_zone_output) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_overview_result) == 64);
+    std.debug.assert(@alignOf(c.omniwm_overview_result) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_restore_snapshot) == 40);
+    std.debug.assert(@alignOf(c.omniwm_restore_snapshot) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_restore_monitor) == 56);
+    std.debug.assert(@alignOf(c.omniwm_restore_monitor) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_restore_assignment) == 8);
+    std.debug.assert(@alignOf(c.omniwm_restore_assignment) == 4);
+    std.debug.assert(@sizeOf(c.omniwm_point) == 16);
+    std.debug.assert(@alignOf(c.omniwm_point) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_rect) == 32);
+    std.debug.assert(@alignOf(c.omniwm_rect) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_uuid) == 16);
+    std.debug.assert(@alignOf(c.omniwm_uuid) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_window_token) == 16);
+    std.debug.assert(@alignOf(c.omniwm_window_token) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_logical_window_id) == 8);
+    std.debug.assert(@alignOf(c.omniwm_logical_window_id) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_restore_string_ref) == 16);
+    std.debug.assert(@alignOf(c.omniwm_restore_string_ref) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_restore_monitor_key) == 64);
+    std.debug.assert(@alignOf(c.omniwm_restore_monitor_key) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_restore_monitor_context) == 112);
+    std.debug.assert(@alignOf(c.omniwm_restore_monitor_context) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_restore_event_input) == 40);
+    std.debug.assert(@alignOf(c.omniwm_restore_event_input) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_restore_event_output) == 16);
+    std.debug.assert(@alignOf(c.omniwm_restore_event_output) == 4);
+    std.debug.assert(@sizeOf(c.omniwm_restore_visible_workspace_snapshot) == 80);
+    std.debug.assert(@alignOf(c.omniwm_restore_visible_workspace_snapshot) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_restore_disconnected_cache_entry) == 80);
+    std.debug.assert(@alignOf(c.omniwm_restore_disconnected_cache_entry) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_restore_workspace_monitor_fact) == 32);
+    std.debug.assert(@alignOf(c.omniwm_restore_workspace_monitor_fact) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_restore_topology_input) == 144);
+    std.debug.assert(@alignOf(c.omniwm_restore_topology_input) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_restore_visible_assignment) == 24);
+    std.debug.assert(@alignOf(c.omniwm_restore_visible_assignment) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_restore_disconnected_cache_output_entry) == 24);
+    std.debug.assert(@alignOf(c.omniwm_restore_disconnected_cache_output_entry) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_restore_topology_output) == 64);
+    std.debug.assert(@alignOf(c.omniwm_restore_topology_output) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_restore_persisted_key) == 80);
+    std.debug.assert(@alignOf(c.omniwm_restore_persisted_key) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_restore_persisted_entry_snapshot) == 224);
+    std.debug.assert(@alignOf(c.omniwm_restore_persisted_entry_snapshot) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_restore_persisted_hydration_input) == 152);
+    std.debug.assert(@alignOf(c.omniwm_restore_persisted_hydration_input) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_restore_persisted_hydration_output) == 80);
+    std.debug.assert(@alignOf(c.omniwm_restore_persisted_hydration_output) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_restore_floating_rescue_candidate) == 168);
+    std.debug.assert(@alignOf(c.omniwm_restore_floating_rescue_candidate) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_restore_floating_rescue_operation) == 40);
+    std.debug.assert(@alignOf(c.omniwm_restore_floating_rescue_operation) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_restore_floating_rescue_output) == 24);
+    std.debug.assert(@alignOf(c.omniwm_restore_floating_rescue_output) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_window_decision_rule_summary) == 8);
+    std.debug.assert(@alignOf(c.omniwm_window_decision_rule_summary) == 4);
+    std.debug.assert(@sizeOf(c.omniwm_window_decision_built_in_rule_summary) == 12);
+    std.debug.assert(@alignOf(c.omniwm_window_decision_built_in_rule_summary) == 4);
+    std.debug.assert(@sizeOf(c.omniwm_window_decision_input) == 44);
+    std.debug.assert(@alignOf(c.omniwm_window_decision_input) == 4);
+    std.debug.assert(@sizeOf(c.omniwm_window_decision_output) == 24);
+    std.debug.assert(@alignOf(c.omniwm_window_decision_output) == 4);
+    std.debug.assert(@sizeOf(c.omniwm_workspace_navigation_input) == 256);
+    std.debug.assert(@alignOf(c.omniwm_workspace_navigation_input) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_workspace_navigation_monitor) == 80);
+    std.debug.assert(@alignOf(c.omniwm_workspace_navigation_monitor) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_workspace_navigation_workspace) == 96);
+    std.debug.assert(@alignOf(c.omniwm_workspace_navigation_workspace) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_workspace_navigation_output) == 184);
+    std.debug.assert(@alignOf(c.omniwm_workspace_navigation_output) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_workspace_session_input) == 168);
+    std.debug.assert(@alignOf(c.omniwm_workspace_session_input) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_workspace_session_monitor) == 112);
+    std.debug.assert(@alignOf(c.omniwm_workspace_session_monitor) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_workspace_session_previous_monitor) == 112);
+    std.debug.assert(@alignOf(c.omniwm_workspace_session_previous_monitor) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_workspace_session_disconnected_cache_entry) == 80);
+    std.debug.assert(@alignOf(c.omniwm_workspace_session_disconnected_cache_entry) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_workspace_session_workspace) == 96);
+    std.debug.assert(@alignOf(c.omniwm_workspace_session_workspace) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_workspace_session_window_candidate) == 56);
+    std.debug.assert(@alignOf(c.omniwm_workspace_session_window_candidate) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_workspace_session_monitor_result) == 64);
+    std.debug.assert(@alignOf(c.omniwm_workspace_session_monitor_result) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_workspace_session_workspace_projection) == 32);
+    std.debug.assert(@alignOf(c.omniwm_workspace_session_workspace_projection) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_workspace_session_disconnected_cache_result) == 24);
+    std.debug.assert(@alignOf(c.omniwm_workspace_session_disconnected_cache_result) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_workspace_session_output) == 128);
+    std.debug.assert(@alignOf(c.omniwm_workspace_session_output) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_reconcile_observed_state) == 64);
+    std.debug.assert(@alignOf(c.omniwm_reconcile_observed_state) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_reconcile_desired_state) == 64);
+    std.debug.assert(@alignOf(c.omniwm_reconcile_desired_state) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_reconcile_floating_state) == 56);
+    std.debug.assert(@alignOf(c.omniwm_reconcile_floating_state) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_reconcile_entry) == 216);
+    std.debug.assert(@alignOf(c.omniwm_reconcile_entry) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_reconcile_monitor) == 40);
+    std.debug.assert(@alignOf(c.omniwm_reconcile_monitor) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_reconcile_pending_focus) == 40);
+    std.debug.assert(@alignOf(c.omniwm_reconcile_pending_focus) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_reconcile_focus_session) == 64);
+    std.debug.assert(@alignOf(c.omniwm_reconcile_focus_session) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_reconcile_persisted_hydration) == 64);
+    std.debug.assert(@alignOf(c.omniwm_reconcile_persisted_hydration) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_reconcile_event) == 136);
+    std.debug.assert(@alignOf(c.omniwm_reconcile_event) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_reconcile_restore_intent_output) == 80);
+    std.debug.assert(@alignOf(c.omniwm_reconcile_restore_intent_output) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_reconcile_replacement_correlation) == 40);
+    std.debug.assert(@alignOf(c.omniwm_reconcile_replacement_correlation) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_reconcile_focus_session_output) == 64);
+    std.debug.assert(@alignOf(c.omniwm_reconcile_focus_session_output) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_reconcile_plan_output) == 336);
+    std.debug.assert(@alignOf(c.omniwm_reconcile_plan_output) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_orchestration_old_frame_record) == 48);
+    std.debug.assert(@alignOf(c.omniwm_orchestration_old_frame_record) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_orchestration_window_removal_payload) == 80);
+    std.debug.assert(@alignOf(c.omniwm_orchestration_window_removal_payload) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_orchestration_follow_up_refresh) == 24);
+    std.debug.assert(@alignOf(c.omniwm_orchestration_follow_up_refresh) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_orchestration_refresh) == 96);
+    std.debug.assert(@alignOf(c.omniwm_orchestration_refresh) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_orchestration_managed_request) == 56);
+    std.debug.assert(@alignOf(c.omniwm_orchestration_managed_request) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_orchestration_refresh_snapshot) == 200);
+    std.debug.assert(@alignOf(c.omniwm_orchestration_refresh_snapshot) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_orchestration_focus_snapshot) == 104);
+    std.debug.assert(@alignOf(c.omniwm_orchestration_focus_snapshot) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_orchestration_snapshot) == 304);
+    std.debug.assert(@alignOf(c.omniwm_orchestration_snapshot) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_orchestration_refresh_request_event) == 104);
+    std.debug.assert(@alignOf(c.omniwm_orchestration_refresh_request_event) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_orchestration_refresh_completion_event) == 104);
+    std.debug.assert(@alignOf(c.omniwm_orchestration_refresh_completion_event) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_orchestration_focus_request_event) == 32);
+    std.debug.assert(@alignOf(c.omniwm_orchestration_focus_request_event) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_orchestration_activation_observation) == 64);
+    std.debug.assert(@alignOf(c.omniwm_orchestration_activation_observation) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_orchestration_event) == 312);
+    std.debug.assert(@alignOf(c.omniwm_orchestration_event) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_orchestration_decision) == 80);
+    std.debug.assert(@alignOf(c.omniwm_orchestration_decision) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_orchestration_action) == 104);
+    std.debug.assert(@alignOf(c.omniwm_orchestration_action) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_orchestration_step_input) == 680);
+    std.debug.assert(@alignOf(c.omniwm_orchestration_step_input) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_orchestration_step_output) == 528);
+    std.debug.assert(@alignOf(c.omniwm_orchestration_step_output) == 8);
+    std.debug.assert(@sizeOf(c.omniwm_orchestration_abi_layout_info) == 176);
+    std.debug.assert(@alignOf(c.omniwm_orchestration_abi_layout_info) == 8);
+}
+
+// Suppress "unused" warning when this file is imported from `root.zig`
+// solely for its `comptime` block.
+pub fn referenced() void {}

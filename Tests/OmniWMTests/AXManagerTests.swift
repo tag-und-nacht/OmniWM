@@ -226,7 +226,6 @@ private func axManagerTestWriteResult(
         controller.axManager.confirmFrameWrite(for: token.windowId, frame: targetFrame)
         _ = controller.workspaceManager.setManagedRestoreSnapshot(
             ManagedWindowRestoreSnapshot(
-                token: token,
                 workspaceId: workspaceId,
                 frame: staleFrame,
                 topologyProfile: controller.workspaceManager.topologyProfile,

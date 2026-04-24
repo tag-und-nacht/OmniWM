@@ -14,16 +14,19 @@ final class WorkspaceNavigationHandler {
     private func applySessionPatch(
         workspaceId: WorkspaceDescriptor.ID,
         viewportState: ViewportState? = nil,
-        rememberedFocusToken: WindowToken? = nil
+        rememberedFocusToken: WindowToken? = nil,
+        source: WMEventSource = .command
     ) {
         guard let controller else { return }
-        _ = controller.workspaceManager.applySessionPatch(
-            .init(
-                workspaceId: workspaceId,
-                viewportState: viewportState,
-                rememberedFocusToken: rememberedFocusToken
-            )
+        let patch = WorkspaceSessionPatch(
+            workspaceId: workspaceId,
+            viewportState: viewportState,
+            rememberedFocusToken: rememberedFocusToken
         )
+        guard let runtime = controller.runtime else {
+            preconditionFailure("WorkspaceNavigationHandler.applySessionPatch requires WMRuntime to be attached")
+        }
+        _ = runtime.applySessionPatch(patch, source: source)
     }
 
     private func applySessionTransfer(
@@ -32,41 +35,49 @@ final class WorkspaceNavigationHandler {
         sourceFocusedToken: WindowToken?,
         targetWorkspaceId: WorkspaceDescriptor.ID?,
         targetState: ViewportState?,
-        targetFocusedToken: WindowToken?
+        targetFocusedToken: WindowToken?,
+        source: WMEventSource = .command
     ) {
         guard let controller else { return }
-        _ = controller.workspaceManager.applySessionTransfer(
-            .init(
-                sourcePatch: sourceWorkspaceId.map {
-                    .init(
-                        workspaceId: $0,
-                        viewportState: sourceState,
-                        rememberedFocusToken: sourceFocusedToken
-                    )
-                },
-                targetPatch: targetWorkspaceId.map {
-                    .init(
-                        workspaceId: $0,
-                        viewportState: targetState,
-                        rememberedFocusToken: targetFocusedToken
-                    )
-                }
-            )
+        let transfer = WorkspaceSessionTransfer(
+            sourcePatch: sourceWorkspaceId.map {
+                .init(
+                    workspaceId: $0,
+                    viewportState: sourceState,
+                    rememberedFocusToken: sourceFocusedToken
+                )
+            },
+            targetPatch: targetWorkspaceId.map {
+                .init(
+                    workspaceId: $0,
+                    viewportState: targetState,
+                    rememberedFocusToken: targetFocusedToken
+                )
+            }
         )
+        guard let runtime = controller.runtime else {
+            preconditionFailure("WorkspaceNavigationHandler.applySessionTransfer requires WMRuntime to be attached")
+        }
+        _ = runtime.applySessionTransfer(transfer, source: source)
     }
 
     private func commitWorkspaceSelection(
         nodeId: NodeId?,
         focusedToken: WindowToken?,
         in workspaceId: WorkspaceDescriptor.ID,
-        onMonitor monitorId: Monitor.ID? = nil
+        onMonitor monitorId: Monitor.ID? = nil,
+        source: WMEventSource = .command
     ) {
         guard let controller else { return }
-        _ = controller.workspaceManager.commitWorkspaceSelection(
+        guard let runtime = controller.runtime else {
+            preconditionFailure("WorkspaceNavigationHandler.commitWorkspaceSelection requires WMRuntime to be attached")
+        }
+        _ = runtime.commitWorkspaceSelection(
             nodeId: nodeId,
             focusedToken: focusedToken,
             in: workspaceId,
-            onMonitor: monitorId
+            onMonitor: monitorId,
+            source: source
         )
     }
 
@@ -86,23 +97,22 @@ final class WorkspaceNavigationHandler {
         )
     }
 
-    private func clearManagedFocusAfterEmptyWorkspaceTransition() {
+    func clearManagedFocusAfterEmptyWorkspaceTransition(
+        source: WMEventSource = .command
+    ) {
         guard let controller else { return }
-        let canceledRequest = controller.focusBridge.cancelManagedRequest()
-        if let canceledRequest {
-            controller.focusBridge.discardPendingFocus(canceledRequest.token)
+        guard let runtime = controller.runtime else {
+            preconditionFailure("WorkspaceNavigationHandler.clearManagedFocusAfterEmptyWorkspaceTransition requires WMRuntime to be attached")
         }
-        controller.clearKeyboardFocusTarget()
-        _ = controller.workspaceManager.enterNonManagedFocus(appFullscreen: false)
-        controller.hideKeyboardFocusBorder(
-            source: .workspaceActivation,
-            reason: "cleared focus after empty workspace transition"
+        _ = runtime.clearManagedFocusAfterEmptyWorkspaceTransition(
+            source: source
         )
     }
 
     private func commitWorkspaceTransition(
         _ plan: WorkspaceNavigationKernel.Plan,
-        stopScrollAnimationOnTargetMonitor: Bool
+        stopScrollAnimationOnTargetMonitor: Bool,
+        source: WMEventSource = .command
     ) {
         guard let controller else { return }
         if stopScrollAnimationOnTargetMonitor,
@@ -116,7 +126,8 @@ final class WorkspaceNavigationHandler {
         {
             applySessionPatch(
                 workspaceId: targetWorkspaceId,
-                rememberedFocusToken: resolvedFocusToken
+                rememberedFocusToken: resolvedFocusToken,
+                source: source
             )
         }
         controller.layoutRefreshController.commitWorkspaceTransition(
@@ -125,9 +136,9 @@ final class WorkspaceNavigationHandler {
         ) { [weak self, weak controller] in
             guard let controller else { return }
             if let resolvedFocusToken = plan.resolvedFocusToken {
-                controller.focusWindow(resolvedFocusToken)
+                controller.focusWindow(resolvedFocusToken, source: source)
             } else if plan.focusAction == .clearManagedFocus {
-                self?.clearManagedFocusAfterEmptyWorkspaceTransition()
+                self?.clearManagedFocusAfterEmptyWorkspaceTransition(source: source)
             }
         }
     }
@@ -138,23 +149,38 @@ final class WorkspaceNavigationHandler {
         }
     }
 
+    private func saveWorkspaces(
+        _ workspaceIds: [WorkspaceDescriptor.ID],
+        source: WMEventSource
+    ) {
+        for workspaceId in workspaceIds {
+            saveNiriViewportState(for: workspaceId, source: source)
+        }
+    }
+
     private func materializeTargetWorkspaceIfNeeded(
-        _ plan: WorkspaceNavigationKernel.Plan
+        _ plan: WorkspaceNavigationKernel.Plan,
+        source: WMEventSource = .command
     ) -> WorkspaceNavigationKernel.Plan? {
         guard let rawWorkspaceID = plan.materializeTargetWorkspaceRawID else {
             return plan
         }
         guard let controller,
-              let targetMonitorId = plan.targetMonitorId,
-              let targetWorkspaceId = controller.workspaceManager.workspaceId(
-                  for: rawWorkspaceID,
-                  createIfMissing: true
-              )
-        else {
-            return nil
+              let targetMonitorId = plan.targetMonitorId
+        else { return nil }
+        guard let runtime = controller.runtime else {
+            preconditionFailure("WorkspaceNavigationHandler.materializeTargetWorkspace requires WMRuntime to be attached")
         }
+        guard let targetWorkspaceId = runtime.materializeWorkspace(
+            named: rawWorkspaceID,
+            source: source
+        ) else { return nil }
 
-        controller.workspaceManager.assignWorkspaceToMonitor(targetWorkspaceId, monitorId: targetMonitorId)
+        runtime.assignWorkspaceToMonitor(
+            targetWorkspaceId,
+            monitorId: targetMonitorId,
+            source: source
+        )
         if controller.niriEngine != nil {
             controller.syncMonitorsToNiriEngine()
         }
@@ -174,7 +200,10 @@ final class WorkspaceNavigationHandler {
         )
     }
 
-    private func activateTargetWorkspaceIfNeeded(_ plan: WorkspaceNavigationKernel.Plan) -> Bool {
+    private func activateTargetWorkspaceIfNeeded(
+        _ plan: WorkspaceNavigationKernel.Plan,
+        source: WMEventSource = .command
+    ) -> Bool {
         guard let controller,
               let targetWorkspaceId = plan.targetWorkspaceId,
               let targetMonitorId = plan.targetMonitorId
@@ -182,30 +211,39 @@ final class WorkspaceNavigationHandler {
             return false
         }
 
+        guard let runtime = controller.runtime else {
+            preconditionFailure("WorkspaceNavigationHandler.activateTargetWorkspaceIfNeeded requires WMRuntime to be attached")
+        }
         guard plan.shouldActivateTargetWorkspace else {
             if plan.shouldSetInteractionMonitor {
-                _ = controller.workspaceManager.setInteractionMonitor(targetMonitorId)
+                _ = runtime.setInteractionMonitor(targetMonitorId, source: source)
             }
             return true
         }
-
-        return controller.workspaceManager.setActiveWorkspace(targetWorkspaceId, on: targetMonitorId)
+        return runtime.setActiveWorkspace(
+            targetWorkspaceId,
+            on: targetMonitorId,
+            source: source
+        )
     }
 
-    private func commitFocusPlan(_ plan: WorkspaceNavigationKernel.Plan) {
+    private func commitFocusPlan(
+        _ plan: WorkspaceNavigationKernel.Plan,
+        source: WMEventSource = .command
+    ) {
         guard plan.shouldCommitWorkspaceTransition else {
             return
         }
 
         switch plan.focusAction {
         case .workspaceHandoff:
-            commitWorkspaceTransition(plan, stopScrollAnimationOnTargetMonitor: true)
+            commitWorkspaceTransition(plan, stopScrollAnimationOnTargetMonitor: true, source: source)
 
         case .resolveTargetIfPresent:
-            commitWorkspaceTransition(plan, stopScrollAnimationOnTargetMonitor: false)
+            commitWorkspaceTransition(plan, stopScrollAnimationOnTargetMonitor: false, source: source)
 
         case .clearManagedFocus:
-            commitWorkspaceTransition(plan, stopScrollAnimationOnTargetMonitor: false)
+            commitWorkspaceTransition(plan, stopScrollAnimationOnTargetMonitor: false, source: source)
 
         case .subject, .recoverSource, .none:
             break
@@ -214,19 +252,23 @@ final class WorkspaceNavigationHandler {
 
     private func applySwitchPlan(
         _ plan: WorkspaceNavigationKernel.Plan,
-        hideReason: String
+        hideReason: String,
+        source: WMEventSource = .command
     ) {
         guard plan.outcome == .execute else { return }
         hideFocusBorderIfNeeded(plan, reason: hideReason)
-        saveWorkspaces(plan.saveWorkspaceIds)
-        guard activateTargetWorkspaceIfNeeded(plan) else { return }
+        saveWorkspaces(plan.saveWorkspaceIds, source: source)
+        guard activateTargetWorkspaceIfNeeded(plan, source: source) else { return }
         if plan.shouldSyncMonitorsToNiri {
             controller?.syncMonitorsToNiriEngine()
         }
-        commitFocusPlan(plan)
+        commitFocusPlan(plan, source: source)
     }
 
-    private func prepareSwapSelection(targetWorkspaceId: WorkspaceDescriptor.ID) {
+    private func prepareSwapSelection(
+        targetWorkspaceId: WorkspaceDescriptor.ID,
+        source: WMEventSource = .command
+    ) {
         guard let controller,
               let engine = controller.niriEngine,
               let targetToken = controller.workspaceManager.lastFocusedToken(in: targetWorkspaceId),
@@ -238,14 +280,16 @@ final class WorkspaceNavigationHandler {
         commitWorkspaceSelection(
             nodeId: targetNode.id,
             focusedToken: targetToken,
-            in: targetWorkspaceId
+            in: targetWorkspaceId,
+            source: source
         )
     }
 
     private func transferWindowFromSourceEngine(
         token: WindowToken,
         from sourceWorkspaceId: WorkspaceDescriptor.ID?,
-        to targetWorkspaceId: WorkspaceDescriptor.ID
+        to targetWorkspaceId: WorkspaceDescriptor.ID,
+        source: WMEventSource = .command
     ) -> Bool {
         guard let controller else { return false }
 
@@ -262,10 +306,13 @@ final class WorkspaceNavigationHandler {
            !targetIsDwindle,
            let sourceWorkspaceId,
            let engine = controller.niriEngine,
-           let windowNode = engine.findNode(for: token)
+           let windowNode = engine.findNode(for: token),
+           sourceWorkspaceId != targetWorkspaceId,
+           engine.findColumn(containing: windowNode, in: sourceWorkspaceId) != nil
         {
             var sourceState = controller.workspaceManager.niriViewportState(for: sourceWorkspaceId)
             var targetState = controller.workspaceManager.niriViewportState(for: targetWorkspaceId)
+            controller.reassignManagedWindow(token, to: targetWorkspaceId, source: source)
             if let result = engine.moveWindowToWorkspace(
                 windowNode,
                 from: sourceWorkspaceId,
@@ -282,53 +329,64 @@ final class WorkspaceNavigationHandler {
                     sourceFocusedToken: sourceFocusedToken,
                     targetWorkspaceId: targetWorkspaceId,
                     targetState: targetState,
-                    targetFocusedToken: nil
+                    targetFocusedToken: nil,
+                    source: source
                 )
                 movedWithNiri = true
+            } else {
+                controller.reassignManagedWindow(token, to: sourceWorkspaceId, source: source)
+                return false
             }
         }
 
         if !movedWithNiri,
            !sourceIsDwindle,
-           let sourceWorkspaceId,
-           let engine = controller.niriEngine
+           let sourceWorkspaceId
         {
-            var sourceState = controller.workspaceManager.niriViewportState(for: sourceWorkspaceId)
-            if let currentNode = engine.findNode(for: token),
-               sourceState.selectedNodeId == currentNode.id
-            {
-                sourceState.selectedNodeId = engine.fallbackSelectionOnRemoval(
-                    removing: currentNode.id,
-                    in: sourceWorkspaceId
+            if targetIsDwindle {
+                controller.reassignManagedWindow(token, to: targetWorkspaceId, source: source)
+            }
+
+            if let engine = controller.niriEngine {
+                var sourceState = controller.workspaceManager.niriViewportState(for: sourceWorkspaceId)
+                if let currentNode = engine.findNode(for: token),
+                   sourceState.selectedNodeId == currentNode.id
+                {
+                    sourceState.selectedNodeId = engine.fallbackSelectionOnRemoval(
+                        removing: currentNode.id,
+                        in: sourceWorkspaceId
+                    )
+                }
+
+                if targetIsDwindle, engine.findNode(for: token) != nil {
+                    engine.removeWindow(token: token)
+                }
+
+                if let selectedId = sourceState.selectedNodeId,
+                   engine.findNode(by: selectedId) == nil
+                {
+                    sourceState.selectedNodeId = engine.validateSelection(selectedId, in: sourceWorkspaceId)
+                }
+
+                let sourceFocusedToken = sourceState.selectedNodeId
+                    .flatMap { engine.findNode(by: $0) as? NiriWindow }?
+                    .token
+
+                applySessionTransfer(
+                    sourceWorkspaceId: sourceWorkspaceId,
+                    sourceState: sourceState,
+                    sourceFocusedToken: sourceFocusedToken,
+                    targetWorkspaceId: nil,
+                    targetState: nil,
+                    targetFocusedToken: nil,
+                    source: source
                 )
             }
-
-            if targetIsDwindle, engine.findNode(for: token) != nil {
-                engine.removeWindow(token: token)
-            }
-
-            if let selectedId = sourceState.selectedNodeId,
-               engine.findNode(by: selectedId) == nil
-            {
-                sourceState.selectedNodeId = engine.validateSelection(selectedId, in: sourceWorkspaceId)
-            }
-
-            let sourceFocusedToken = sourceState.selectedNodeId
-                .flatMap { engine.findNode(by: $0) as? NiriWindow }?
-                .token
-
-            applySessionTransfer(
-                sourceWorkspaceId: sourceWorkspaceId,
-                sourceState: sourceState,
-                sourceFocusedToken: sourceFocusedToken,
-                targetWorkspaceId: nil,
-                targetState: nil,
-                targetFocusedToken: nil
-            )
         } else if sourceIsDwindle,
                   let sourceWorkspaceId,
                   let dwindleEngine = controller.dwindleEngine
         {
+            controller.reassignManagedWindow(token, to: targetWorkspaceId, source: source)
             dwindleEngine.removeWindow(token: token, from: sourceWorkspaceId)
         }
 
@@ -336,6 +394,7 @@ final class WorkspaceNavigationHandler {
             return true
         }
         if sourceWorkspaceId == nil {
+            controller.reassignManagedWindow(token, to: targetWorkspaceId, source: source)
             return true
         }
         if !sourceIsDwindle && !targetIsDwindle {
@@ -350,7 +409,8 @@ final class WorkspaceNavigationHandler {
         sourcePreferredNodeId: NodeId?,
         ensureTargetVisible: Bool,
         stopSourceScroll: Bool,
-        markTransferringWindow: Bool
+        markTransferringWindow: Bool,
+        source: WMEventSource = .command
     ) {
         guard let controller else { return }
 
@@ -374,7 +434,14 @@ final class WorkspaceNavigationHandler {
 
             guard let targetWorkspaceId = plan.targetWorkspaceId else { return }
             if let targetMonitor = controller.workspaceManager.monitorForWorkspace(targetWorkspaceId) {
-                _ = controller.workspaceManager.setActiveWorkspace(targetWorkspaceId, on: targetMonitor.id)
+                guard let runtime = controller.runtime else {
+                    preconditionFailure("WorkspaceNavigationHandler.moveColumnToWorkspace requires WMRuntime to be attached")
+                }
+                _ = runtime.setActiveWorkspace(
+                    targetWorkspaceId,
+                    on: targetMonitor.id,
+                    source: source
+                )
             }
 
             var targetState = controller.workspaceManager.niriViewportState(for: targetWorkspaceId)
@@ -398,7 +465,8 @@ final class WorkspaceNavigationHandler {
             applySessionPatch(
                 workspaceId: targetWorkspaceId,
                 viewportState: targetState,
-                rememberedFocusToken: targetFocusToken
+                rememberedFocusToken: targetFocusToken,
+                source: source
             )
 
             if plan.shouldCommitWorkspaceTransition {
@@ -406,7 +474,7 @@ final class WorkspaceNavigationHandler {
                     affectedWorkspaces: plan.affectedWorkspaceIds,
                     reason: .workspaceTransition
                 ) { [weak controller] in
-                    controller?.focusWindow(targetFocusToken)
+                    controller?.focusWindow(targetFocusToken, source: source)
                 }
             }
 
@@ -417,7 +485,9 @@ final class WorkspaceNavigationHandler {
                     preferredNodeId: sourcePreferredNodeId
                 )
             }
-            let focusToken = plan.sourceWorkspaceId.flatMap { controller.resolveAndSetWorkspaceFocusToken(for: $0) }
+            let focusToken = plan.sourceWorkspaceId.flatMap {
+                controller.resolveAndSetWorkspaceFocusToken(for: $0, source: source)
+            }
 
             if plan.shouldCommitWorkspaceTransition {
                 controller.layoutRefreshController.commitWorkspaceTransition(
@@ -425,7 +495,7 @@ final class WorkspaceNavigationHandler {
                     reason: .workspaceTransition
                 ) { [weak controller] in
                     if let focusToken {
-                        controller?.focusWindow(focusToken)
+                        controller?.focusWindow(focusToken, source: source)
                     }
                 }
             }
@@ -439,7 +509,8 @@ final class WorkspaceNavigationHandler {
         _ plan: WorkspaceNavigationKernel.Plan,
         rememberedTargetFocusToken: WindowToken,
         stopSourceScroll: Bool,
-        markTransferringWindow: Bool
+        markTransferringWindow: Bool,
+        source: WMEventSource = .command
     ) -> Bool {
         guard let controller,
               let targetWorkspaceId = plan.targetWorkspaceId
@@ -451,12 +522,16 @@ final class WorkspaceNavigationHandler {
         let transferSucceeded = transferWindowFromSourceEngine(
             token: token,
             from: plan.sourceWorkspaceId,
-            to: targetWorkspaceId
+            to: targetWorkspaceId,
+            source: source
         )
         guard transferSucceeded else { return false }
 
-        controller.reassignManagedWindow(token, to: targetWorkspaceId)
-        applySessionPatch(workspaceId: targetWorkspaceId, rememberedFocusToken: rememberedTargetFocusToken)
+        applySessionPatch(
+            workspaceId: targetWorkspaceId,
+            rememberedFocusToken: rememberedTargetFocusToken,
+            source: source
+        )
 
         guard plan.shouldCommitWorkspaceTransition else {
             if let sourceWorkspaceId = plan.sourceWorkspaceId {
@@ -479,14 +554,16 @@ final class WorkspaceNavigationHandler {
             sourcePreferredNodeId: sourcePreferredNodeId,
             ensureTargetVisible: true,
             stopSourceScroll: stopSourceScroll,
-            markTransferringWindow: markTransferringWindow
+            markTransferringWindow: markTransferringWindow,
+            source: source
         )
         return true
     }
 
     private func executeColumnTransferPlan(
         _ plan: WorkspaceNavigationKernel.Plan,
-        rememberedTargetFocusToken: WindowToken
+        rememberedTargetFocusToken: WindowToken,
+        source: WMEventSource = .command
     ) -> Bool {
         guard let controller,
               let engine = controller.niriEngine,
@@ -502,14 +579,28 @@ final class WorkspaceNavigationHandler {
 
         guard let windowNode = engine.findNode(for: subjectToken),
               let column = engine.findColumn(containing: windowNode, in: sourceWorkspaceId),
-              let result = engine.moveColumnToWorkspace(
-                  column,
-                  from: sourceWorkspaceId,
-                  to: targetWorkspaceId,
-                  sourceState: &sourceState,
-                  targetState: &targetState
-              )
+              engine.columnIndex(of: column, in: sourceWorkspaceId) != nil,
+              sourceWorkspaceId != targetWorkspaceId,
+              !column.windowNodes.isEmpty
         else {
+            return false
+        }
+
+        let movedWindowTokens = column.windowNodes.map(\.token)
+        for token in movedWindowTokens {
+            controller.reassignManagedWindow(token, to: targetWorkspaceId, source: source)
+        }
+
+        guard let result = engine.moveColumnToWorkspace(
+            column,
+            from: sourceWorkspaceId,
+            to: targetWorkspaceId,
+            sourceState: &sourceState,
+            targetState: &targetState
+        ) else {
+            for token in movedWindowTokens {
+                controller.reassignManagedWindow(token, to: sourceWorkspaceId, source: source)
+            }
             return false
         }
 
@@ -519,16 +610,14 @@ final class WorkspaceNavigationHandler {
             sourceFocusedToken: nil,
             targetWorkspaceId: targetWorkspaceId,
             targetState: targetState,
-            targetFocusedToken: nil
+            targetFocusedToken: nil,
+            source: source
         )
-
-        for window in column.windowNodes {
-            controller.reassignManagedWindow(window.token, to: targetWorkspaceId)
-        }
 
         applySessionPatch(
             workspaceId: targetWorkspaceId,
-            rememberedFocusToken: rememberedTargetFocusToken
+            rememberedFocusToken: rememberedTargetFocusToken,
+            source: source
         )
 
         performTransferFocus(
@@ -537,12 +626,16 @@ final class WorkspaceNavigationHandler {
             sourcePreferredNodeId: result.newFocusNodeId,
             ensureTargetVisible: false,
             stopSourceScroll: false,
-            markTransferringWindow: false
+            markTransferringWindow: false,
+            source: source
         )
         return true
     }
 
-    func focusMonitorCyclic(previous: Bool) {
+    func focusMonitorCyclic(
+        previous: Bool,
+        source: WMEventSource = .command
+    ) {
         guard let controller else { return }
         guard let plan = plan(
             .init(
@@ -553,10 +646,10 @@ final class WorkspaceNavigationHandler {
         ) else {
             return
         }
-        applySwitchPlan(plan, hideReason: "focus monitor")
+        applySwitchPlan(plan, hideReason: "focus monitor", source: source)
     }
 
-    func focusLastMonitor() {
+    func focusLastMonitor(source: WMEventSource = .command) {
         guard let controller else { return }
         guard let plan = plan(
             .init(
@@ -567,10 +660,13 @@ final class WorkspaceNavigationHandler {
         ) else {
             return
         }
-        applySwitchPlan(plan, hideReason: "focus last monitor")
+        applySwitchPlan(plan, hideReason: "focus last monitor", source: source)
     }
 
-    func swapCurrentWorkspaceWithMonitor(direction: Direction) {
+    func swapCurrentWorkspaceWithMonitor(
+        direction: Direction,
+        source: WMEventSource = .command
+    ) {
         guard let controller else { return }
         guard let plan = plan(
             .init(
@@ -592,60 +688,80 @@ final class WorkspaceNavigationHandler {
             return
         }
 
-        saveWorkspaces(plan.saveWorkspaceIds)
-        prepareSwapSelection(targetWorkspaceId: targetWorkspaceId)
+        saveWorkspaces(plan.saveWorkspaceIds, source: source)
+        prepareSwapSelection(targetWorkspaceId: targetWorkspaceId, source: source)
 
-        guard controller.workspaceManager.swapWorkspaces(
+        guard let runtime = controller.runtime else {
+            preconditionFailure("WorkspaceNavigationHandler.swapCurrentWorkspaceWithMonitor requires WMRuntime to be attached")
+        }
+        let didSwap = runtime.swapWorkspaces(
             sourceWorkspaceId,
             on: sourceMonitorId,
             with: targetWorkspaceId,
-            on: targetMonitorId
-        ) else {
+            on: targetMonitorId,
+            source: source
+        )
+        guard didSwap else {
             return
         }
 
         if plan.shouldSyncMonitorsToNiri {
             controller.syncMonitorsToNiriEngine()
         }
-        commitFocusPlan(plan)
+        commitFocusPlan(plan, source: source)
     }
 
-    func switchWorkspace(index: Int) {
+    func switchWorkspace(
+        index: Int,
+        source: WMEventSource = .command
+    ) {
         guard let rawWorkspaceID = WorkspaceIDPolicy.rawID(from: max(0, index) + 1) else { return }
-        switchWorkspace(rawWorkspaceID: rawWorkspaceID)
+        switchWorkspace(rawWorkspaceID: rawWorkspaceID, source: source)
     }
 
-    func switchWorkspace(rawWorkspaceID: String) {
+    func switchWorkspace(
+        rawWorkspaceID: String,
+        source: WMEventSource = .command
+    ) {
         guard let controller else { return }
-        guard let plan = plan(
-            .init(
-                operation: .switchWorkspaceExplicit,
-                currentWorkspaceId: controller.activeWorkspace()?.id,
-                targetWorkspaceId: controller.workspaceManager.workspaceId(for: rawWorkspaceID, createIfMissing: false)
-            )
-        ) else {
-            return
+        guard let runtime = controller.runtime else {
+            preconditionFailure("WorkspaceNavigationHandler.switchWorkspace requires WMRuntime to be attached")
         }
-        applySwitchPlan(plan, hideReason: "switch workspace")
+        let command: WMCommand.WorkspaceSwitchCommand = switch source {
+        case .command:
+            .explicit(rawWorkspaceID: rawWorkspaceID)
+        default:
+            .explicitFrom(rawWorkspaceID: rawWorkspaceID, source: source)
+        }
+        runtime.submit(
+            command: .workspaceSwitch(command)
+        )
     }
 
-    func switchWorkspaceRelative(isNext: Bool, wrapAround: Bool = true) {
+    func switchWorkspaceRelative(
+        isNext: Bool,
+        wrapAround: Bool = true,
+        source: WMEventSource = .command
+    ) {
         guard let controller else { return }
-        guard let plan = plan(
-            .init(
-                operation: .switchWorkspaceRelative,
-                direction: isNext ? .right : .left,
-                currentWorkspaceId: controller.activeWorkspace()?.id,
-                currentMonitorId: interactionMonitorId(for: controller),
-                wrapAround: wrapAround
-            )
-        ) else {
-            return
+        guard let runtime = controller.runtime else {
+            preconditionFailure("WorkspaceNavigationHandler.switchWorkspaceRelative requires WMRuntime to be attached")
         }
-        applySwitchPlan(plan, hideReason: "switch workspace relative")
+        let command: WMCommand.WorkspaceSwitchCommand = switch source {
+        case .command:
+            .relative(isNext: isNext, wrapAround: wrapAround)
+        default:
+            .relativeFrom(isNext: isNext, wrapAround: wrapAround, source: source)
+        }
+        runtime.submit(
+            command: .workspaceSwitch(command)
+        )
     }
 
-    func saveNiriViewportState(for workspaceId: WorkspaceDescriptor.ID) {
+    func saveNiriViewportState(
+        for workspaceId: WorkspaceDescriptor.ID,
+        source: WMEventSource = .command
+    ) {
         guard let controller else { return }
         guard let engine = controller.niriEngine else { return }
 
@@ -656,17 +772,21 @@ final class WorkspaceNavigationHandler {
             commitWorkspaceSelection(
                 nodeId: focusedNode.id,
                 focusedToken: focusedToken,
-                in: workspaceId
+                in: workspaceId,
+                source: source
             )
         }
     }
 
-    func focusWorkspaceAnywhere(index: Int) {
+    func focusWorkspaceAnywhere(index: Int, source: WMEventSource = .command) {
         guard let rawWorkspaceID = WorkspaceIDPolicy.rawID(from: max(0, index) + 1) else { return }
-        focusWorkspaceAnywhere(rawWorkspaceID: rawWorkspaceID)
+        focusWorkspaceAnywhere(rawWorkspaceID: rawWorkspaceID, source: source)
     }
 
-    func focusWorkspaceAnywhere(rawWorkspaceID: String) {
+    func focusWorkspaceAnywhere(
+        rawWorkspaceID: String,
+        source: WMEventSource = .command
+    ) {
         guard let controller else { return }
         guard let plan = plan(
             .init(
@@ -678,10 +798,10 @@ final class WorkspaceNavigationHandler {
         ) else {
             return
         }
-        applySwitchPlan(plan, hideReason: "focus workspace anywhere")
+        applySwitchPlan(plan, hideReason: "focus workspace anywhere", source: source)
     }
 
-    func workspaceBackAndForth() {
+    func workspaceBackAndForth(source: WMEventSource = .command) {
         guard let controller else { return }
         guard let plan = plan(
             .init(
@@ -692,10 +812,13 @@ final class WorkspaceNavigationHandler {
         ) else {
             return
         }
-        applySwitchPlan(plan, hideReason: "workspace back and forth")
+        applySwitchPlan(plan, hideReason: "workspace back and forth", source: source)
     }
 
-    func moveWindowToAdjacentWorkspace(direction: Direction) {
+    func moveWindowToAdjacentWorkspace(
+        direction: Direction,
+        source: WMEventSource = .command
+    ) {
         guard let controller else { return }
         let focusedToken = controller.workspaceManager.focusedToken
         guard let rawPlan = plan(
@@ -708,20 +831,25 @@ final class WorkspaceNavigationHandler {
             )
         ),
         let plan = materializeTargetWorkspaceIfNeeded(
-            rawPlan
+            rawPlan,
+            source: source
         ) else {
             return
         }
-        saveWorkspaces(plan.saveWorkspaceIds)
+        saveWorkspaces(plan.saveWorkspaceIds, source: source)
         _ = executeWindowTransferPlan(
             plan,
             rememberedTargetFocusToken: focusedToken ?? .init(pid: 0, windowId: 0),
             stopSourceScroll: false,
-            markTransferringWindow: false
+            markTransferringWindow: false,
+            source: source
         )
     }
 
-    func moveColumnToAdjacentWorkspace(direction: Direction) {
+    func moveColumnToAdjacentWorkspace(
+        direction: Direction,
+        source: WMEventSource = .command
+    ) {
         guard let controller else { return }
         guard let rawPlan = plan(
             .init(
@@ -732,22 +860,33 @@ final class WorkspaceNavigationHandler {
             )
         ),
         let plan = materializeTargetWorkspaceIfNeeded(
-            rawPlan
+            rawPlan,
+            source: source
         ) else {
             return
         }
-        saveWorkspaces(plan.saveWorkspaceIds)
+        saveWorkspaces(plan.saveWorkspaceIds, source: source)
         if case let .column(subjectToken) = plan.subject {
-            _ = executeColumnTransferPlan(plan, rememberedTargetFocusToken: subjectToken)
+            _ = executeColumnTransferPlan(
+                plan,
+                rememberedTargetFocusToken: subjectToken,
+                source: source
+            )
         }
     }
 
-    func moveColumnToWorkspaceByIndex(index: Int) {
+    func moveColumnToWorkspaceByIndex(
+        index: Int,
+        source: WMEventSource = .command
+    ) {
         guard let rawWorkspaceID = WorkspaceIDPolicy.rawID(from: max(0, index) + 1) else { return }
-        moveColumnToWorkspace(rawWorkspaceID: rawWorkspaceID)
+        moveColumnToWorkspace(rawWorkspaceID: rawWorkspaceID, source: source)
     }
 
-    func moveColumnToWorkspace(rawWorkspaceID: String) {
+    func moveColumnToWorkspace(
+        rawWorkspaceID: String,
+        source: WMEventSource = .command
+    ) {
         guard let controller else { return }
         let sourceWorkspaceId = controller.activeWorkspace()?.id
         guard let rawPlan = plan(
@@ -758,22 +897,33 @@ final class WorkspaceNavigationHandler {
             )
         ),
         let plan = materializeTargetWorkspaceIfNeeded(
-            rawPlan
+            rawPlan,
+            source: source
         ) else {
             return
         }
-        saveWorkspaces(plan.saveWorkspaceIds)
+        saveWorkspaces(plan.saveWorkspaceIds, source: source)
         if case let .column(subjectToken) = plan.subject {
-            _ = executeColumnTransferPlan(plan, rememberedTargetFocusToken: subjectToken)
+            _ = executeColumnTransferPlan(
+                plan,
+                rememberedTargetFocusToken: subjectToken,
+                source: source
+            )
         }
     }
 
-    func moveFocusedWindow(toWorkspaceIndex index: Int) {
+    func moveFocusedWindow(
+        toWorkspaceIndex index: Int,
+        source: WMEventSource = .command
+    ) {
         guard let rawWorkspaceID = WorkspaceIDPolicy.rawID(from: max(0, index) + 1) else { return }
-        moveFocusedWindow(toRawWorkspaceID: rawWorkspaceID)
+        moveFocusedWindow(toRawWorkspaceID: rawWorkspaceID, source: source)
     }
 
-    func moveFocusedWindow(toRawWorkspaceID rawWorkspaceID: String) {
+    func moveFocusedWindow(
+        toRawWorkspaceID rawWorkspaceID: String,
+        source: WMEventSource = .command
+    ) {
         guard let controller else { return }
         let focusedToken = controller.workspaceManager.focusedToken
         guard let rawPlan = plan(
@@ -786,21 +936,27 @@ final class WorkspaceNavigationHandler {
             )
         ),
         let plan = materializeTargetWorkspaceIfNeeded(
-            rawPlan
+            rawPlan,
+            source: source
         ) else {
             return
         }
-        saveWorkspaces(plan.saveWorkspaceIds)
+        saveWorkspaces(plan.saveWorkspaceIds, source: source)
         _ = executeWindowTransferPlan(
             plan,
             rememberedTargetFocusToken: focusedToken ?? .init(pid: 0, windowId: 0),
             stopSourceScroll: true,
-            markTransferringWindow: true
+            markTransferringWindow: true,
+            source: source
         )
     }
 
     @discardableResult
-    func moveWindow(handle: WindowHandle, toWorkspaceId targetWorkspaceId: WorkspaceDescriptor.ID) -> Bool {
+    func moveWindow(
+        handle: WindowHandle,
+        toWorkspaceId targetWorkspaceId: WorkspaceDescriptor.ID,
+        source: WMEventSource = .command
+    ) -> Bool {
         guard let controller else { return false }
         guard let rawPlan = plan(
             .init(
@@ -811,25 +967,39 @@ final class WorkspaceNavigationHandler {
             )
         ),
         let plan = materializeTargetWorkspaceIfNeeded(
-            rawPlan
+            rawPlan,
+            source: source
         ) else {
             return false
         }
-        saveWorkspaces(plan.saveWorkspaceIds)
+        saveWorkspaces(plan.saveWorkspaceIds, source: source)
         return executeWindowTransferPlan(
             plan,
             rememberedTargetFocusToken: handle.id,
             stopSourceScroll: false,
-            markTransferringWindow: false
+            markTransferringWindow: false,
+            source: source
         )
     }
 
-    func moveWindowToWorkspaceOnMonitor(workspaceIndex: Int, monitorDirection: Direction) {
+    func moveWindowToWorkspaceOnMonitor(
+        workspaceIndex: Int,
+        monitorDirection: Direction,
+        source: WMEventSource = .command
+    ) {
         guard let rawWorkspaceID = WorkspaceIDPolicy.rawID(from: max(0, workspaceIndex) + 1) else { return }
-        moveWindowToWorkspaceOnMonitor(rawWorkspaceID: rawWorkspaceID, monitorDirection: monitorDirection)
+        moveWindowToWorkspaceOnMonitor(
+            rawWorkspaceID: rawWorkspaceID,
+            monitorDirection: monitorDirection,
+            source: source
+        )
     }
 
-    func moveWindowToWorkspaceOnMonitor(rawWorkspaceID: String, monitorDirection: Direction) {
+    func moveWindowToWorkspaceOnMonitor(
+        rawWorkspaceID: String,
+        monitorDirection: Direction,
+        source: WMEventSource = .command
+    ) {
         guard let controller else { return }
         let focusedToken = controller.workspaceManager.focusedToken
         guard let rawPlan = plan(
@@ -844,16 +1014,18 @@ final class WorkspaceNavigationHandler {
             )
         ),
         let plan = materializeTargetWorkspaceIfNeeded(
-            rawPlan
+            rawPlan,
+            source: source
         ) else {
             return
         }
-        saveWorkspaces(plan.saveWorkspaceIds)
+        saveWorkspaces(plan.saveWorkspaceIds, source: source)
         _ = executeWindowTransferPlan(
             plan,
             rememberedTargetFocusToken: focusedToken ?? .init(pid: 0, windowId: 0),
             stopSourceScroll: false,
-            markTransferringWindow: false
+            markTransferringWindow: false,
+            source: source
         )
     }
 }

@@ -223,7 +223,7 @@ private func installDeferredRuleApplyRule(
             bundleId: "com.example.browser"
         )
         #expect(controller.workspaceManager.enterNonManagedFocus(appFullscreen: false))
-        controller.commandHandler.frontmostFocusedWindowTokenProvider = { token }
+        controller.frontmostFocusedWindowTokenProviderForCommand = { token }
         await installDeferredRuleApplyRule(on: controller, bundleId: "com.example.browser")
 
         let router = makeIPCRuleRouter(for: controller)
@@ -253,7 +253,7 @@ private func installDeferredRuleApplyRule(
             focused: false
         )
         #expect(controller.workspaceManager.enterNonManagedFocus(appFullscreen: false))
-        controller.commandHandler.frontmostFocusedWindowTokenProvider = { frontmostToken }
+        controller.frontmostFocusedWindowTokenProviderForCommand = { frontmostToken }
         await installDeferredRuleApplyRule(on: controller, bundleId: "com.example.frontmost")
 
         let router = makeIPCRuleRouter(for: controller)
@@ -342,8 +342,8 @@ private func installDeferredRuleApplyRule(
 
     @Test func applyRejectsInvalidTargetsAndAllowsNoOpReevaluationSuccess() async {
         let controller = makeLayoutPlanTestController()
-        controller.commandHandler.frontmostFocusedWindowTokenProvider = { nil }
-        controller.commandHandler.frontmostAppPidProvider = { -1 }
+        controller.frontmostFocusedWindowTokenProviderForCommand = { nil }
+        controller.frontmostAppPidProviderForCommand = { -1 }
         let emptyRouter = makeIPCRuleRouter(for: controller)
         let missingFocusedResult = await emptyRouter.handle(.apply(target: .focused))
         let invalidPidResult = await emptyRouter.handle(.apply(target: .pid(0)))
@@ -464,7 +464,7 @@ private func installDeferredRuleApplyRule(
             bundleId: "com.example.bridge"
         )
         #expect(controller.workspaceManager.enterNonManagedFocus(appFullscreen: false))
-        controller.commandHandler.frontmostFocusedWindowTokenProvider = { token }
+        controller.frontmostFocusedWindowTokenProviderForCommand = { token }
         await installDeferredRuleApplyRule(on: controller, bundleId: "com.example.bridge")
         let bridge = IPCApplicationBridge(
             controller: controller,
@@ -517,8 +517,8 @@ private func installDeferredRuleApplyRule(
 
     @Test func bridgeMapsRuleApplyValidationFailuresToStableCodes() async {
         let controller = makeLayoutPlanTestController()
-        controller.commandHandler.frontmostFocusedWindowTokenProvider = { nil }
-        controller.commandHandler.frontmostAppPidProvider = { -1 }
+        controller.frontmostFocusedWindowTokenProviderForCommand = { nil }
+        controller.frontmostAppPidProviderForCommand = { -1 }
         let bridge = IPCApplicationBridge(
             controller: controller,
             appVersion: "1.2.3",

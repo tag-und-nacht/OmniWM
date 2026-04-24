@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
 import Foundation
+import OSLog
 import OmniWMIPC
+
+private let ipcShutdownRaceLog = Logger(
+    subsystem: "com.omniwm.core",
+    category: "IPCCommandRouter.ShutdownRace"
+)
 
 @MainActor
 final class IPCCommandRouter {
@@ -52,7 +58,7 @@ final class IPCCommandRouter {
             return result
         }
 
-        return controller.windowActionHandler.focusWorkspaceFromBar(named: rawWorkspaceID) ? .executed : .notFound
+        return perform(.focusWorkspace(named: rawWorkspaceID, source: .ipc))
     }
 
     func handle(_ request: IPCWindowRequest) -> ExternalCommandResult {
@@ -69,35 +75,64 @@ final class IPCCommandRouter {
             let token = WindowToken(pid: pid, windowId: windowId)
             switch request.name {
             case .focus:
-                return controller.windowActionHandler.focusWindowFromBar(token: token)
-                    ? .executed
-                    : .notFound
+                return perform(.focusWindow(token, source: .ipc))
             case .navigate:
                 guard let handle = controller.workspaceManager.handle(for: token) else {
                     return .notFound
                 }
-                return controller.windowActionHandler.navigateToWindow(handle: handle)
-                    ? .executed
-                    : .notFound
+                return perform(.navigateToWindow(handle, source: .ipc))
             case .summonRight:
                 guard let handle = controller.workspaceManager.handle(for: token) else {
                     return .notFound
                 }
-                return controller.windowActionHandler.summonWindowRight(handle: handle)
-                    ? .executed
-                    : .notFound
+                return perform(.summonWindowRight(handle, source: .ipc))
             }
         }
     }
 
-    private func perform(_ command: HotkeyCommand) -> ExternalCommandResult {
-        controller.commandHandler.performCommand(command)
+    private func perform(_ command: InputBindingTrigger) -> ExternalCommandResult {
+        // The IPC server's read loop can deliver a request after WMRuntime
+        // (held strongly by AppDelegate) has begun teardown but before
+        // IPCServer.stop() has finished closing the socket. Soft-fail to
+        // .invalidArguments rather than crashing the WM mid-shutdown — a
+        // same-user client process otherwise has a deliberate way to crash
+        // the WM by racing the teardown window.
+        guard let runtime = controller.runtime else {
+            ipcShutdownRaceLog.notice("IPCCommandRouter.perform: WMRuntime detached during shutdown; rejecting IPC command as invalidArguments")
+            return .invalidArguments
+        }
+        return runtime.dispatchHotkey(command, source: .ipc)
+    }
+
+    private func perform(_ action: WMCommand.ControllerActionCommand) -> ExternalCommandResult {
+        perform(.controllerAction(action))
+    }
+
+    private func perform(_ command: WMCommand) -> ExternalCommandResult {
+        guard let runtime = optionalRuntime("IPCCommandRouter.perform(command)") else {
+            return .invalidArguments
+        }
+        return runtime.dispatchCommand(command)
     }
 
     private func validateControllerState() -> ExternalCommandResult? {
-        guard controller.isEnabled else { return .ignoredDisabled }
-        guard !controller.isOverviewOpen() else { return .ignoredOverview }
-        return nil
+        guard let runtime = optionalRuntime("IPCCommandRouter.validateControllerState") else {
+            return .invalidArguments
+        }
+        return runtime.preflightCommand()
+    }
+
+    /// Soft accessor for `controller.runtime`. Logs and returns nil when the
+    /// weak runtime has been released — typically because IPC delivery raced
+    /// AppKit teardown. Callers must treat nil as a shutdown-race signal and
+    /// return a non-crashing `ExternalCommandResult` (typically
+    /// `.invalidArguments`).
+    private func optionalRuntime(_ context: String) -> WMRuntime? {
+        guard let runtime = controller.runtime else {
+            ipcShutdownRaceLog.notice("\(context): WMRuntime detached during shutdown; soft-failing")
+            return nil
+        }
+        return runtime
     }
 
     private func direction(for value: IPCDirection) -> Direction {
@@ -126,23 +161,47 @@ private extension IPCCommandRouter {
     func handleFocusCommand(_ request: IPCCommandRequest) -> ExternalCommandResult? {
         switch request {
         case let .focus(ipcDirection):
+            if let guardResult = validateControllerState() {
+                return guardResult
+            }
             return perform(.focus(direction(for: ipcDirection)))
         case .focusPrevious:
+            if let guardResult = validateControllerState() {
+                return guardResult
+            }
             return perform(.focusPrevious)
         case .focusDownOrLeft:
+            if let guardResult = validateControllerState() {
+                return guardResult
+            }
             return perform(.focusDownOrLeft)
         case .focusUpOrRight:
+            if let guardResult = validateControllerState() {
+                return guardResult
+            }
             return perform(.focusUpOrRight)
         case let .focusColumn(columnIndex):
             guard let zeroBasedIndex = zeroBasedIndex(from: columnIndex) else {
                 return .invalidArguments
             }
+            if let guardResult = validateControllerState() {
+                return guardResult
+            }
             return perform(.focusColumn(zeroBasedIndex))
         case .focusColumnFirst:
+            if let guardResult = validateControllerState() {
+                return guardResult
+            }
             return perform(.focusColumnFirst)
         case .focusColumnLast:
+            if let guardResult = validateControllerState() {
+                return guardResult
+            }
             return perform(.focusColumnLast)
         case let .move(ipcDirection):
+            if let guardResult = validateControllerState() {
+                return guardResult
+            }
             return perform(.move(direction(for: ipcDirection)))
         default:
             return nil
@@ -262,9 +321,7 @@ private extension IPCCommandRouter {
             if let guardResult = validateControllerState() {
                 return guardResult
             }
-            return controller.commandHandler.setWorkspaceLayout(layoutType(for: layout))
-                ? .executed
-                : .notFound
+            return perform(.setWorkspaceLayout(layoutType(for: layout), source: .ipc))
         default:
             return nil
         }
@@ -310,17 +367,25 @@ private extension IPCCommandRouter {
 }
 private extension IPCCommandRouter {
     func focusMonitor(previous: Bool) -> ExternalCommandResult {
+        if let guardResult = validateControllerState() {
+            return guardResult
+        }
         let previousMonitorId = controller.workspaceManager.interactionMonitorId
             ?? controller.monitorForInteraction()?.id
-        _ = perform(previous ? .focusMonitorPrevious : .focusMonitorNext)
+        let result = perform(previous ? .focusMonitorPrevious : .focusMonitorNext)
+        guard result == .executed else { return result }
         let currentMonitorId = controller.workspaceManager.interactionMonitorId
             ?? controller.monitorForInteraction()?.id
         return currentMonitorId == previousMonitorId ? .notFound : .executed
     }
     func focusLastMonitor() -> ExternalCommandResult {
+        if let guardResult = validateControllerState() {
+            return guardResult
+        }
         let previousMonitorId = controller.workspaceManager.interactionMonitorId
             ?? controller.monitorForInteraction()?.id
-        _ = perform(.focusMonitorLast)
+        let result = perform(.focusMonitorLast)
+        guard result == .executed else { return result }
         let currentMonitorId = controller.workspaceManager.interactionMonitorId
             ?? controller.monitorForInteraction()?.id
         return currentMonitorId == previousMonitorId ? .notFound : .executed
@@ -335,13 +400,19 @@ private extension IPCCommandRouter {
             .dwindle
         }
     }
-    func switchWorkspace(using command: HotkeyCommand) -> ExternalCommandResult {
+    func switchWorkspace(using command: InputBindingTrigger) -> ExternalCommandResult {
+        if let guardResult = validateControllerState() {
+            return guardResult
+        }
         let previousWorkspaceId = controller.activeWorkspace()?.id
         let result = perform(command)
         guard result == .executed else { return result }
         return controller.activeWorkspace()?.id == previousWorkspaceId ? .notFound : .executed
     }
-    func moveFocusedWindow(using command: HotkeyCommand) -> ExternalCommandResult {
+    func moveFocusedWindow(using command: InputBindingTrigger) -> ExternalCommandResult {
+        if let guardResult = validateControllerState() {
+            return guardResult
+        }
         guard let token = controller.workspaceManager.focusedToken else { return .notFound }
         let previousWorkspaceId = controller.workspaceManager.workspace(for: token)
         let result = perform(command)
@@ -367,26 +438,38 @@ private extension IPCCommandRouter {
         if let guardResult = validateControllerState() {
             return guardResult
         }
-        return controller.rescueOffscreenWindows() > 0 ? .executed : .notFound
+        return perform(.rescueOffscreenWindows(source: .ipc))
     }
     func toggleFocusedWindowFloating() -> ExternalCommandResult {
+        if let guardResult = validateControllerState() {
+            return guardResult
+        }
         guard let token = controller.workspaceManager.focusedToken else { return .notFound }
         let previousOverride = controller.workspaceManager.manualLayoutOverride(for: token)
         let previousMode = controller.workspaceManager.windowMode(for: token)
-        _ = perform(.toggleFocusedWindowFloating)
+        let result = perform(.toggleFocusedWindowFloating)
+        guard result == .executed else { return result }
         let currentOverride = controller.workspaceManager.manualLayoutOverride(for: token)
         let currentMode = controller.workspaceManager.windowMode(for: token)
         return currentOverride == previousOverride && currentMode == previousMode ? .notFound : .executed
     }
     func assignFocusedWindowToScratchpad() -> ExternalCommandResult {
+        if let guardResult = validateControllerState() {
+            return guardResult
+        }
         let previousScratchpadToken = controller.workspaceManager.scratchpadToken()
-        _ = perform(.assignFocusedWindowToScratchpad)
+        let result = perform(.assignFocusedWindowToScratchpad)
+        guard result == .executed else { return result }
         return controller.workspaceManager.scratchpadToken() == previousScratchpadToken ? .notFound : .executed
     }
     func toggleScratchpad() -> ExternalCommandResult {
+        if let guardResult = validateControllerState() {
+            return guardResult
+        }
         guard let scratchpadToken = controller.workspaceManager.scratchpadToken() else { return .notFound }
         let wasHidden = controller.workspaceManager.hiddenState(for: scratchpadToken) != nil
-        _ = perform(.toggleScratchpadWindow)
+        let result = perform(.toggleScratchpadWindow)
+        guard result == .executed else { return result }
         let isHidden = controller.workspaceManager.hiddenState(for: scratchpadToken) != nil
         return wasHidden == isHidden ? .notFound : .executed
     }
@@ -403,7 +486,11 @@ private extension IPCCommandRouter {
         }
 
         let previousWorkspaceId = controller.activeWorkspace()?.id
-        controller.workspaceNavigationHandler.switchWorkspace(rawWorkspaceID: rawWorkspaceID)
+        let result = perform(.workspaceSwitch(.explicitFrom(
+            rawWorkspaceID: rawWorkspaceID,
+            source: .ipc
+        )))
+        guard result == .executed else { return result }
         return controller.activeWorkspace()?.id == previousWorkspaceId ? .notFound : .executed
     }
     func switchWorkspaceAnywhere(to target: WorkspaceTarget) -> ExternalCommandResult {
@@ -418,23 +505,13 @@ private extension IPCCommandRouter {
             rawWorkspaceID = resolved
         }
 
-        let previousWorkspaceId = controller.activeWorkspace()?.id
-        let previousMonitorId = controller.workspaceManager.interactionMonitorId
-            ?? controller.monitorForInteraction()?.id
-        controller.workspaceNavigationHandler.focusWorkspaceAnywhere(rawWorkspaceID: rawWorkspaceID)
-        let currentWorkspaceId = controller.activeWorkspace()?.id
-        let currentMonitorId = controller.workspaceManager.interactionMonitorId
-            ?? controller.monitorForInteraction()?.id
-        return currentWorkspaceId == previousWorkspaceId
-            && currentMonitorId == previousMonitorId
-            ? .notFound
-            : .executed
+        return perform(.focusWorkspaceAnywhere(rawWorkspaceID: rawWorkspaceID, source: .ipc))
     }
     func moveFocusedWindow(to target: WorkspaceTarget) -> ExternalCommandResult {
         if let guardResult = validateControllerState() {
             return guardResult
         }
-        guard let token = controller.workspaceManager.focusedToken else { return .notFound }
+        guard controller.workspaceManager.focusedToken != nil else { return .notFound }
         let rawWorkspaceID: String
         switch resolveWorkspaceTarget(target) {
         case let .failure(result):
@@ -443,9 +520,7 @@ private extension IPCCommandRouter {
             rawWorkspaceID = resolved
         }
 
-        let previousWorkspaceId = controller.workspaceManager.workspace(for: token)
-        controller.workspaceNavigationHandler.moveFocusedWindow(toRawWorkspaceID: rawWorkspaceID)
-        return controller.workspaceManager.workspace(for: token) == previousWorkspaceId ? .notFound : .executed
+        return perform(.moveFocusedWindow(rawWorkspaceID: rawWorkspaceID, source: .ipc))
     }
     func moveFocusedWindow(
         to target: WorkspaceTarget,
@@ -454,7 +529,7 @@ private extension IPCCommandRouter {
         if let guardResult = validateControllerState() {
             return guardResult
         }
-        guard let token = controller.workspaceManager.focusedToken else { return .notFound }
+        guard controller.workspaceManager.focusedToken != nil else { return .notFound }
         let rawWorkspaceID: String
         switch resolveWorkspaceTarget(target) {
         case let .failure(result):
@@ -463,12 +538,11 @@ private extension IPCCommandRouter {
             rawWorkspaceID = resolved
         }
 
-        let previousWorkspaceId = controller.workspaceManager.workspace(for: token)
-        controller.workspaceNavigationHandler.moveWindowToWorkspaceOnMonitor(
+        return perform(.moveFocusedWindowOnMonitor(
             rawWorkspaceID: rawWorkspaceID,
-            monitorDirection: monitorDirection
-        )
-        return controller.workspaceManager.workspace(for: token) == previousWorkspaceId ? .notFound : .executed
+            monitorDirection: monitorDirection,
+            source: .ipc
+        ))
     }
     func resolveWorkspaceTarget(_ target: WorkspaceTarget) -> Result<String, ExternalCommandResult> {
         let resolver = WorkspaceTargetResolver(

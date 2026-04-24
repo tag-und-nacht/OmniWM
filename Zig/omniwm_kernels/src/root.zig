@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 const std = @import("std");
+const abi_schema_assertions = @import("abi_schema_assertions.zig");
 const dwindle_layout = @import("dwindle_layout.zig");
 const ipc_support = @import("ipc_support.zig");
 const niri_layout = @import("niri_layout.zig");
@@ -14,6 +15,7 @@ const workspace_navigation = @import("workspace_navigation.zig");
 const workspace_session = @import("workspace_session.zig");
 
 comptime {
+    _ = abi_schema_assertions;
     _ = dwindle_layout;
     _ = ipc_support;
     _ = niri_layout;

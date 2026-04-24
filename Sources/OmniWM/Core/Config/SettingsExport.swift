@@ -29,8 +29,6 @@ struct QuakeTerminalFrameExport: Codable, Equatable {
 }
 
 struct SettingsExport: Codable, Equatable {
-    var version: Int = SettingsFilePersistence.configVersion
-
     var hotkeysEnabled: Bool
     var focusFollowsMouse: Bool
     var moveMouseToFocusedWindow: Bool
@@ -129,6 +127,8 @@ struct SettingsExport: Codable, Equatable {
     var quakeTerminalCustomFrame: QuakeTerminalFrameExport?
 
     var appearanceMode: String
+
+    var capabilityOverrides: [WindowCapabilityProfileTOMLOverride] = []
 }
 
 extension SettingsExport {

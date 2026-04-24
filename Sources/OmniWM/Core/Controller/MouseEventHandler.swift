@@ -124,6 +124,13 @@ final class MouseEventHandler {
         self.controller = controller
     }
 
+    private func requiredRuntime(_ context: String) -> WMRuntime {
+        guard let runtime = controller?.runtime else {
+            preconditionFailure("\(context) requires WMRuntime to be attached")
+        }
+        return runtime
+    }
+
     func setup() {
         MouseEventHandler.sharedInstance = self
 
@@ -627,8 +634,9 @@ final class MouseEventHandler {
                 let gaps = CGFloat(controller.workspaceManager.gaps)
 
                 let isInsertMode = modifiers.contains(.maskShift)
+                let runtime = requiredRuntime("MouseEventHandler.handleMouseDownFromTap")
                 var moveStarted = false
-                controller.workspaceManager.withNiriViewportState(for: wsId) { vstate in
+                runtime.withNiriViewportState(for: wsId, source: .mouse) { vstate in
                     controller.niriLayoutHandler.syncAnimationRefreshRate(
                         for: monitor,
                         engine: engine,
@@ -758,7 +766,8 @@ final class MouseEventHandler {
             monitorFrame: insetFrame,
             gaps: gaps,
             viewportState: { mutate in
-                controller.workspaceManager.withNiriViewportState(for: wsId, mutate)
+                let runtime = requiredRuntime("MouseEventHandler.handleMouseDraggedFromTap")
+                runtime.withNiriViewportState(for: wsId, source: .mouse, mutate)
             }
         ) {
             controller.layoutRefreshController.requestImmediateRelayout(
@@ -779,8 +788,9 @@ final class MouseEventHandler {
             {
                 let workingFrame = controller.insetWorkingFrame(for: monitor)
                 let gaps = CGFloat(controller.workspaceManager.gaps)
+                let runtime = requiredRuntime("MouseEventHandler.handleMouseUpFromTap")
                 var didEnd = false
-                controller.workspaceManager.withNiriViewportState(for: wsId) { vstate in
+                runtime.withNiriViewportState(for: wsId, source: .mouse) { vstate in
                     controller.niriLayoutHandler.syncAnimationRefreshRate(
                         for: monitor,
                         engine: engine,
@@ -820,7 +830,8 @@ final class MouseEventHandler {
             let gaps = CGFloat(controller.workspaceManager.gaps)
             let hadInteractiveResize = engine.interactiveResize != nil
 
-            controller.workspaceManager.withNiriViewportState(for: wsId) { vstate in
+            let runtime = requiredRuntime("MouseEventHandler.handleMouseUpFromTap")
+            runtime.withNiriViewportState(for: wsId, source: .mouse) { vstate in
                 controller.niriLayoutHandler.syncAnimationRefreshRate(
                     for: monitor,
                     engine: engine,
@@ -966,8 +977,65 @@ final class MouseEventHandler {
 
         switch target {
         case let .niri(workspaceId, window):
-            controller.workspaceManager.withNiriViewportState(for: workspaceId) { vstate in
-                controller.niriLayoutHandler.activateNode(window, in: workspaceId, state: &vstate)
+            let runtime = requiredRuntime("MouseEventHandler.activateFocusFollowsMouseTarget")
+            let activation: (nodeId: NodeId, focusToken: WindowToken, shouldStartAnimation: Bool)? =
+                runtime.withNiriViewportState(for: workspaceId, source: .mouse) { vstate in
+                    guard let engine = controller.niriEngine else {
+                        return nil
+                    }
+
+                    vstate.selectedNodeId = window.id
+                    engine.activateWindow(window.id)
+                    if let monitor = LayoutProjectionContext.project(controller: controller).monitor(for: workspaceId) {
+                        controller.niriLayoutHandler.syncAnimationRefreshRate(
+                            for: monitor,
+                            engine: engine,
+                            state: &vstate
+                        )
+                        let gap = CGFloat(controller.workspaceManager.gaps)
+                        let workingFrame = controller.insetWorkingFrame(for: monitor)
+                        engine.ensureSelectionVisible(
+                            node: window,
+                            in: workspaceId,
+                            motion: controller.motionPolicy.snapshot(),
+                            state: &vstate,
+                            workingFrame: workingFrame,
+                            gaps: gap
+                        )
+                    }
+                    engine.updateFocusTimestamp(for: window.id)
+                    return (
+                        nodeId: window.id,
+                        focusToken: window.token,
+                        shouldStartAnimation: vstate.viewOffsetPixels.isAnimating
+                    )
+                }
+            guard let activation else { return }
+            _ = runtime.commitWorkspaceSelection(
+                nodeId: activation.nodeId,
+                focusedToken: activation.focusToken,
+                in: workspaceId,
+                onMonitor: controller.workspaceManager.monitorId(for: workspaceId),
+                source: .mouse
+            )
+            _ = runtime.beginManagedFocusRequest(
+                activation.focusToken,
+                in: workspaceId,
+                onMonitor: controller.workspaceManager.monitorId(for: workspaceId),
+                source: .mouse
+            )
+            controller.layoutRefreshController.requestImmediateRelayout(
+                reason: .layoutCommand,
+                affectedWorkspaceIds: [workspaceId]
+            ) { [weak controller] in
+                controller?.recordManagedRestoreGeometryIfMaterialStateChanged(
+                    for: CGWindowID(activation.focusToken.windowId),
+                    reason: .niriStateChanged
+                )
+                controller?.focusWindow(activation.focusToken, source: .mouse)
+            }
+            if activation.shouldStartAnimation {
+                controller.layoutRefreshController.startScrollAnimation(for: workspaceId)
             }
         case let .dwindle(workspaceId, token):
             controller.dwindleLayoutHandler.activateWindow(token, in: workspaceId)
@@ -1093,8 +1161,10 @@ final class MouseEventHandler {
         let gap = CGFloat(controller.workspaceManager.gaps)
         let columns = engine.columns(in: wsId)
 
+        let runtime = requiredRuntime("MouseEventHandler.applyMouseViewportScrollDelta")
         var targetWindowHandle: WindowHandle?
-        controller.workspaceManager.withNiriViewportState(for: wsId) { vstate in
+        var rememberedFocusToken: WindowToken?
+        runtime.withNiriViewportState(for: wsId, source: .mouse) { vstate in
             controller.niriLayoutHandler.syncAnimationRefreshRate(
                 for: monitor,
                 engine: engine,
@@ -1137,16 +1207,18 @@ final class MouseEventHandler {
                    gap: gap
                )
             {
-                _ = controller.workspaceManager.applySessionPatch(
-                    .init(
-                        workspaceId: wsId,
-                        viewportState: nil,
-                        rememberedFocusToken: windowNode.token
-                    )
-                )
+                rememberedFocusToken = windowNode.token
                 engine.updateFocusTimestamp(for: windowNode.id)
                 targetWindowHandle = controller.workspaceManager.handle(for: windowNode.token)
             }
+        }
+        if let rememberedFocusToken {
+            let patch = WorkspaceSessionPatch(
+                workspaceId: wsId,
+                viewportState: nil,
+                rememberedFocusToken: rememberedFocusToken
+            )
+            _ = runtime.applySessionPatch(patch, source: .mouse)
         }
         controller.layoutRefreshController.requestImmediateRelayout(
             reason: .interactiveGesture,
@@ -1154,7 +1226,7 @@ final class MouseEventHandler {
         )
 
         if let handle = targetWindowHandle {
-            controller.focusWindow(handle)
+            controller.focusWindow(handle, source: .mouse)
         }
     }
 
@@ -1169,11 +1241,11 @@ final class MouseEventHandler {
             return
         }
 
-        var startedAnimation = false
         let insetFrame = controller.insetWorkingFrame(for: monitor)
         let columns = engine.columns(in: wsId)
         let gap = CGFloat(controller.workspaceManager.gaps)
-        controller.workspaceManager.withNiriViewportState(for: wsId) { endState in
+        let runtime = requiredRuntime("MouseEventHandler.finalizeOrCancelCommittedGesture")
+        let endState = runtime.withNiriViewportState(for: wsId, source: .mouse) { endState in
             controller.niriLayoutHandler.syncAnimationRefreshRate(
                 for: monitor,
                 engine: engine,
@@ -1187,13 +1259,14 @@ final class MouseEventHandler {
                 centerMode: engine.centerFocusedColumn,
                 alwaysCenterSingleColumn: engine.alwaysCenterSingleColumn
             )
-            startedAnimation = controller.niriLayoutHandler.startScrollAnimationIfNeeded(
-                for: wsId,
-                state: endState,
-                engine: engine
-            )
+            return endState
         }
 
+        let startedAnimation = controller.niriLayoutHandler.startScrollAnimationIfNeeded(
+            for: wsId,
+            state: endState,
+            engine: engine
+        )
         if !startedAnimation {
             controller.layoutRefreshController.requestImmediateRelayout(
                 reason: .interactiveGesture,
@@ -1204,8 +1277,9 @@ final class MouseEventHandler {
 
     private func cancelCommittedGestureViewportState(for wsId: WorkspaceDescriptor.ID) {
         guard let controller else { return }
+        let runtime = requiredRuntime("MouseEventHandler.cancelCommittedGestureViewportState")
         var didCancel = false
-        controller.workspaceManager.withNiriViewportState(for: wsId) { vstate in
+        runtime.withNiriViewportState(for: wsId, source: .mouse) { vstate in
             guard vstate.viewOffsetPixels.isGesture else { return }
             vstate.cancelAnimation()
             vstate.selectionProgress = 0.0

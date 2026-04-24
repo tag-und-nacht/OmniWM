@@ -16,6 +16,31 @@ private func makeMouseEventTestWindow(windowId: Int = 101) -> AXWindowRef {
     AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: windowId)
 }
 
+private func successfulMouseEventFrameApplyResults(
+    for requests: [AXFrameApplicationRequest]
+) -> [AXFrameApplyResult] {
+    requests.map { request in
+        AXFrameApplyResult(
+            requestId: request.requestId,
+            pid: request.pid,
+            windowId: request.windowId,
+            targetFrame: request.frame,
+            currentFrameHint: request.currentFrameHint,
+            writeResult: AXFrameWriteResult(
+                targetFrame: request.frame,
+                observedFrame: request.frame,
+                writeOrder: AXWindowService.frameWriteOrder(
+                    currentFrame: request.currentFrameHint,
+                    targetFrame: request.frame
+                ),
+                sizeError: .success,
+                positionError: .success,
+                failureReason: nil
+            )
+        )
+    }
+}
+
 private func makeGestureTouchSamples(
     xPositions: [CGFloat],
     yPosition: CGFloat = 0.5,
@@ -46,9 +71,9 @@ private func makeOwnedUtilityTestWindow(
 }
 
 @MainActor
-private func makeMouseEventTestController(
+private func makeMouseEventTestRuntime(
     workspaceConfigurations: [WorkspaceConfiguration]? = nil
-) -> WMController {
+) -> WMRuntime {
     let operations = WindowFocusOperations(
         activateApp: { _ in },
         focusSpecificWindow: { _, _, _ in },
@@ -58,7 +83,8 @@ private func makeMouseEventTestController(
     if let workspaceConfigurations {
         settings.workspaceConfigurations = workspaceConfigurations
     }
-    let controller = WMController(settings: settings, windowFocusOperations: operations)
+    let runtime = WMRuntime(settings: settings, windowFocusOperations: operations)
+    let controller = runtime.controller
     controller.lockScreenObserver.frontmostSnapshotProvider = { nil }
     let frame = CGRect(x: 0, y: 0, width: 1920, height: 1080)
     let monitor = Monitor(
@@ -70,13 +96,17 @@ private func makeMouseEventTestController(
         name: "Main"
     )
     controller.workspaceManager.applyMonitorConfigurationChange([monitor])
-    return controller
+    controller.axManager.frameApplyOverrideForTests = {
+        successfulMouseEventFrameApplyResults(for: $0)
+    }
+    return runtime
 }
 
 @MainActor
 private func prepareMouseResizeFixture(
     constraints: WindowSizeConstraints = .unconstrained
 ) async -> (
+    runtime: WMRuntime,
     controller: WMController,
     handler: MouseEventHandler,
     handle: WindowHandle,
@@ -85,7 +115,8 @@ private func prepareMouseResizeFixture(
     nodeFrame: CGRect,
     location: CGPoint
 ) {
-    let controller = makeMouseEventTestController()
+    let runtime = makeMouseEventTestRuntime()
+    let controller = runtime.controller
     controller.enableNiriLayout()
     await controller.layoutRefreshController.waitForRefreshWorkForTests()
     controller.syncMonitorsToNiriEngine()
@@ -133,12 +164,13 @@ private func prepareMouseResizeFixture(
     }
 
     let location = CGPoint(x: monitor.visibleFrame.midX, y: monitor.visibleFrame.midY)
-    return (controller, controller.mouseEventHandler, handle, workspaceId, node.id, nodeFrame, location)
+    return (runtime, controller, controller.mouseEventHandler, handle, workspaceId, node.id, nodeFrame, location)
 }
 
 @Suite(.serialized) struct MouseEventHandlerTests {
     @Test @MainActor func lockedInputHandlersAreNoOps() async {
-        let controller = makeMouseEventTestController()
+        let runtime = makeMouseEventTestRuntime()
+        let controller = runtime.controller
         controller.isLockScreenActive = true
 
         var relayoutReasons: [RefreshReason] = []
@@ -320,7 +352,8 @@ private func prepareMouseResizeFixture(
     }
 
     @Test @MainActor func offMainThreadMouseTapCallbackFailsOpenWithoutQueueingState() {
-        let controller = makeMouseEventTestController()
+        let runtime = makeMouseEventTestRuntime()
+        let controller = runtime.controller
         let handler = controller.mouseEventHandler
 
         guard let event = CGEvent(
@@ -346,7 +379,8 @@ private func prepareMouseResizeFixture(
     }
 
     @Test @MainActor func offMainThreadGestureTapCallbackFailsOpenWithoutMutatingGestureState() {
-        let controller = makeMouseEventTestController()
+        let runtime = makeMouseEventTestRuntime()
+        let controller = runtime.controller
         let handler = controller.mouseEventHandler
 
         guard let event = CGEvent(
@@ -389,11 +423,12 @@ private func prepareMouseResizeFixture(
     }
 
     @Test @MainActor func trackpadGestureDoesNotMutateNiriViewportStateOnDwindleWorkspace() async {
-        let controller = makeMouseEventTestController(
+        let runtime = makeMouseEventTestRuntime(
             workspaceConfigurations: [
                 WorkspaceConfiguration(name: "1", monitorAssignment: .main, layoutType: .dwindle)
             ]
         )
+        let controller = runtime.controller
         controller.settings.scrollGestureEnabled = true
         controller.enableNiriLayout(maxWindowsPerColumn: 1)
         controller.enableDwindleLayout()
@@ -508,12 +543,13 @@ private func prepareMouseResizeFixture(
     }
 
     @Test @MainActor func committedTrackpadGestureCancelsViewportWhenContextBecomesUnsupported() async {
-        let controller = makeMouseEventTestController(
+        let runtime = makeMouseEventTestRuntime(
             workspaceConfigurations: [
                 WorkspaceConfiguration(name: "1", monitorAssignment: .main, layoutType: .niri),
                 WorkspaceConfiguration(name: "2", monitorAssignment: .main, layoutType: .dwindle),
             ]
         )
+        let controller = runtime.controller
         controller.settings.scrollGestureEnabled = true
         controller.enableNiriLayout(maxWindowsPerColumn: 1)
         controller.enableDwindleLayout()
@@ -598,7 +634,8 @@ private func prepareMouseResizeFixture(
     }
 
     @Test @MainActor func viewportScrollDeltaThreadsMonitorRefreshRateIntoNiriStateAndEngine() async {
-        let controller = makeMouseEventTestController()
+        let runtime = makeMouseEventTestRuntime()
+        let controller = runtime.controller
         controller.settings.scrollGestureEnabled = true
         controller.enableNiriLayout(maxWindowsPerColumn: 1)
         await controller.layoutRefreshController.waitForRefreshWorkForTests()
@@ -628,7 +665,8 @@ private func prepareMouseResizeFixture(
     }
 
     @Test @MainActor func mouseWheelViewportScrollUsesStaticOffset() async {
-        let controller = makeMouseEventTestController()
+        let runtime = makeMouseEventTestRuntime()
+        let controller = runtime.controller
         controller.settings.scrollGestureEnabled = true
         controller.enableNiriLayout(maxWindowsPerColumn: 1)
         await controller.layoutRefreshController.waitForRefreshWorkForTests()
@@ -704,7 +742,8 @@ private func prepareMouseResizeFixture(
     }
 
     @Test @MainActor func committedTrackpadGestureFinalizationStartsSettleAnimation() async {
-        let controller = makeMouseEventTestController()
+        let runtime = makeMouseEventTestRuntime()
+        let controller = runtime.controller
         controller.settings.scrollGestureEnabled = true
         controller.enableNiriLayout(
             maxWindowsPerColumn: 1,
@@ -777,7 +816,8 @@ private func prepareMouseResizeFixture(
     }
 
     @Test @MainActor func scrollBurstOnlyMergesWithinMatchingModifierAndPhaseGroups() {
-        let controller = makeMouseEventTestController()
+        let runtime = makeMouseEventTestRuntime()
+        let controller = runtime.controller
         let handler = controller.mouseEventHandler
 
         handler.resetDebugStateForTests()
@@ -815,7 +855,8 @@ private func prepareMouseResizeFixture(
     }
 
     @Test @MainActor func ownedWindowMouseDownDropsQueuedTapEventsInsteadOfFlushingThem() {
-        let controller = makeMouseEventTestController()
+        let runtime = makeMouseEventTestRuntime()
+        let controller = runtime.controller
         let handler = controller.mouseEventHandler
         let window = makeOwnedUtilityTestWindow()
         let registry = OwnedWindowRegistry.shared
@@ -897,7 +938,8 @@ private func prepareMouseResizeFixture(
     }
 
     @Test @MainActor func focusFollowsMouseIgnoresCoveredTileBehindManagedFullscreen() async {
-        let controller = makeMouseEventTestController()
+        let runtime = makeMouseEventTestRuntime()
+        let controller = runtime.controller
         controller.enableNiriLayout(maxWindowsPerColumn: 1)
         await controller.layoutRefreshController.waitForRefreshWorkForTests()
         controller.syncMonitorsToNiriEngine()
@@ -1081,11 +1123,12 @@ private func prepareMouseResizeFixture(
     }
 
     @Test @MainActor func focusFollowsMouseActivatesHoveredDwindleWindow() async {
-        let controller = makeMouseEventTestController(
+        let runtime = makeMouseEventTestRuntime(
             workspaceConfigurations: [
                 WorkspaceConfiguration(name: "1", monitorAssignment: .main, layoutType: .dwindle)
             ]
         )
+        let controller = runtime.controller
         controller.enableDwindleLayout()
         await controller.layoutRefreshController.waitForRefreshWorkForTests()
         controller.setFocusFollowsMouse(true)
@@ -1165,11 +1208,12 @@ private func prepareMouseResizeFixture(
     }
 
     @Test @MainActor func focusFollowsMousePrefersDwindleFullscreenWindowOverCoveredTile() async {
-        let controller = makeMouseEventTestController(
+        let runtime = makeMouseEventTestRuntime(
             workspaceConfigurations: [
                 WorkspaceConfiguration(name: "1", monitorAssignment: .main, layoutType: .dwindle)
             ]
         )
+        let controller = runtime.controller
         controller.enableDwindleLayout()
         await controller.layoutRefreshController.waitForRefreshWorkForTests()
         controller.setFocusFollowsMouse(true)
@@ -1247,11 +1291,12 @@ private func prepareMouseResizeFixture(
     }
 
     @Test @MainActor func focusFollowsMouseUsesDwindleGeometryWithoutConsultingNiriLayout() async {
-        let controller = makeMouseEventTestController(
+        let runtime = makeMouseEventTestRuntime(
             workspaceConfigurations: [
                 WorkspaceConfiguration(name: "1", monitorAssignment: .main, layoutType: .dwindle)
             ]
         )
+        let controller = runtime.controller
         controller.enableNiriLayout(maxWindowsPerColumn: 1)
         controller.enableDwindleLayout()
         await controller.layoutRefreshController.waitForRefreshWorkForTests()

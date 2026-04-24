@@ -186,7 +186,7 @@ struct HotkeyCategorySection: View {
     let bindings: [HotkeyBinding]
     let motionPolicy: MotionPolicy
     @Binding var recordingActionId: String?
-    let registrationFailures: [HotkeyCommand: HotkeyRegistrationFailureReason]
+    let registrationFailures: [InputBindingTrigger: HotkeyRegistrationFailureReason]
     let onStartRecording: (String) -> Void
     let onBindingCaptured: (String, KeyBinding) -> Void
     let onClearBinding: (String) -> Void

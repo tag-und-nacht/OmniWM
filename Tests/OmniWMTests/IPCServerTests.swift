@@ -446,6 +446,45 @@ private func makeTestFocusEvent(id: String, title: String) -> IPCEventEnvelope {
         }
     }
 
+    @Test func staleRawWorkspaceNameOnlyRequestReturnsInvalidRequestBeforeVersionHandshake() async throws {
+        let socketPath = makeIPCTestSocketPath()
+        let controller = makeLayoutPlanTestController()
+        let initialWorkspaceName = try #require(controller.activeWorkspace()?.name)
+        let server = IPCServer(controller: controller, socketPath: socketPath)
+        defer {
+            server.stop()
+            try? FileManager.default.removeItem(atPath: socketPath)
+        }
+        try server.start()
+
+        let connection = try openRawIPCTestConnection(to: socketPath)
+        defer { try? connection.close() }
+
+        // v4 was the last protocol version that decoded bare `workspaceName` payloads.
+        let retiredWorkspaceNamePayloadProtocolVersion = 4
+        let rawRequest = """
+        {
+          "version": \(retiredWorkspaceNamePayloadProtocolVersion),
+          "id": "legacy-workspace",
+          "kind": "workspace",
+          "payload": {
+            "name": "focus-name",
+            "workspaceName": "2"
+          }
+        }
+        """
+
+        try connection.write(contentsOf: Data((rawRequest + "\n").utf8))
+        let line = try #require(try readRawLine(from: connection))
+        let response = try IPCWire.decodeResponse(from: line)
+
+        #expect(response.ok == false)
+        #expect(response.id == "")
+        #expect(response.kind == .error)
+        #expect(response.code == .invalidRequest)
+        #expect(controller.activeWorkspace()?.name == initialWorkspaceName)
+    }
+
     @Test func disabledMutationsStillReturnClearQueries() async throws {
         let socketPath = makeIPCTestSocketPath()
         let controller = makeLayoutPlanTestController()

@@ -100,28 +100,7 @@
   <a href="https://trendshift.io/repositories/16758" target="_blank"><img src="https://trendshift.io/api/badge/repositories/16758" alt="BarutSRB%2FOmniWM | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
 </p>
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/BarutSRB/OmniWM/main/assets/semidemo.gif" alt="OmniWM demo">
-  <img src="https://raw.githubusercontent.com/BarutSRB/OmniWM/main/assets/semidemo1.gif" alt="OmniWM demo">
-</p>
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/BarutSRB/OmniWM/main/assets/demo1.gif" alt="OmniWM demo" width="100%">
-</p>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/BarutSRB/OmniWM/main/assets/demo2.gif" alt="OmniWM demo" width="100%">
-</p>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/BarutSRB/OmniWM/main/assets/demo3.gif" alt="OmniWM demo" width="100%">
-</p>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/BarutSRB/OmniWM/main/assets/demo4.gif" alt="OmniWM demo" width="100%">
-</p>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/BarutSRB/OmniWM/main/assets/demo5.gif" alt="OmniWM demo" width="100%">
-</p>
-
-Small demo, not fully showing everything, gif recorded at 30fps due to size, some stuff is now more refined and better as soem gifs might be outdated, features shown:
+Some of the features:
 - Real quake/sticky terminal using ghostty's libghostty
 - Best-effort macOS native-tab replacement support
 - IPC/CLI
@@ -135,10 +114,6 @@ Small demo, not fully showing everything, gif recorded at 30fps due to size, som
 - Keep awake (Similar to Caffeine)
 - Interactive workspace/app icon bar
 - A lot more features not show in the video.
-
-## Known Limitations
-
-- **Gestures/Trackpad** - Magic Mouse and trackpad gestures are untested (no hardware available for testing but haven't heard complaints so it works)
 
 ## Performance & Trust
 

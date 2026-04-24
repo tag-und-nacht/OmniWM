@@ -109,7 +109,8 @@ enum EventNormalizer {
              .managedFocusCancelled,
              .nonManagedFocusChanged,
              .systemSleep,
-             .systemWake:
+             .systemWake,
+             .commandIntent:
             return event
         }
     }

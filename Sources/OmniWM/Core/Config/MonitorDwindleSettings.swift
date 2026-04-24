@@ -62,8 +62,7 @@ struct MonitorDwindleSettings: MonitorSettingsType {
         smartSplit = try container.decodeIfPresent(Bool.self, forKey: .smartSplit)
         defaultSplitRatio = try container.decodeIfPresent(Double.self, forKey: .defaultSplitRatio)
         splitWidthMultiplier = try container.decodeIfPresent(Double.self, forKey: .splitWidthMultiplier)
-        singleWindowAspectRatio = try container.decodeIfPresent(String.self, forKey: .singleWindowAspectRatio)
-            .flatMap { DwindleSingleWindowAspectRatio(rawValue: $0) }
+        singleWindowAspectRatio = try container.decodeIfPresent(DwindleSingleWindowAspectRatio.self, forKey: .singleWindowAspectRatio)
         useGlobalGaps = try container.decodeIfPresent(Bool.self, forKey: .useGlobalGaps)
         innerGap = try container.decodeIfPresent(Double.self, forKey: .innerGap)
         outerGapTop = try container.decodeIfPresent(Double.self, forKey: .outerGapTop)
@@ -80,7 +79,7 @@ struct MonitorDwindleSettings: MonitorSettingsType {
         try container.encodeIfPresent(smartSplit, forKey: .smartSplit)
         try container.encodeIfPresent(defaultSplitRatio, forKey: .defaultSplitRatio)
         try container.encodeIfPresent(splitWidthMultiplier, forKey: .splitWidthMultiplier)
-        try container.encodeIfPresent(singleWindowAspectRatio?.rawValue, forKey: .singleWindowAspectRatio)
+        try container.encodeIfPresent(singleWindowAspectRatio, forKey: .singleWindowAspectRatio)
         try container.encodeIfPresent(useGlobalGaps, forKey: .useGlobalGaps)
         try container.encodeIfPresent(innerGap, forKey: .innerGap)
         try container.encodeIfPresent(outerGapTop, forKey: .outerGapTop)

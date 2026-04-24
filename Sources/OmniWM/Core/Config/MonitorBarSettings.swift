@@ -75,10 +75,8 @@ struct MonitorBarSettings: MonitorSettingsType {
         hideEmptyWorkspaces = try container.decodeIfPresent(Bool.self, forKey: .hideEmptyWorkspaces)
         reserveLayoutSpace = try container.decodeIfPresent(Bool.self, forKey: .reserveLayoutSpace)
         notchAware = try container.decodeIfPresent(Bool.self, forKey: .notchAware)
-        position = try container.decodeIfPresent(String.self, forKey: .position)
-            .flatMap { WorkspaceBarPosition(rawValue: $0) }
-        windowLevel = try container.decodeIfPresent(String.self, forKey: .windowLevel)
-            .flatMap { WorkspaceBarWindowLevel(rawValue: $0) }
+        position = try container.decodeIfPresent(WorkspaceBarPosition.self, forKey: .position)
+        windowLevel = try container.decodeIfPresent(WorkspaceBarWindowLevel.self, forKey: .windowLevel)
         height = try container.decodeIfPresent(Double.self, forKey: .height)
         backgroundOpacity = try container.decodeIfPresent(Double.self, forKey: .backgroundOpacity)
         xOffset = try container.decodeIfPresent(Double.self, forKey: .xOffset)
@@ -97,8 +95,8 @@ struct MonitorBarSettings: MonitorSettingsType {
         try container.encodeIfPresent(hideEmptyWorkspaces, forKey: .hideEmptyWorkspaces)
         try container.encodeIfPresent(reserveLayoutSpace, forKey: .reserveLayoutSpace)
         try container.encodeIfPresent(notchAware, forKey: .notchAware)
-        try container.encodeIfPresent(position?.rawValue, forKey: .position)
-        try container.encodeIfPresent(windowLevel?.rawValue, forKey: .windowLevel)
+        try container.encodeIfPresent(position, forKey: .position)
+        try container.encodeIfPresent(windowLevel, forKey: .windowLevel)
         try container.encodeIfPresent(height, forKey: .height)
         try container.encodeIfPresent(backgroundOpacity, forKey: .backgroundOpacity)
         try container.encodeIfPresent(xOffset, forKey: .xOffset)

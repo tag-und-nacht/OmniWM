@@ -46,6 +46,8 @@ final class FocusBridgeCoordinator {
     private var isFocusOperationPending = false
     private var lastFocusTime: Date = .distantPast
 
+    private var originEpochByRequestId: [UInt64: TransactionEpoch] = [:]
+
     var nextManagedRequestId: UInt64 {
         nextRequestId
     }
@@ -90,6 +92,7 @@ final class FocusBridgeCoordinator {
         let matchesWorkspace = workspaceId.map { activeManagedRequest.workspaceId == $0 } ?? true
         guard matchesToken, matchesWorkspace else { return nil }
 
+        originEpochByRequestId.removeValue(forKey: activeManagedRequest.requestId)
         self.activeManagedRequest = nil
         return activeManagedRequest
     }
@@ -99,8 +102,27 @@ final class FocusBridgeCoordinator {
         guard let activeManagedRequest, activeManagedRequest.requestId == requestId else {
             return nil
         }
+        originEpochByRequestId.removeValue(forKey: activeManagedRequest.requestId)
         self.activeManagedRequest = nil
         return activeManagedRequest
+    }
+
+    func recordOriginTransactionEpoch(
+        _ epoch: TransactionEpoch,
+        for requestId: UInt64
+    ) {
+        originEpochByRequestId[requestId] = epoch
+    }
+
+    func originTransactionEpoch(forRequestId requestId: UInt64) -> TransactionEpoch? {
+        originEpochByRequestId[requestId]
+    }
+
+    func originTransactionEpoch(forToken token: WindowToken) -> TransactionEpoch? {
+        guard let request = activeManagedRequest, request.token == token else {
+            return nil
+        }
+        return originEpochByRequestId[request.requestId]
     }
 
     func rekeyManagedRequest(from oldToken: WindowToken, to newToken: WindowToken) {

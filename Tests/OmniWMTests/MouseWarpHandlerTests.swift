@@ -46,6 +46,7 @@ private func makeConfiguredMouseWarpTestFixture(
     monitorOrder: [String],
     axis: MouseWarpAxis
 ) -> (
+    runtime: WMRuntime,
     controller: WMController,
     handler: MouseWarpHandler,
     recorder: WarpEffectRecorder
@@ -67,10 +68,11 @@ private func makeConfiguredMouseWarpTestFixture(
         raiseWindow: { _ in }
     )
 
-    let controller = WMController(
+    let runtime = WMRuntime(
         settings: settings,
         windowFocusOperations: operations
     )
+    let controller = runtime.controller
     controller.lockScreenObserver.frontmostSnapshotProvider = { nil }
     controller.workspaceManager.applyMonitorConfigurationChange(monitors)
 
@@ -84,11 +86,12 @@ private func makeConfiguredMouseWarpTestFixture(
         recorder.postedPoints.append(point)
         recorder.orderedEvents.append(.post(point))
     }
-    return (controller, handler, recorder)
+    return (runtime, controller, handler, recorder)
 }
 
 @MainActor
 private func makeMouseWarpTestFixture() -> (
+    runtime: WMRuntime,
     controller: WMController,
     handler: MouseWarpHandler,
     leftMonitor: Monitor,
@@ -102,11 +105,12 @@ private func makeMouseWarpTestFixture() -> (
         monitorOrder: ["Left", "Right"],
         axis: .horizontal
     )
-    return (fixture.controller, fixture.handler, leftMonitor, rightMonitor, fixture.recorder)
+    return (fixture.runtime, fixture.controller, fixture.handler, leftMonitor, rightMonitor, fixture.recorder)
 }
 
 @MainActor
 private func makeVerticalMouseWarpTestFixture() -> (
+    runtime: WMRuntime,
     controller: WMController,
     handler: MouseWarpHandler,
     topMonitor: Monitor,
@@ -120,11 +124,12 @@ private func makeVerticalMouseWarpTestFixture() -> (
         monitorOrder: ["Top", "Bottom"],
         axis: .vertical
     )
-    return (fixture.controller, fixture.handler, topMonitor, bottomMonitor, fixture.recorder)
+    return (fixture.runtime, fixture.controller, fixture.handler, topMonitor, bottomMonitor, fixture.recorder)
 }
 
 @MainActor
 private func makeVerticalAxisSideBySideMouseWarpTestFixture() -> (
+    runtime: WMRuntime,
     controller: WMController,
     handler: MouseWarpHandler,
     leftMonitor: Monitor,
@@ -152,11 +157,12 @@ private func makeVerticalAxisSideBySideMouseWarpTestFixture() -> (
         monitorOrder: ["Left", "Right"],
         axis: .vertical
     )
-    return (fixture.controller, fixture.handler, leftMonitor, rightMonitor, fixture.recorder)
+    return (fixture.runtime, fixture.controller, fixture.handler, leftMonitor, rightMonitor, fixture.recorder)
 }
 
 @MainActor
 private func makeHorizontalAxisStackedMouseWarpTestFixture() -> (
+    runtime: WMRuntime,
     controller: WMController,
     handler: MouseWarpHandler,
     topMonitor: Monitor,
@@ -184,7 +190,7 @@ private func makeHorizontalAxisStackedMouseWarpTestFixture() -> (
         monitorOrder: ["Top", "Bottom"],
         axis: .horizontal
     )
-    return (fixture.controller, fixture.handler, topMonitor, bottomMonitor, fixture.recorder)
+    return (fixture.runtime, fixture.controller, fixture.handler, topMonitor, bottomMonitor, fixture.recorder)
 }
 
 @MainActor

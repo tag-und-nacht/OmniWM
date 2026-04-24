@@ -52,7 +52,6 @@ This document covers the OmniWM automation surface. For the docs hub, see [Docum
 - [Error Codes](#error-codes)
 - [Output Formats](#output-formats)
 - [Environment Variables](#environment-variables)
-- [Aliases](#aliases)
 
 ---
 
@@ -113,8 +112,8 @@ IPCWire.encodeRequestLine()  ──▶  Unix socket  ──▶  IPCServer
                                      └─ route to IPCCommandRouter
                                            │
                                            ▼
-                                   WMController.commandHandler
-                                     (same path as hotkey commands)
+                                   WMRuntime.dispatchHotkey
+                                     (typed command runtime path)
                                            │
                                            ▼
                                    ExternalCommandResult
@@ -162,7 +161,17 @@ Turning **Enable IPC** on starts the server immediately and creates the Unix soc
 
 ## IPC Protocol
 
-**Protocol version:** 3
+**Protocol version:** 5
+
+### Versioning & Compatibility
+
+| Version | Changes |
+|---------|---------|
+| 5 | `IPCWorkspaceRequest` requires the structured `workspaceTarget` field (`{kind, value}`) and no longer accepts the obsolete bare `workspaceName: String` payload shape. |
+| 4 | `IPCWorkspaceRequest` required clients to emit `workspaceTarget` but still decoded `workspaceName` as a temporary compatibility fallback. |
+| 3 | `IPCWorkspaceRequest` accepted either `workspaceName: String` or `workspaceTarget: {kind, value}`. |
+
+A stale but decodable client request fails the version handshake with `protocol_mismatch`. An obsolete workspace request that only contains `workspaceName` is malformed in protocol 5 and fails before routing with `invalid_request`.
 
 ### Socket & Authorization
 
@@ -713,7 +722,7 @@ Completions are context-aware: query names, selectors, field names, command path
 
 ```json
 {
-  "version": 3,
+  "version": 5,
   "id": "<uuid>",
   "kind": "<ping|version|command|query|rule|workspace|window|subscribe>",
   "authorizationToken": "<token>",
@@ -771,7 +780,10 @@ Completions are context-aware: query names, selectors, field names, command path
 ```json
 {
   "name": "focus-name",
-  "workspaceName": "main"
+  "workspaceTarget": {
+    "kind": "display-name",
+    "value": "main"
+  }
 }
 ```
 
@@ -787,7 +799,7 @@ Completions are context-aware: query names, selectors, field names, command path
 
 ```json
 {
-  "version": 3,
+  "version": 5,
   "id": "<request-id>",
   "ok": true,
   "kind": "<ping|version|command|query|rule|workspace|window|subscribe>",
@@ -804,7 +816,7 @@ Authorization, protocol, validation, and routing failures keep the originating r
 
 ```json
 {
-  "version": 3,
+  "version": 5,
   "id": "<request-id>",
   "ok": false,
   "kind": "query",
@@ -821,7 +833,7 @@ Events are sent on subscription connections after the initial response.
 
 ```json
 {
-  "version": 3,
+  "version": 5,
   "id": "<event-id>",
   "kind": "event",
   "channel": "focus",
@@ -899,17 +911,3 @@ ow_…  5678   Safari    GitHub        web        Built-in  tiling   no       ye
 | `OMNIWM_EVENT_CHANNEL` | (watch child) Subscription channel name |
 | `OMNIWM_EVENT_KIND` | (watch child) Event result kind |
 | `OMNIWM_EVENT_ID` | (watch child) Event ID |
-
----
-
-## Aliases
-
-The CLI accepts these aliases transparently:
-
-| Alias | Resolves to |
-|-------|-------------|
-| `query monitors` | `query displays` |
-| `query --monitor` | `query --display` |
-| `command focus-monitor previous` | `command focus-monitor prev` |
-| `command switch-workspace previous` | `command switch-workspace prev` |
-| `command switch-workspace back` | `command switch-workspace back-and-forth` |

@@ -174,7 +174,7 @@ final class BorderWindow {
         } else {
             originChanged = true
         }
-        if needsOrdering || originChanged {
+        if needsOrdering || originChanged || sizeChanged {
             move(ordering: resolvedOrderingMetadata, needsOrdering: needsOrdering)
             lastAppliedOrigin = origin
         }

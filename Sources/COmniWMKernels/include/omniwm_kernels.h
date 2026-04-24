@@ -654,6 +654,17 @@ typedef struct {
     int64_t window_id;
 } omniwm_window_token;
 
+/* Stable per-managed-window-lifecycle identity allocated by
+   `LogicalWindowRegistry`. Distinct from `omniwm_window_token` (the AX/CGS
+   effect-time address). Added by Phase 06 ABI-08 to close FOC-09 / LWI-06b;
+   values match Swift's `LogicalWindowId.value`. The all-zero value is
+   reserved for "no logical identity known" (`LogicalWindowId.invalid`).
+   Companion `has_*_logical_id` flags follow the same convention as token
+   fields — set when the field carries a meaningful value. */
+typedef struct {
+    uint64_t value;
+} omniwm_logical_window_id;
+
 typedef struct {
     size_t offset;
     size_t length;
@@ -1262,10 +1273,16 @@ typedef struct {
     omniwm_uuid pending_tiled_workspace_id;
     omniwm_uuid confirmed_tiled_workspace_id;
     omniwm_uuid confirmed_floating_workspace_id;
-    omniwm_window_token pending_tiled_focus_token;
-    omniwm_window_token confirmed_tiled_focus_token;
-    omniwm_window_token confirmed_floating_focus_token;
-    omniwm_window_token remembered_focus_token;
+    /* ABI-08 (Phase 06): focus inputs are addressed by `omniwm_logical_window_id`
+       (durable identity). Raw `omniwm_window_token` crosses only at the effect
+       boundary: the per-candidate `token` field and the output's
+       `resolved_focus_token`. Populated by Swift via
+       `LogicalWindowRegistry.lookup(token:)` (`.current` and `.staleAlias`
+       unwrap to the durable id; retired/unknown leave the presence flag at 0). */
+    omniwm_logical_window_id pending_tiled_focus_logical_id;
+    omniwm_logical_window_id confirmed_tiled_focus_logical_id;
+    omniwm_logical_window_id confirmed_floating_focus_logical_id;
+    omniwm_logical_window_id remembered_focus_logical_id;
     uint32_t interaction_monitor_id;
     uint32_t previous_interaction_monitor_id;
     uint32_t current_viewport_kind;
@@ -1278,10 +1295,10 @@ typedef struct {
     uint8_t has_pending_tiled_workspace_id;
     uint8_t has_confirmed_tiled_workspace_id;
     uint8_t has_confirmed_floating_workspace_id;
-    uint8_t has_pending_tiled_focus_token;
-    uint8_t has_confirmed_tiled_focus_token;
-    uint8_t has_confirmed_floating_focus_token;
-    uint8_t has_remembered_focus_token;
+    uint8_t has_pending_tiled_focus_logical_id;
+    uint8_t has_confirmed_tiled_focus_logical_id;
+    uint8_t has_confirmed_floating_focus_logical_id;
+    uint8_t has_remembered_focus_logical_id;
     uint8_t has_interaction_monitor_id;
     uint8_t has_previous_interaction_monitor_id;
     uint8_t has_current_viewport_state;
@@ -1352,6 +1369,12 @@ typedef struct {
 typedef struct {
     omniwm_uuid workspace_id;
     omniwm_window_token token;
+    /* ABI-08 (Phase 06): every candidate carries a logical id post-Phase 02
+       Slice 13. Populated by Swift via `WorkspaceManager`'s registry lookup
+       at encode time. The kernel uses this when matching focus inputs that
+       carry `*_logical_id` fields; legacy fixture inputs without logical
+       ids continue to match by token. */
+    omniwm_logical_window_id logical_id;
     uint32_t mode;
     uint32_t order_index;
     uint8_t has_hidden_proportional_position;
@@ -1391,6 +1414,12 @@ typedef struct {
     uint32_t interaction_monitor_id;
     uint32_t previous_interaction_monitor_id;
     omniwm_window_token resolved_focus_token;
+    /* ABI-08 (Phase 06): parallels `resolved_focus_token`. The kernel
+       populates this whenever it resolves focus to a candidate that
+       carries a non-zero `logical_id`. Swift consumers may prefer this
+       field over `resolved_focus_token` for durable focus comparisons
+       that survive AX/CGS replacement. */
+    omniwm_logical_window_id resolved_focus_logical_id;
     omniwm_workspace_session_monitor_result *monitor_results;
     size_t monitor_result_capacity;
     size_t monitor_result_count;
@@ -1403,6 +1432,7 @@ typedef struct {
     uint8_t has_interaction_monitor_id;
     uint8_t has_previous_interaction_monitor_id;
     uint8_t has_resolved_focus_token;
+    uint8_t has_resolved_focus_logical_id;
     uint8_t should_remember_focus;
     uint8_t refresh_restore_intents;
 } omniwm_workspace_session_output;

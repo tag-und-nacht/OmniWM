@@ -2,7 +2,7 @@
 import AppKit
 import SwiftUI
 
-enum WorkspaceBarWindowLevel: String, CaseIterable, Identifiable {
+enum WorkspaceBarWindowLevel: String, Codable, CaseIterable, Identifiable {
     case normal
     case floating
     case status
@@ -32,7 +32,7 @@ enum WorkspaceBarWindowLevel: String, CaseIterable, Identifiable {
     }
 }
 
-enum WorkspaceBarPosition: String, CaseIterable, Identifiable {
+enum WorkspaceBarPosition: String, Codable, CaseIterable, Identifiable {
     case overlappingMenuBar
     case belowMenuBar
 
@@ -434,9 +434,7 @@ final class WorkspaceBarManager {
     }
 
     private func configureHostingView<Content: View>(_ hostingView: NSHostingView<Content>) {
-        if #available(macOS 13.0, *) {
-            hostingView.sizingOptions = []
-        }
+        hostingView.sizingOptions = []
     }
 
     private func applyCurrentAppearance(

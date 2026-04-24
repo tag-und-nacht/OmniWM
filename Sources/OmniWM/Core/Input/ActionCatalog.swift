@@ -4,7 +4,7 @@ import OmniWMIPC
 
 struct ActionSpec: Equatable {
     let id: String
-    let command: HotkeyCommand
+    let command: InputBindingTrigger
     let title: String
     let keywords: [String]
     let category: HotkeyCategory
@@ -45,15 +45,15 @@ enum ActionCatalog {
         specsByID[id]
     }
 
-    static func spec(for command: HotkeyCommand) -> ActionSpec? {
+    static func spec(for command: InputBindingTrigger) -> ActionSpec? {
         specs.first { $0.command == command }
     }
 
-    static func title(for command: HotkeyCommand) -> String? {
+    static func title(for command: InputBindingTrigger) -> String? {
         spec(for: command)?.title
     }
 
-    static func layoutCompatibility(for command: HotkeyCommand) -> LayoutCompatibility? {
+    static func layoutCompatibility(for command: InputBindingTrigger) -> LayoutCompatibility? {
         spec(for: command)?.layoutCompatibility
     }
 
@@ -264,7 +264,7 @@ enum ActionCatalog {
 
     private static func action(
         id: String,
-        command: HotkeyCommand,
+        command: InputBindingTrigger,
         category: HotkeyCategory,
         binding: KeyBinding,
         keywords: [String] = []
@@ -282,7 +282,7 @@ enum ActionCatalog {
         )
     }
 
-    private static func compatibility(for command: HotkeyCommand) -> LayoutCompatibility {
+    private static func compatibility(for command: InputBindingTrigger) -> LayoutCompatibility {
         switch command {
         case .moveToRoot, .toggleSplit, .swapSplit, .preselect, .preselectClear, .resizeInDirection:
             .dwindle
@@ -312,7 +312,7 @@ enum ActionCatalog {
         }
     }
 
-    private static func displayName(for command: HotkeyCommand) -> String {
+    private static func displayName(for command: InputBindingTrigger) -> String {
         switch command {
         case let .focus(dir): "Focus \(dir.displayName)"
         case .focusPrevious: "Focus Previous Window"
@@ -367,7 +367,7 @@ enum ActionCatalog {
         }
     }
 
-    private static func ipcCommandName(for command: HotkeyCommand) -> IPCCommandName? {
+    private static func ipcCommandName(for command: InputBindingTrigger) -> IPCCommandName? {
         switch command {
         case .focus:
             .focus

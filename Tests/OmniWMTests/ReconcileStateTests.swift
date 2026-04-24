@@ -74,7 +74,8 @@ private func makeReconcileKernelSnapshot(monitors: [Monitor]) -> ReconcileSnapsh
             interactionMonitorId: nil,
             previousInteractionMonitorId: nil
         ),
-        windows: []
+        windows: [],
+        workspaceGraph: .empty
     )
 }
 
@@ -498,8 +499,8 @@ private func makeReconcileKernelSnapshot(monitors: [Monitor]) -> ReconcileSnapsh
             to: workspaceId
         )
 
-        let txn = manager.recordReconcileEvent(
-            .windowModeChanged(
+        let txn = manager.recordTransaction(
+            for: .windowModeChanged(
                 token: token,
                 workspaceId: workspaceId,
                 monitorId: nil,

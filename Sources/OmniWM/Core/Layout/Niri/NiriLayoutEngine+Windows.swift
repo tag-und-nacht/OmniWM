@@ -62,6 +62,7 @@ extension NiriLayoutEngine {
         node.token = newToken
         tokenToNode[newToken] = node
 
+
         if let frame = framePool.removeValue(forKey: oldToken) {
             framePool[newToken] = frame
         }
@@ -74,6 +75,28 @@ extension NiriLayoutEngine {
 
         node.invalidateChildrenCache()
         return true
+    }
+
+    func reconcileLogicalMembership(
+        for windows: [LayoutWindowSnapshot],
+        in workspaceId: WorkspaceDescriptor.ID
+    ) {
+        for window in windows where window.logicalId.isValid {
+            guard let node = logicalIdToNode[window.logicalId],
+                  node.findRoot()?.workspaceId == workspaceId,
+                  node.token != window.token
+            else {
+                continue
+            }
+            _ = rekeyWindow(from: node.token, to: window.token)
+        }
+    }
+
+    func bindLogicalMembership(for windows: [LayoutWindowSnapshot]) {
+        for window in windows {
+            guard let node = tokenToNode[window.token] else { continue }
+            assignLogicalId(window.logicalId, to: node)
+        }
     }
 
     @discardableResult

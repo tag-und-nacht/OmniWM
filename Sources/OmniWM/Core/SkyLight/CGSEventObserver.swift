@@ -199,6 +199,7 @@ final class CGSEventObserver {
 
     func flushPendingCGSEventsForTests() {
         drainPendingEventsOnMainRunLoop(ignoreRegistration: true)
+        invalidateScheduledCGSEventDrains()
     }
 
     func enqueueEventForTests(_ event: CGSWindowEvent) {
@@ -235,10 +236,16 @@ final class CGSEventObserver {
         (requestedWindowIds, retainedWindowSubscriptionCounts)
     }
 
-    fileprivate func drainPendingEventsOnMainRunLoop(ignoreRegistration: Bool = false) {
+    fileprivate func drainPendingEventsOnMainRunLoop(
+        ignoreRegistration: Bool = false,
+        scheduledGeneration: UInt64? = nil
+    ) {
         precondition(Thread.isMainThread, "CGS drains must run on the main run loop")
 
         let pendingDrain = cgsPendingEvents.withLock { state -> (events: [CGSWindowEvent], ignoresRegistration: Bool) in
+            if let scheduledGeneration, scheduledGeneration != state.drainGeneration {
+                return ([], false)
+            }
             let events = state.orderedEvents
             let ignoresRegistration = state.drainIgnoresRegistration
             state.orderedEvents.removeAll(keepingCapacity: true)
@@ -283,6 +290,9 @@ private struct PendingCGSEventState {
     var isRegistered = false
     var drainScheduled = false
     var drainIgnoresRegistration = false
+    // Resets advance the generation so stale scheduled drains cannot consume
+    // events queued by a later test or observer lifecycle.
+    var drainGeneration: UInt64 = 0
     var orderedEvents: [CGSWindowEvent] = []
     var pendingFrameWindowIds: Set<UInt32> = []
     var debugCounters = CGSEventObserver.DebugCounters()
@@ -301,25 +311,35 @@ private func resetPendingCGSEventState(isRegistered: Bool) {
         state.isRegistered = isRegistered
         state.drainScheduled = false
         state.drainIgnoresRegistration = false
+        state.drainGeneration &+= 1
         state.orderedEvents.removeAll(keepingCapacity: false)
         state.pendingFrameWindowIds.removeAll(keepingCapacity: false)
         state.debugCounters = .init()
     }
 }
 
-private func schedulePendingCGSEventDrain() {
+private func invalidateScheduledCGSEventDrains() {
+    cgsPendingEvents.withLock { state in
+        state.drainGeneration &+= 1
+        state.drainScheduled = false
+    }
+}
+
+private func schedulePendingCGSEventDrain(generation: UInt64) {
     let mainRunLoop = CFRunLoopGetMain()
     CFRunLoopPerformBlock(mainRunLoop, CFRunLoopMode.commonModes.rawValue) {
         MainActor.assumeIsolated {
-            CGSEventObserver.shared.drainPendingEventsOnMainRunLoop()
+            CGSEventObserver.shared.drainPendingEventsOnMainRunLoop(
+                scheduledGeneration: generation
+            )
         }
     }
     CFRunLoopWakeUp(mainRunLoop)
 }
 
 private func enqueueDecodedCGSEvent(_ event: CGSWindowEvent, requireRegistration: Bool = true) {
-    let shouldScheduleDrain = cgsPendingEvents.withLock { state -> Bool in
-        guard state.isRegistered || !requireRegistration else { return false }
+    let scheduledGeneration = cgsPendingEvents.withLock { state -> UInt64? in
+        guard state.isRegistered || !requireRegistration else { return nil }
 
         state.debugCounters.decodedEvents += 1
 
@@ -349,13 +369,13 @@ private func enqueueDecodedCGSEvent(_ event: CGSWindowEvent, requireRegistration
             state.drainIgnoresRegistration = true
         }
 
-        guard !state.drainScheduled else { return false }
+        guard !state.drainScheduled else { return nil }
         state.drainScheduled = true
-        return true
+        return state.drainGeneration
     }
 
-    if shouldScheduleDrain {
-        schedulePendingCGSEventDrain()
+    if let scheduledGeneration {
+        schedulePendingCGSEventDrain(generation: scheduledGeneration)
     }
 }
 

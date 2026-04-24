@@ -80,7 +80,7 @@ private func prepareIPCNiriState(
         let router = makeIPCCommandRouter(for: controller)
 
         let result = router.handle(
-            IPCWorkspaceRequest(name: .focusName, workspaceName: "2")
+            IPCWorkspaceRequest(name: .focusName, target: WorkspaceTarget(parsing: "2"))
         )
 
         #expect(result == .executed)
@@ -97,7 +97,7 @@ private func prepareIPCNiriState(
         let router = makeIPCCommandRouter(for: controller)
 
         let result = router.handle(
-            IPCWorkspaceRequest(name: .focusName, workspaceName: "Code")
+            IPCWorkspaceRequest(name: .focusName, target: WorkspaceTarget(parsing: "Code"))
         )
 
         #expect(result == .executed)
@@ -114,7 +114,7 @@ private func prepareIPCNiriState(
         let router = makeIPCCommandRouter(for: controller)
 
         let result = router.handle(
-            IPCWorkspaceRequest(name: .focusName, workspaceName: "10")
+            IPCWorkspaceRequest(name: .focusName, target: WorkspaceTarget(parsing: "10"))
         )
 
         #expect(result == .executed)
@@ -131,7 +131,7 @@ private func prepareIPCNiriState(
         let router = makeIPCCommandRouter(for: controller)
 
         let result = router.handle(
-            IPCWorkspaceRequest(name: .focusName, workspaceName: "Code")
+            IPCWorkspaceRequest(name: .focusName, target: WorkspaceTarget(parsing: "Code"))
         )
 
         #expect(result == .invalidArguments)
@@ -305,6 +305,17 @@ private func prepareIPCNiriState(
         #expect(result == .ignoredDisabled)
     }
 
+    @Test func disabledControllerRejectsColumnLayoutWindowAndUICommands() {
+        let controller = makeLayoutPlanTestController()
+        controller.isEnabled = false
+        let router = makeIPCCommandRouter(for: controller)
+
+        #expect(router.handle(.moveColumn(direction: .right)) == .ignoredDisabled)
+        #expect(router.handle(.toggleSplit) == .ignoredDisabled)
+        #expect(router.handle(.toggleFullscreen) == .ignoredDisabled)
+        #expect(router.handle(.openCommandPalette) == .ignoredDisabled)
+    }
+
     @Test func setWorkspaceLayoutUpdatesActiveWorkspaceConfiguration() {
         let controller = makeLayoutPlanTestController()
         let router = makeIPCCommandRouter(for: controller)
@@ -329,11 +340,33 @@ private func prepareIPCNiriState(
         let router = makeIPCCommandRouter(for: controller)
 
         let result = router.handle(
-            IPCWorkspaceRequest(name: .focusName, workspaceName: "2")
+            IPCWorkspaceRequest(name: .focusName, target: WorkspaceTarget(parsing: "2"))
         )
 
         #expect(controller.isOverviewOpen())
         #expect(result == .ignoredOverview)
+    }
+
+    @Test func overviewRejectsColumnLayoutWindowAndUICommandsButAllowsToggleOverview() {
+        let controller = makeLayoutPlanTestController()
+        controller.setAnimationsEnabled(false, persist: false)
+        defer {
+            if controller.isOverviewOpen() {
+                controller.toggleOverview()
+            }
+            resetSharedControllerStateForTests()
+        }
+        controller.toggleOverview()
+        let router = makeIPCCommandRouter(for: controller)
+
+        #expect(router.handle(.moveColumn(direction: .right)) == .ignoredOverview)
+        #expect(router.handle(.toggleSplit) == .ignoredOverview)
+        #expect(router.handle(.toggleFullscreen) == .ignoredOverview)
+        #expect(router.handle(.openCommandPalette) == .ignoredOverview)
+
+        let toggleResult = router.handle(.toggleOverview)
+        #expect(toggleResult == .executed)
+        #expect(!controller.isOverviewOpen())
     }
 
     @Test func switchWorkspaceRejectsNonPositiveNumbers() {
@@ -402,7 +435,7 @@ private func prepareIPCNiriState(
         let router = makeIPCCommandRouter(for: controller)
 
         let result = router.handle(
-            IPCWorkspaceRequest(name: .focusName, workspaceName: "999")
+            IPCWorkspaceRequest(name: .focusName, target: WorkspaceTarget(parsing: "999"))
         )
 
         #expect(result == .notFound)

@@ -5,6 +5,9 @@ import Foundation
 
 @testable import OmniWM
 
+@MainActor
+private var _retainedLayoutPlanTestRuntimes: [WMRuntime] = []
+
 func makeLayoutPlanTestDefaults() -> UserDefaults {
     let suiteName = "com.omniwm.layout-plan.test.\(UUID().uuidString)"
     return UserDefaults(suiteName: suiteName)!
@@ -108,6 +111,7 @@ func installSynchronousFrameApplySuccessOverride(on controller: WMController) {
             )
         }
     }
+    controller.axManager.markFrameApplyOverrideConfirmsPositionPlansForTests()
 }
 
 @MainActor
@@ -143,15 +147,17 @@ func makeLayoutPlanTestController(
     )
     let settings = SettingsStore(defaults: makeLayoutPlanTestDefaults())
     settings.workspaceConfigurations = workspaceConfigurations
-    let controller = WMController(
+    let runtime = WMRuntime(
         settings: settings,
         windowFocusOperations: operations
     )
+    _retainedLayoutPlanTestRuntimes.append(runtime)
+    let controller = runtime.controller
 
 
     controller.setAnimationsEnabled(true, persist: false)
     installSynchronousFrameApplySuccessOverride(on: controller)
-    controller.workspaceManager.applyMonitorConfigurationChange(monitors)
+    runtime.applyMonitorConfigurationChange(monitors)
     return controller
 }
 

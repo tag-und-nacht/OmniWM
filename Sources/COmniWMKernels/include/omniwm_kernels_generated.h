@@ -1,0 +1,233 @@
+// SPDX-License-Identifier: GPL-2.0-only
+//
+// ABI-07 (Phase 06): generated C header with size/alignment parity
+// assertions for every stable typedef in `omniwm_kernels.h`.
+//
+// GENERATED FILE — do not edit by hand. Regenerate with:
+//
+//     make regen-kernel-abi-goldens
+//
+// Included by `Sources/COmniWMKernels/bridge.c` so any drift between the
+// hand-written kernel header and the schema fails the C compile of the
+// kernel target. `_Static_assert` is the C11 mechanism; the kernel
+// target compiles with C11 already.
+
+#ifndef OMNIWM_KERNELS_GENERATED_H
+#define OMNIWM_KERNELS_GENERATED_H
+
+#include "omniwm_kernels.h"
+
+#define OMNIWM_KERNELS_ABI_SCHEMA_VERSION 1
+
+_Static_assert(sizeof(omniwm_axis_input) == 40, "ABI drift: sizeof(omniwm_axis_input)");
+_Static_assert(_Alignof(omniwm_axis_input) == 8, "ABI drift: _Alignof(omniwm_axis_input)");
+_Static_assert(sizeof(omniwm_axis_output) == 16, "ABI drift: sizeof(omniwm_axis_output)");
+_Static_assert(_Alignof(omniwm_axis_output) == 8, "ABI drift: _Alignof(omniwm_axis_output)");
+_Static_assert(sizeof(omniwm_dwindle_layout_input) == 160, "ABI drift: sizeof(omniwm_dwindle_layout_input)");
+_Static_assert(_Alignof(omniwm_dwindle_layout_input) == 8, "ABI drift: _Alignof(omniwm_dwindle_layout_input)");
+_Static_assert(sizeof(omniwm_dwindle_node_input) == 48, "ABI drift: sizeof(omniwm_dwindle_node_input)");
+_Static_assert(_Alignof(omniwm_dwindle_node_input) == 8, "ABI drift: _Alignof(omniwm_dwindle_node_input)");
+_Static_assert(sizeof(omniwm_dwindle_node_frame) == 40, "ABI drift: sizeof(omniwm_dwindle_node_frame)");
+_Static_assert(_Alignof(omniwm_dwindle_node_frame) == 8, "ABI drift: _Alignof(omniwm_dwindle_node_frame)");
+_Static_assert(sizeof(omniwm_niri_layout_input) == 144, "ABI drift: sizeof(omniwm_niri_layout_input)");
+_Static_assert(_Alignof(omniwm_niri_layout_input) == 8, "ABI drift: _Alignof(omniwm_niri_layout_input)");
+_Static_assert(sizeof(omniwm_niri_container_input) == 40, "ABI drift: sizeof(omniwm_niri_container_input)");
+_Static_assert(_Alignof(omniwm_niri_container_input) == 8, "ABI drift: _Alignof(omniwm_niri_container_input)");
+_Static_assert(sizeof(omniwm_niri_window_input) == 56, "ABI drift: sizeof(omniwm_niri_window_input)");
+_Static_assert(_Alignof(omniwm_niri_window_input) == 8, "ABI drift: _Alignof(omniwm_niri_window_input)");
+_Static_assert(sizeof(omniwm_niri_hidden_placement_monitor) == 64, "ABI drift: sizeof(omniwm_niri_hidden_placement_monitor)");
+_Static_assert(_Alignof(omniwm_niri_hidden_placement_monitor) == 8, "ABI drift: _Alignof(omniwm_niri_hidden_placement_monitor)");
+_Static_assert(sizeof(omniwm_niri_container_output) == 64, "ABI drift: sizeof(omniwm_niri_container_output)");
+_Static_assert(_Alignof(omniwm_niri_container_output) == 8, "ABI drift: _Alignof(omniwm_niri_container_output)");
+_Static_assert(sizeof(omniwm_niri_window_output) == 80, "ABI drift: sizeof(omniwm_niri_window_output)");
+_Static_assert(_Alignof(omniwm_niri_window_output) == 8, "ABI drift: _Alignof(omniwm_niri_window_output)");
+_Static_assert(sizeof(omniwm_niri_topology_column_input) == 32, "ABI drift: sizeof(omniwm_niri_topology_column_input)");
+_Static_assert(_Alignof(omniwm_niri_topology_column_input) == 8, "ABI drift: _Alignof(omniwm_niri_topology_column_input)");
+_Static_assert(sizeof(omniwm_niri_topology_window_input) == 16, "ABI drift: sizeof(omniwm_niri_topology_window_input)");
+_Static_assert(_Alignof(omniwm_niri_topology_window_input) == 8, "ABI drift: _Alignof(omniwm_niri_topology_window_input)");
+_Static_assert(sizeof(omniwm_geometry_snap_target_result) == 16, "ABI drift: sizeof(omniwm_geometry_snap_target_result)");
+_Static_assert(_Alignof(omniwm_geometry_snap_target_result) == 8, "ABI drift: _Alignof(omniwm_geometry_snap_target_result)");
+_Static_assert(sizeof(omniwm_niri_topology_input) == 160, "ABI drift: sizeof(omniwm_niri_topology_input)");
+_Static_assert(_Alignof(omniwm_niri_topology_input) == 8, "ABI drift: _Alignof(omniwm_niri_topology_input)");
+_Static_assert(sizeof(omniwm_niri_topology_column_output) == 24, "ABI drift: sizeof(omniwm_niri_topology_column_output)");
+_Static_assert(_Alignof(omniwm_niri_topology_column_output) == 8, "ABI drift: _Alignof(omniwm_niri_topology_column_output)");
+_Static_assert(sizeof(omniwm_niri_topology_window_output) == 8, "ABI drift: sizeof(omniwm_niri_topology_window_output)");
+_Static_assert(_Alignof(omniwm_niri_topology_window_output) == 8, "ABI drift: _Alignof(omniwm_niri_topology_window_output)");
+_Static_assert(sizeof(omniwm_niri_topology_result) == 120, "ABI drift: sizeof(omniwm_niri_topology_result)");
+_Static_assert(_Alignof(omniwm_niri_topology_result) == 8, "ABI drift: _Alignof(omniwm_niri_topology_result)");
+_Static_assert(sizeof(omniwm_overview_context) == 120, "ABI drift: sizeof(omniwm_overview_context)");
+_Static_assert(_Alignof(omniwm_overview_context) == 8, "ABI drift: _Alignof(omniwm_overview_context)");
+_Static_assert(sizeof(omniwm_overview_workspace_input) == 16, "ABI drift: sizeof(omniwm_overview_workspace_input)");
+_Static_assert(_Alignof(omniwm_overview_workspace_input) == 4, "ABI drift: _Alignof(omniwm_overview_workspace_input)");
+_Static_assert(sizeof(omniwm_overview_generic_window_input) == 48, "ABI drift: sizeof(omniwm_overview_generic_window_input)");
+_Static_assert(_Alignof(omniwm_overview_generic_window_input) == 8, "ABI drift: _Alignof(omniwm_overview_generic_window_input)");
+_Static_assert(sizeof(omniwm_overview_niri_tile_input) == 8, "ABI drift: sizeof(omniwm_overview_niri_tile_input)");
+_Static_assert(_Alignof(omniwm_overview_niri_tile_input) == 8, "ABI drift: _Alignof(omniwm_overview_niri_tile_input)");
+_Static_assert(sizeof(omniwm_overview_niri_column_input) == 40, "ABI drift: sizeof(omniwm_overview_niri_column_input)");
+_Static_assert(_Alignof(omniwm_overview_niri_column_input) == 8, "ABI drift: _Alignof(omniwm_overview_niri_column_input)");
+_Static_assert(sizeof(omniwm_overview_section_output) == 136, "ABI drift: sizeof(omniwm_overview_section_output)");
+_Static_assert(_Alignof(omniwm_overview_section_output) == 8, "ABI drift: _Alignof(omniwm_overview_section_output)");
+_Static_assert(sizeof(omniwm_overview_generic_window_output) == 40, "ABI drift: sizeof(omniwm_overview_generic_window_output)");
+_Static_assert(_Alignof(omniwm_overview_generic_window_output) == 8, "ABI drift: _Alignof(omniwm_overview_generic_window_output)");
+_Static_assert(sizeof(omniwm_overview_niri_tile_output) == 40, "ABI drift: sizeof(omniwm_overview_niri_tile_output)");
+_Static_assert(_Alignof(omniwm_overview_niri_tile_output) == 8, "ABI drift: _Alignof(omniwm_overview_niri_tile_output)");
+_Static_assert(sizeof(omniwm_overview_niri_column_output) == 48, "ABI drift: sizeof(omniwm_overview_niri_column_output)");
+_Static_assert(_Alignof(omniwm_overview_niri_column_output) == 8, "ABI drift: _Alignof(omniwm_overview_niri_column_output)");
+_Static_assert(sizeof(omniwm_overview_drop_zone_output) == 40, "ABI drift: sizeof(omniwm_overview_drop_zone_output)");
+_Static_assert(_Alignof(omniwm_overview_drop_zone_output) == 8, "ABI drift: _Alignof(omniwm_overview_drop_zone_output)");
+_Static_assert(sizeof(omniwm_overview_result) == 64, "ABI drift: sizeof(omniwm_overview_result)");
+_Static_assert(_Alignof(omniwm_overview_result) == 8, "ABI drift: _Alignof(omniwm_overview_result)");
+_Static_assert(sizeof(omniwm_restore_snapshot) == 40, "ABI drift: sizeof(omniwm_restore_snapshot)");
+_Static_assert(_Alignof(omniwm_restore_snapshot) == 8, "ABI drift: _Alignof(omniwm_restore_snapshot)");
+_Static_assert(sizeof(omniwm_restore_monitor) == 56, "ABI drift: sizeof(omniwm_restore_monitor)");
+_Static_assert(_Alignof(omniwm_restore_monitor) == 8, "ABI drift: _Alignof(omniwm_restore_monitor)");
+_Static_assert(sizeof(omniwm_restore_assignment) == 8, "ABI drift: sizeof(omniwm_restore_assignment)");
+_Static_assert(_Alignof(omniwm_restore_assignment) == 4, "ABI drift: _Alignof(omniwm_restore_assignment)");
+_Static_assert(sizeof(omniwm_point) == 16, "ABI drift: sizeof(omniwm_point)");
+_Static_assert(_Alignof(omniwm_point) == 8, "ABI drift: _Alignof(omniwm_point)");
+_Static_assert(sizeof(omniwm_rect) == 32, "ABI drift: sizeof(omniwm_rect)");
+_Static_assert(_Alignof(omniwm_rect) == 8, "ABI drift: _Alignof(omniwm_rect)");
+_Static_assert(sizeof(omniwm_uuid) == 16, "ABI drift: sizeof(omniwm_uuid)");
+_Static_assert(_Alignof(omniwm_uuid) == 8, "ABI drift: _Alignof(omniwm_uuid)");
+_Static_assert(sizeof(omniwm_window_token) == 16, "ABI drift: sizeof(omniwm_window_token)");
+_Static_assert(_Alignof(omniwm_window_token) == 8, "ABI drift: _Alignof(omniwm_window_token)");
+_Static_assert(sizeof(omniwm_logical_window_id) == 8, "ABI drift: sizeof(omniwm_logical_window_id)");
+_Static_assert(_Alignof(omniwm_logical_window_id) == 8, "ABI drift: _Alignof(omniwm_logical_window_id)");
+_Static_assert(sizeof(omniwm_restore_string_ref) == 16, "ABI drift: sizeof(omniwm_restore_string_ref)");
+_Static_assert(_Alignof(omniwm_restore_string_ref) == 8, "ABI drift: _Alignof(omniwm_restore_string_ref)");
+_Static_assert(sizeof(omniwm_restore_monitor_key) == 64, "ABI drift: sizeof(omniwm_restore_monitor_key)");
+_Static_assert(_Alignof(omniwm_restore_monitor_key) == 8, "ABI drift: _Alignof(omniwm_restore_monitor_key)");
+_Static_assert(sizeof(omniwm_restore_monitor_context) == 112, "ABI drift: sizeof(omniwm_restore_monitor_context)");
+_Static_assert(_Alignof(omniwm_restore_monitor_context) == 8, "ABI drift: _Alignof(omniwm_restore_monitor_context)");
+_Static_assert(sizeof(omniwm_restore_event_input) == 40, "ABI drift: sizeof(omniwm_restore_event_input)");
+_Static_assert(_Alignof(omniwm_restore_event_input) == 8, "ABI drift: _Alignof(omniwm_restore_event_input)");
+_Static_assert(sizeof(omniwm_restore_event_output) == 16, "ABI drift: sizeof(omniwm_restore_event_output)");
+_Static_assert(_Alignof(omniwm_restore_event_output) == 4, "ABI drift: _Alignof(omniwm_restore_event_output)");
+_Static_assert(sizeof(omniwm_restore_visible_workspace_snapshot) == 80, "ABI drift: sizeof(omniwm_restore_visible_workspace_snapshot)");
+_Static_assert(_Alignof(omniwm_restore_visible_workspace_snapshot) == 8, "ABI drift: _Alignof(omniwm_restore_visible_workspace_snapshot)");
+_Static_assert(sizeof(omniwm_restore_disconnected_cache_entry) == 80, "ABI drift: sizeof(omniwm_restore_disconnected_cache_entry)");
+_Static_assert(_Alignof(omniwm_restore_disconnected_cache_entry) == 8, "ABI drift: _Alignof(omniwm_restore_disconnected_cache_entry)");
+_Static_assert(sizeof(omniwm_restore_workspace_monitor_fact) == 32, "ABI drift: sizeof(omniwm_restore_workspace_monitor_fact)");
+_Static_assert(_Alignof(omniwm_restore_workspace_monitor_fact) == 8, "ABI drift: _Alignof(omniwm_restore_workspace_monitor_fact)");
+_Static_assert(sizeof(omniwm_restore_topology_input) == 144, "ABI drift: sizeof(omniwm_restore_topology_input)");
+_Static_assert(_Alignof(omniwm_restore_topology_input) == 8, "ABI drift: _Alignof(omniwm_restore_topology_input)");
+_Static_assert(sizeof(omniwm_restore_visible_assignment) == 24, "ABI drift: sizeof(omniwm_restore_visible_assignment)");
+_Static_assert(_Alignof(omniwm_restore_visible_assignment) == 8, "ABI drift: _Alignof(omniwm_restore_visible_assignment)");
+_Static_assert(sizeof(omniwm_restore_disconnected_cache_output_entry) == 24, "ABI drift: sizeof(omniwm_restore_disconnected_cache_output_entry)");
+_Static_assert(_Alignof(omniwm_restore_disconnected_cache_output_entry) == 8, "ABI drift: _Alignof(omniwm_restore_disconnected_cache_output_entry)");
+_Static_assert(sizeof(omniwm_restore_topology_output) == 64, "ABI drift: sizeof(omniwm_restore_topology_output)");
+_Static_assert(_Alignof(omniwm_restore_topology_output) == 8, "ABI drift: _Alignof(omniwm_restore_topology_output)");
+_Static_assert(sizeof(omniwm_restore_persisted_key) == 80, "ABI drift: sizeof(omniwm_restore_persisted_key)");
+_Static_assert(_Alignof(omniwm_restore_persisted_key) == 8, "ABI drift: _Alignof(omniwm_restore_persisted_key)");
+_Static_assert(sizeof(omniwm_restore_persisted_entry_snapshot) == 224, "ABI drift: sizeof(omniwm_restore_persisted_entry_snapshot)");
+_Static_assert(_Alignof(omniwm_restore_persisted_entry_snapshot) == 8, "ABI drift: _Alignof(omniwm_restore_persisted_entry_snapshot)");
+_Static_assert(sizeof(omniwm_restore_persisted_hydration_input) == 152, "ABI drift: sizeof(omniwm_restore_persisted_hydration_input)");
+_Static_assert(_Alignof(omniwm_restore_persisted_hydration_input) == 8, "ABI drift: _Alignof(omniwm_restore_persisted_hydration_input)");
+_Static_assert(sizeof(omniwm_restore_persisted_hydration_output) == 80, "ABI drift: sizeof(omniwm_restore_persisted_hydration_output)");
+_Static_assert(_Alignof(omniwm_restore_persisted_hydration_output) == 8, "ABI drift: _Alignof(omniwm_restore_persisted_hydration_output)");
+_Static_assert(sizeof(omniwm_restore_floating_rescue_candidate) == 168, "ABI drift: sizeof(omniwm_restore_floating_rescue_candidate)");
+_Static_assert(_Alignof(omniwm_restore_floating_rescue_candidate) == 8, "ABI drift: _Alignof(omniwm_restore_floating_rescue_candidate)");
+_Static_assert(sizeof(omniwm_restore_floating_rescue_operation) == 40, "ABI drift: sizeof(omniwm_restore_floating_rescue_operation)");
+_Static_assert(_Alignof(omniwm_restore_floating_rescue_operation) == 8, "ABI drift: _Alignof(omniwm_restore_floating_rescue_operation)");
+_Static_assert(sizeof(omniwm_restore_floating_rescue_output) == 24, "ABI drift: sizeof(omniwm_restore_floating_rescue_output)");
+_Static_assert(_Alignof(omniwm_restore_floating_rescue_output) == 8, "ABI drift: _Alignof(omniwm_restore_floating_rescue_output)");
+_Static_assert(sizeof(omniwm_window_decision_rule_summary) == 8, "ABI drift: sizeof(omniwm_window_decision_rule_summary)");
+_Static_assert(_Alignof(omniwm_window_decision_rule_summary) == 4, "ABI drift: _Alignof(omniwm_window_decision_rule_summary)");
+_Static_assert(sizeof(omniwm_window_decision_built_in_rule_summary) == 12, "ABI drift: sizeof(omniwm_window_decision_built_in_rule_summary)");
+_Static_assert(_Alignof(omniwm_window_decision_built_in_rule_summary) == 4, "ABI drift: _Alignof(omniwm_window_decision_built_in_rule_summary)");
+_Static_assert(sizeof(omniwm_window_decision_input) == 44, "ABI drift: sizeof(omniwm_window_decision_input)");
+_Static_assert(_Alignof(omniwm_window_decision_input) == 4, "ABI drift: _Alignof(omniwm_window_decision_input)");
+_Static_assert(sizeof(omniwm_window_decision_output) == 24, "ABI drift: sizeof(omniwm_window_decision_output)");
+_Static_assert(_Alignof(omniwm_window_decision_output) == 4, "ABI drift: _Alignof(omniwm_window_decision_output)");
+_Static_assert(sizeof(omniwm_workspace_navigation_input) == 256, "ABI drift: sizeof(omniwm_workspace_navigation_input)");
+_Static_assert(_Alignof(omniwm_workspace_navigation_input) == 8, "ABI drift: _Alignof(omniwm_workspace_navigation_input)");
+_Static_assert(sizeof(omniwm_workspace_navigation_monitor) == 80, "ABI drift: sizeof(omniwm_workspace_navigation_monitor)");
+_Static_assert(_Alignof(omniwm_workspace_navigation_monitor) == 8, "ABI drift: _Alignof(omniwm_workspace_navigation_monitor)");
+_Static_assert(sizeof(omniwm_workspace_navigation_workspace) == 96, "ABI drift: sizeof(omniwm_workspace_navigation_workspace)");
+_Static_assert(_Alignof(omniwm_workspace_navigation_workspace) == 8, "ABI drift: _Alignof(omniwm_workspace_navigation_workspace)");
+_Static_assert(sizeof(omniwm_workspace_navigation_output) == 184, "ABI drift: sizeof(omniwm_workspace_navigation_output)");
+_Static_assert(_Alignof(omniwm_workspace_navigation_output) == 8, "ABI drift: _Alignof(omniwm_workspace_navigation_output)");
+_Static_assert(sizeof(omniwm_workspace_session_input) == 168, "ABI drift: sizeof(omniwm_workspace_session_input)");
+_Static_assert(_Alignof(omniwm_workspace_session_input) == 8, "ABI drift: _Alignof(omniwm_workspace_session_input)");
+_Static_assert(sizeof(omniwm_workspace_session_monitor) == 112, "ABI drift: sizeof(omniwm_workspace_session_monitor)");
+_Static_assert(_Alignof(omniwm_workspace_session_monitor) == 8, "ABI drift: _Alignof(omniwm_workspace_session_monitor)");
+_Static_assert(sizeof(omniwm_workspace_session_previous_monitor) == 112, "ABI drift: sizeof(omniwm_workspace_session_previous_monitor)");
+_Static_assert(_Alignof(omniwm_workspace_session_previous_monitor) == 8, "ABI drift: _Alignof(omniwm_workspace_session_previous_monitor)");
+_Static_assert(sizeof(omniwm_workspace_session_disconnected_cache_entry) == 80, "ABI drift: sizeof(omniwm_workspace_session_disconnected_cache_entry)");
+_Static_assert(_Alignof(omniwm_workspace_session_disconnected_cache_entry) == 8, "ABI drift: _Alignof(omniwm_workspace_session_disconnected_cache_entry)");
+_Static_assert(sizeof(omniwm_workspace_session_workspace) == 96, "ABI drift: sizeof(omniwm_workspace_session_workspace)");
+_Static_assert(_Alignof(omniwm_workspace_session_workspace) == 8, "ABI drift: _Alignof(omniwm_workspace_session_workspace)");
+_Static_assert(sizeof(omniwm_workspace_session_window_candidate) == 56, "ABI drift: sizeof(omniwm_workspace_session_window_candidate)");
+_Static_assert(_Alignof(omniwm_workspace_session_window_candidate) == 8, "ABI drift: _Alignof(omniwm_workspace_session_window_candidate)");
+_Static_assert(sizeof(omniwm_workspace_session_monitor_result) == 64, "ABI drift: sizeof(omniwm_workspace_session_monitor_result)");
+_Static_assert(_Alignof(omniwm_workspace_session_monitor_result) == 8, "ABI drift: _Alignof(omniwm_workspace_session_monitor_result)");
+_Static_assert(sizeof(omniwm_workspace_session_workspace_projection) == 32, "ABI drift: sizeof(omniwm_workspace_session_workspace_projection)");
+_Static_assert(_Alignof(omniwm_workspace_session_workspace_projection) == 8, "ABI drift: _Alignof(omniwm_workspace_session_workspace_projection)");
+_Static_assert(sizeof(omniwm_workspace_session_disconnected_cache_result) == 24, "ABI drift: sizeof(omniwm_workspace_session_disconnected_cache_result)");
+_Static_assert(_Alignof(omniwm_workspace_session_disconnected_cache_result) == 8, "ABI drift: _Alignof(omniwm_workspace_session_disconnected_cache_result)");
+_Static_assert(sizeof(omniwm_workspace_session_output) == 128, "ABI drift: sizeof(omniwm_workspace_session_output)");
+_Static_assert(_Alignof(omniwm_workspace_session_output) == 8, "ABI drift: _Alignof(omniwm_workspace_session_output)");
+_Static_assert(sizeof(omniwm_reconcile_observed_state) == 64, "ABI drift: sizeof(omniwm_reconcile_observed_state)");
+_Static_assert(_Alignof(omniwm_reconcile_observed_state) == 8, "ABI drift: _Alignof(omniwm_reconcile_observed_state)");
+_Static_assert(sizeof(omniwm_reconcile_desired_state) == 64, "ABI drift: sizeof(omniwm_reconcile_desired_state)");
+_Static_assert(_Alignof(omniwm_reconcile_desired_state) == 8, "ABI drift: _Alignof(omniwm_reconcile_desired_state)");
+_Static_assert(sizeof(omniwm_reconcile_floating_state) == 56, "ABI drift: sizeof(omniwm_reconcile_floating_state)");
+_Static_assert(_Alignof(omniwm_reconcile_floating_state) == 8, "ABI drift: _Alignof(omniwm_reconcile_floating_state)");
+_Static_assert(sizeof(omniwm_reconcile_entry) == 216, "ABI drift: sizeof(omniwm_reconcile_entry)");
+_Static_assert(_Alignof(omniwm_reconcile_entry) == 8, "ABI drift: _Alignof(omniwm_reconcile_entry)");
+_Static_assert(sizeof(omniwm_reconcile_monitor) == 40, "ABI drift: sizeof(omniwm_reconcile_monitor)");
+_Static_assert(_Alignof(omniwm_reconcile_monitor) == 8, "ABI drift: _Alignof(omniwm_reconcile_monitor)");
+_Static_assert(sizeof(omniwm_reconcile_pending_focus) == 40, "ABI drift: sizeof(omniwm_reconcile_pending_focus)");
+_Static_assert(_Alignof(omniwm_reconcile_pending_focus) == 8, "ABI drift: _Alignof(omniwm_reconcile_pending_focus)");
+_Static_assert(sizeof(omniwm_reconcile_focus_session) == 64, "ABI drift: sizeof(omniwm_reconcile_focus_session)");
+_Static_assert(_Alignof(omniwm_reconcile_focus_session) == 8, "ABI drift: _Alignof(omniwm_reconcile_focus_session)");
+_Static_assert(sizeof(omniwm_reconcile_persisted_hydration) == 64, "ABI drift: sizeof(omniwm_reconcile_persisted_hydration)");
+_Static_assert(_Alignof(omniwm_reconcile_persisted_hydration) == 8, "ABI drift: _Alignof(omniwm_reconcile_persisted_hydration)");
+_Static_assert(sizeof(omniwm_reconcile_event) == 136, "ABI drift: sizeof(omniwm_reconcile_event)");
+_Static_assert(_Alignof(omniwm_reconcile_event) == 8, "ABI drift: _Alignof(omniwm_reconcile_event)");
+_Static_assert(sizeof(omniwm_reconcile_restore_intent_output) == 80, "ABI drift: sizeof(omniwm_reconcile_restore_intent_output)");
+_Static_assert(_Alignof(omniwm_reconcile_restore_intent_output) == 8, "ABI drift: _Alignof(omniwm_reconcile_restore_intent_output)");
+_Static_assert(sizeof(omniwm_reconcile_replacement_correlation) == 40, "ABI drift: sizeof(omniwm_reconcile_replacement_correlation)");
+_Static_assert(_Alignof(omniwm_reconcile_replacement_correlation) == 8, "ABI drift: _Alignof(omniwm_reconcile_replacement_correlation)");
+_Static_assert(sizeof(omniwm_reconcile_focus_session_output) == 64, "ABI drift: sizeof(omniwm_reconcile_focus_session_output)");
+_Static_assert(_Alignof(omniwm_reconcile_focus_session_output) == 8, "ABI drift: _Alignof(omniwm_reconcile_focus_session_output)");
+_Static_assert(sizeof(omniwm_reconcile_plan_output) == 336, "ABI drift: sizeof(omniwm_reconcile_plan_output)");
+_Static_assert(_Alignof(omniwm_reconcile_plan_output) == 8, "ABI drift: _Alignof(omniwm_reconcile_plan_output)");
+_Static_assert(sizeof(omniwm_orchestration_old_frame_record) == 48, "ABI drift: sizeof(omniwm_orchestration_old_frame_record)");
+_Static_assert(_Alignof(omniwm_orchestration_old_frame_record) == 8, "ABI drift: _Alignof(omniwm_orchestration_old_frame_record)");
+_Static_assert(sizeof(omniwm_orchestration_window_removal_payload) == 80, "ABI drift: sizeof(omniwm_orchestration_window_removal_payload)");
+_Static_assert(_Alignof(omniwm_orchestration_window_removal_payload) == 8, "ABI drift: _Alignof(omniwm_orchestration_window_removal_payload)");
+_Static_assert(sizeof(omniwm_orchestration_follow_up_refresh) == 24, "ABI drift: sizeof(omniwm_orchestration_follow_up_refresh)");
+_Static_assert(_Alignof(omniwm_orchestration_follow_up_refresh) == 8, "ABI drift: _Alignof(omniwm_orchestration_follow_up_refresh)");
+_Static_assert(sizeof(omniwm_orchestration_refresh) == 96, "ABI drift: sizeof(omniwm_orchestration_refresh)");
+_Static_assert(_Alignof(omniwm_orchestration_refresh) == 8, "ABI drift: _Alignof(omniwm_orchestration_refresh)");
+_Static_assert(sizeof(omniwm_orchestration_managed_request) == 56, "ABI drift: sizeof(omniwm_orchestration_managed_request)");
+_Static_assert(_Alignof(omniwm_orchestration_managed_request) == 8, "ABI drift: _Alignof(omniwm_orchestration_managed_request)");
+_Static_assert(sizeof(omniwm_orchestration_refresh_snapshot) == 200, "ABI drift: sizeof(omniwm_orchestration_refresh_snapshot)");
+_Static_assert(_Alignof(omniwm_orchestration_refresh_snapshot) == 8, "ABI drift: _Alignof(omniwm_orchestration_refresh_snapshot)");
+_Static_assert(sizeof(omniwm_orchestration_focus_snapshot) == 104, "ABI drift: sizeof(omniwm_orchestration_focus_snapshot)");
+_Static_assert(_Alignof(omniwm_orchestration_focus_snapshot) == 8, "ABI drift: _Alignof(omniwm_orchestration_focus_snapshot)");
+_Static_assert(sizeof(omniwm_orchestration_snapshot) == 304, "ABI drift: sizeof(omniwm_orchestration_snapshot)");
+_Static_assert(_Alignof(omniwm_orchestration_snapshot) == 8, "ABI drift: _Alignof(omniwm_orchestration_snapshot)");
+_Static_assert(sizeof(omniwm_orchestration_refresh_request_event) == 104, "ABI drift: sizeof(omniwm_orchestration_refresh_request_event)");
+_Static_assert(_Alignof(omniwm_orchestration_refresh_request_event) == 8, "ABI drift: _Alignof(omniwm_orchestration_refresh_request_event)");
+_Static_assert(sizeof(omniwm_orchestration_refresh_completion_event) == 104, "ABI drift: sizeof(omniwm_orchestration_refresh_completion_event)");
+_Static_assert(_Alignof(omniwm_orchestration_refresh_completion_event) == 8, "ABI drift: _Alignof(omniwm_orchestration_refresh_completion_event)");
+_Static_assert(sizeof(omniwm_orchestration_focus_request_event) == 32, "ABI drift: sizeof(omniwm_orchestration_focus_request_event)");
+_Static_assert(_Alignof(omniwm_orchestration_focus_request_event) == 8, "ABI drift: _Alignof(omniwm_orchestration_focus_request_event)");
+_Static_assert(sizeof(omniwm_orchestration_activation_observation) == 64, "ABI drift: sizeof(omniwm_orchestration_activation_observation)");
+_Static_assert(_Alignof(omniwm_orchestration_activation_observation) == 8, "ABI drift: _Alignof(omniwm_orchestration_activation_observation)");
+_Static_assert(sizeof(omniwm_orchestration_event) == 312, "ABI drift: sizeof(omniwm_orchestration_event)");
+_Static_assert(_Alignof(omniwm_orchestration_event) == 8, "ABI drift: _Alignof(omniwm_orchestration_event)");
+_Static_assert(sizeof(omniwm_orchestration_decision) == 80, "ABI drift: sizeof(omniwm_orchestration_decision)");
+_Static_assert(_Alignof(omniwm_orchestration_decision) == 8, "ABI drift: _Alignof(omniwm_orchestration_decision)");
+_Static_assert(sizeof(omniwm_orchestration_action) == 104, "ABI drift: sizeof(omniwm_orchestration_action)");
+_Static_assert(_Alignof(omniwm_orchestration_action) == 8, "ABI drift: _Alignof(omniwm_orchestration_action)");
+_Static_assert(sizeof(omniwm_orchestration_step_input) == 680, "ABI drift: sizeof(omniwm_orchestration_step_input)");
+_Static_assert(_Alignof(omniwm_orchestration_step_input) == 8, "ABI drift: _Alignof(omniwm_orchestration_step_input)");
+_Static_assert(sizeof(omniwm_orchestration_step_output) == 528, "ABI drift: sizeof(omniwm_orchestration_step_output)");
+_Static_assert(_Alignof(omniwm_orchestration_step_output) == 8, "ABI drift: _Alignof(omniwm_orchestration_step_output)");
+_Static_assert(sizeof(omniwm_orchestration_abi_layout_info) == 176, "ABI drift: sizeof(omniwm_orchestration_abi_layout_info)");
+_Static_assert(_Alignof(omniwm_orchestration_abi_layout_info) == 8, "ABI drift: _Alignof(omniwm_orchestration_abi_layout_info)");
+
+#endif /* OMNIWM_KERNELS_GENERATED_H */

@@ -5,19 +5,22 @@ import Foundation
 @MainActor
 final class SettingsFilePersistence {
     struct FileFingerprint: Equatable {
-        let modificationDate: Date
+        // Atomic external editors replace the path with a new inode; mtime+size alone
+        // can match a just-written file closely enough to suppress a real reload.
+        let deviceID: UInt64
+        let inode: UInt64
+        let modificationTimeNanoseconds: Int64
+        let statusChangeTimeNanoseconds: Int64
         let fileSize: UInt64
     }
 
-    private struct UnsupportedSettingsVersionError: LocalizedError {
-        let foundVersion: Int
-
-        var errorDescription: String? {
-            "Unsupported settings schema version \(foundVersion). Expected \(SettingsFilePersistence.configVersion)."
-        }
+    private struct FileSnapshot {
+        let export: SettingsExport
+        let fingerprint: FileFingerprint
     }
 
-    nonisolated static let configVersion = 5
+    private static let nanosecondsPerSecond: Int64 = 1_000_000_000
+
     nonisolated static let defaultDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".config/omniwm", isDirectory: true)
     nonisolated static let fileName = "settings.toml"
@@ -72,9 +75,9 @@ final class SettingsFilePersistence {
                 return defaults
             }
 
-            let export = try readExport()
-            lastObservedFingerprint = currentFingerprint()
-            return export
+            let snapshot = try readSnapshot()
+            lastObservedFingerprint = snapshot.fingerprint
+            return snapshot.export
         } catch {
             report("Failed to load \(fileURL.path): \(error.localizedDescription)")
             moveCorruptFileAsideIfPresent()
@@ -87,9 +90,7 @@ final class SettingsFilePersistence {
     func save(_ export: SettingsExport) {
         do {
             try ensureDirectoryExists()
-            var canonicalExport = export
-            canonicalExport.version = Self.configVersion
-            let data = try SettingsTOMLCodec.encode(canonicalExport)
+            let data = try SettingsTOMLCodec.encode(export)
             try data.write(to: fileURL, options: .atomic)
 
             let fingerprint = currentFingerprint()
@@ -132,9 +133,9 @@ final class SettingsFilePersistence {
         }
 
         do {
-            let export = try readExport()
-            lastObservedFingerprint = currentFingerprint()
-            return export
+            let snapshot = try readSnapshot()
+            lastObservedFingerprint = snapshot.fingerprint
+            return snapshot.export
         } catch {
             report("Ignoring invalid external settings edit at \(fileURL.path): \(error.localizedDescription)")
             return nil
@@ -189,27 +190,50 @@ final class SettingsFilePersistence {
         try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
     }
 
-    private func readExport() throws -> SettingsExport {
-        let data = try Data(contentsOf: fileURL)
-        let export = try SettingsTOMLCodec.decode(data)
-        guard export.version == Self.configVersion else {
-            throw UnsupportedSettingsVersionError(foundVersion: export.version)
+    private func readSnapshot() throws -> FileSnapshot {
+        let handle = try FileHandle(forReadingFrom: fileURL)
+        defer {
+            try? handle.close()
         }
-        return export
+
+        guard let data = try handle.readToEnd() else {
+            throw CocoaError(.fileReadUnknown)
+        }
+
+        var statBuffer = stat()
+        guard Darwin.fstat(handle.fileDescriptor, &statBuffer) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+
+        return FileSnapshot(
+            export: try SettingsTOMLCodec.decode(data),
+            fingerprint: Self.fingerprint(from: statBuffer)
+        )
     }
 
     private func currentFingerprint() -> FileFingerprint? {
-        guard let resourceValues = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]),
-              let modificationDate = resourceValues.contentModificationDate,
-              let fileSize = resourceValues.fileSize
-        else {
-            return nil
+        var statBuffer = stat()
+        let result = fileURL.withUnsafeFileSystemRepresentation { path -> CInt in
+            guard let path else { return -1 }
+            return Darwin.fstatat(AT_FDCWD, path, &statBuffer, 0)
         }
 
-        return FileFingerprint(
-            modificationDate: modificationDate,
-            fileSize: UInt64(fileSize)
+        guard result == 0 else { return nil }
+        return Self.fingerprint(from: statBuffer)
+    }
+
+    private static func fingerprint(from statBuffer: stat) -> FileFingerprint {
+        FileFingerprint(
+            deviceID: UInt64(statBuffer.st_dev),
+            inode: UInt64(statBuffer.st_ino),
+            modificationTimeNanoseconds: nanoseconds(from: statBuffer.st_mtimespec),
+            statusChangeTimeNanoseconds: nanoseconds(from: statBuffer.st_ctimespec),
+            fileSize: UInt64(statBuffer.st_size)
         )
+    }
+
+    private static func nanoseconds(from timestamp: timespec) -> Int64 {
+        Int64(timestamp.tv_sec) * nanosecondsPerSecond + Int64(timestamp.tv_nsec)
     }
 
     private func moveCorruptFileAsideIfPresent() {

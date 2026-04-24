@@ -48,11 +48,9 @@ struct MonitorNiriSettings: MonitorSettingsType {
         monitorDisplayId = try container.decodeIfPresent(CGDirectDisplayID.self, forKey: .monitorDisplayId)
         maxVisibleColumns = try container.decodeIfPresent(Int.self, forKey: .maxVisibleColumns)
         maxWindowsPerColumn = try container.decodeIfPresent(Int.self, forKey: .maxWindowsPerColumn)
-        centerFocusedColumn = try container.decodeIfPresent(String.self, forKey: .centerFocusedColumn)
-            .flatMap { CenterFocusedColumn(rawValue: $0) }
+        centerFocusedColumn = try container.decodeIfPresent(CenterFocusedColumn.self, forKey: .centerFocusedColumn)
         alwaysCenterSingleColumn = try container.decodeIfPresent(Bool.self, forKey: .alwaysCenterSingleColumn)
-        singleWindowAspectRatio = try container.decodeIfPresent(String.self, forKey: .singleWindowAspectRatio)
-            .flatMap { SingleWindowAspectRatio(rawValue: $0) }
+        singleWindowAspectRatio = try container.decodeIfPresent(SingleWindowAspectRatio.self, forKey: .singleWindowAspectRatio)
         infiniteLoop = try container.decodeIfPresent(Bool.self, forKey: .infiniteLoop)
     }
 
@@ -63,9 +61,9 @@ struct MonitorNiriSettings: MonitorSettingsType {
         try container.encodeIfPresent(monitorDisplayId, forKey: .monitorDisplayId)
         try container.encodeIfPresent(maxVisibleColumns, forKey: .maxVisibleColumns)
         try container.encodeIfPresent(maxWindowsPerColumn, forKey: .maxWindowsPerColumn)
-        try container.encodeIfPresent(centerFocusedColumn?.rawValue, forKey: .centerFocusedColumn)
+        try container.encodeIfPresent(centerFocusedColumn, forKey: .centerFocusedColumn)
         try container.encodeIfPresent(alwaysCenterSingleColumn, forKey: .alwaysCenterSingleColumn)
-        try container.encodeIfPresent(singleWindowAspectRatio?.rawValue, forKey: .singleWindowAspectRatio)
+        try container.encodeIfPresent(singleWindowAspectRatio, forKey: .singleWindowAspectRatio)
         try container.encodeIfPresent(infiniteLoop, forKey: .infiniteLoop)
     }
 }

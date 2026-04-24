@@ -6,6 +6,25 @@ import Testing
 
 @testable import OmniWM
 
+@MainActor
+private func expectedManagedBorderOwner(
+    token: WindowToken,
+    workspaceId: WorkspaceDescriptor.ID,
+    controller: WMController
+) -> BorderOwner {
+    let registry = controller.workspaceManager.logicalWindowRegistry
+    guard let logicalId = registry.resolveForWrite(token: token),
+          let record = registry.record(for: logicalId)
+    else {
+        return .fallback(pid: token.pid, wid: token.windowId)
+    }
+    return .managed(
+        logicalId: logicalId,
+        replacementEpoch: record.replacementEpoch,
+        workspaceId: workspaceId
+    )
+}
+
 private func makeBorderCoordinatorFallbackTarget(
     pid: pid_t = getpid(),
     windowId: Int
@@ -926,11 +945,19 @@ struct BorderCoordinatorTests {
             return
         }
 
+        let registry = controller.workspaceManager.logicalWindowRegistry
+        guard let postRekeyLogicalId = registry.resolveForWrite(token: newToken),
+              let postRekeyEpoch = registry.record(for: postRekeyLogicalId)?.replacementEpoch
+        else {
+            Issue.record("Expected current logical-id binding after rekey")
+            return
+        }
         #expect(
             controller.borderCoordinator.reconcile(
                 event: .managedRekey(
-                    from: oldToken,
-                    to: newToken,
+                    logicalId: postRekeyLogicalId,
+                    replacementEpoch: postRekeyEpoch,
+                    newToken: newToken,
                     workspaceId: workspaceId,
                     axRef: newAxRef,
                     preferredFrame: secondFrame,
@@ -946,7 +973,13 @@ struct BorderCoordinatorTests {
         #expect(cornerRadiusLookups == 2)
         #expect(lastAppliedBorderWindowIdForLayoutPlanTests(on: controller) == 922)
         #expect(lastAppliedBorderFrameForLayoutPlanTests(on: controller) == secondFrame)
-        #expect(ownerState.owner == .managed(token: newToken, wid: 922, workspaceId: workspaceId))
+        #expect(
+            ownerState.owner == expectedManagedBorderOwner(
+                token: newToken,
+                workspaceId: workspaceId,
+                controller: controller
+            )
+        )
         #expect(ownerState.orderingMetadata?.cornerRadius == 24)
     }
 
@@ -1090,7 +1123,13 @@ struct BorderCoordinatorTests {
         let ownerState = controller.borderCoordinator.ownerStateSnapshotForTests()
         #expect(windowFactsLookups == 2)
         #expect(lastAppliedBorderWindowIdForLayoutPlanTests(on: controller) == 910)
-        #expect(ownerState.owner == .managed(token: token, wid: 910, workspaceId: workspaceId))
+        #expect(
+            ownerState.owner == expectedManagedBorderOwner(
+                token: token,
+                workspaceId: workspaceId,
+                controller: controller
+            )
+        )
         #expect(ownerState.resolvedWindowInfo?.parentId == 1)
         #expect(ownerState.orderingDecision == "fallback:missing-window-server-info")
     }
@@ -1151,7 +1190,9 @@ struct BorderCoordinatorTests {
         #expect(subscriptions == [[911]])
     }
 
-    @Test @MainActor func fallbackSubscriptionStateClearsWhenOwnershipIsReleasedWithoutUnderlyingUnsubscribe() {
+    @Test @MainActor func fallbackSubscriptionStateClearsWhenOwnershipIsReleasedWithoutUnderlyingUnsubscribe() async {
+        let cgsObserverLease = await acquireCGSEventObserverLeaseForTests()
+        defer { cgsObserverLease.release() }
         let controller = makeLayoutPlanTestController()
         let target = makeBorderCoordinatorFallbackTarget(windowId: 912)
         let frame = CGRect(x: 34, y: 42, width: 520, height: 360)
@@ -1221,7 +1262,9 @@ struct BorderCoordinatorTests {
         #expect(unsubscriptions == [[912]])
     }
 
-    @Test @MainActor func fallbackSubscriptionStateClearsWhenUnderlyingUnsubscribeRemovesWindow() {
+    @Test @MainActor func fallbackSubscriptionStateClearsWhenUnderlyingUnsubscribeRemovesWindow() async {
+        let cgsObserverLease = await acquireCGSEventObserverLeaseForTests()
+        defer { cgsObserverLease.release() }
         let controller = makeLayoutPlanTestController()
         let target = makeBorderCoordinatorFallbackTarget(windowId: 913)
         let frame = CGRect(x: 40, y: 48, width: 540, height: 380)

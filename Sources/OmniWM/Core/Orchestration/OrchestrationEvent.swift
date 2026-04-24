@@ -57,6 +57,7 @@ enum OrchestrationEvent: Equatable {
 
 extension RefreshRequestEvent {
     var summary: String {
+        // swiftlint:disable:next line_length
         "refreshRequested \(refresh.summary) drop=\(orchestrationDebugFlag(shouldDropWhileBusy)) incremental=\(orchestrationDebugFlag(isIncrementalRefreshInProgress)) immediate=\(orchestrationDebugFlag(isImmediateLayoutInProgress)) animated=\(orchestrationDebugFlag(hasActiveAnimationRefreshes))"
     }
 }
@@ -79,6 +80,7 @@ extension ManagedActivationMatch {
         case let .missingFocusedWindow(pid, fallbackFullscreen):
             "missingFocusedWindow pid=\(pid) fallback_fullscreen=\(orchestrationDebugFlag(fallbackFullscreen))"
         case let .managed(token, workspaceId, monitorId, isWorkspaceActive, appFullscreen, requiresNativeFullscreenRestoreRelayout):
+            // swiftlint:disable:next line_length
             "managed token=\(orchestrationDebugToken(token)) workspace=\(orchestrationDebugWorkspace(workspaceId)) monitor=\(orchestrationDebugMonitor(monitorId)) workspace_active=\(orchestrationDebugFlag(isWorkspaceActive)) fullscreen=\(orchestrationDebugFlag(appFullscreen)) restore_relayout=\(orchestrationDebugFlag(requiresNativeFullscreenRestoreRelayout))"
         case let .unmanaged(pid, token, appFullscreen, fallbackFullscreen):
             "unmanaged pid=\(pid) token=\(orchestrationDebugToken(token)) fullscreen=\(orchestrationDebugFlag(appFullscreen)) fallback_fullscreen=\(orchestrationDebugFlag(fallbackFullscreen))"

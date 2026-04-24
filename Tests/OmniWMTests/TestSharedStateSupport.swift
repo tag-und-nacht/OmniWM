@@ -6,8 +6,71 @@ import Foundation
 
 private let testConfigurationDirectoryKey = "__omniwm.test.configurationDirectory"
 
+@MainActor
+private enum AXTestHookLeaseState {
+    static var activeLeaseCount = 0
+
+    static var isActive: Bool {
+        activeLeaseCount > 0
+    }
+
+    static func beginLease() {
+        activeLeaseCount += 1
+    }
+
+    static func endLease() {
+        precondition(activeLeaseCount > 0, "AX test hook lease release without matching acquire")
+        activeLeaseCount -= 1
+    }
+}
+
+@MainActor
+private enum CGSEventObserverLeaseState {
+    static var activeLeaseCount = 0
+
+    static var isActive: Bool {
+        activeLeaseCount > 0
+    }
+
+    static func beginLease() {
+        activeLeaseCount += 1
+    }
+
+    static func endLease() {
+        precondition(activeLeaseCount > 0, "CGS event observer lease release without matching acquire")
+        activeLeaseCount -= 1
+    }
+}
+
 private actor AXTestHooksLock {
     static let shared = AXTestHooksLock()
+
+    private var isLocked = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func lock() async {
+        if !isLocked {
+            isLocked = true
+            return
+        }
+
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func unlock() {
+        if let waiter = waiters.first {
+            waiters.removeFirst()
+            waiter.resume()
+        } else {
+            isLocked = false
+        }
+    }
+}
+
+private actor CGSEventObserverLock {
+    static let shared = CGSEventObserverLock()
 
     private var isLocked = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
@@ -46,8 +109,29 @@ final class AXTestHooksLease: @unchecked Sendable {
         guard shouldRelease else { return }
 
         Task { @MainActor in
+            AXTestHookLeaseState.endLease()
             resetAXTestSharedStateForTests()
             await AXTestHooksLock.shared.unlock()
+        }
+    }
+}
+
+final class CGSEventObserverLease: @unchecked Sendable {
+    private let lock = NSLock()
+    private var released = false
+
+    func release() {
+        lock.lock()
+        let shouldRelease = !released
+        released = true
+        lock.unlock()
+
+        guard shouldRelease else { return }
+
+        Task { @MainActor in
+            CGSEventObserverLeaseState.endLease()
+            resetCGSEventObserverSharedStateForTests()
+            await CGSEventObserverLock.shared.unlock()
         }
     }
 }
@@ -73,12 +157,28 @@ func resetAXTestSharedStateForTests() {
     AXWindowService.clearTitleCacheForTests()
 }
 
+@MainActor
+func resetCGSEventObserverSharedStateForTests() {
+    CGSEventObserver.shared.delegate = nil
+    CGSEventObserver.shared.resetDebugStateForTests()
+}
+
 func acquireAXTestHooksLeaseForTests() async -> AXTestHooksLease {
     await AXTestHooksLock.shared.lock()
     await MainActor.run {
         resetAXTestSharedStateForTests()
+        AXTestHookLeaseState.beginLease()
     }
     return AXTestHooksLease()
+}
+
+func acquireCGSEventObserverLeaseForTests() async -> CGSEventObserverLease {
+    await CGSEventObserverLock.shared.lock()
+    await MainActor.run {
+        resetCGSEventObserverSharedStateForTests()
+        CGSEventObserverLeaseState.beginLease()
+    }
+    return CGSEventObserverLease()
 }
 
 func configurationDirectoryForTests(defaults: UserDefaults) -> URL {
@@ -130,5 +230,11 @@ func resetSharedControllerStateForTests() {
     ScreenLookupCache.shared.resetForTests()
     FrontmostApplicationState.shared.setSnapshotForTests(nil)
 
-    resetAXTestSharedStateForTests()
+    if !CGSEventObserverLeaseState.isActive {
+        resetCGSEventObserverSharedStateForTests()
+    }
+
+    if !AXTestHookLeaseState.isActive {
+        resetAXTestSharedStateForTests()
+    }
 }

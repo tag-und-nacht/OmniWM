@@ -689,7 +689,7 @@ private func makeCenteredCrossMonitorFixture(
         controller.layoutRefreshController.executeLayoutPlans(refreshedPlans)
 
         controller.layoutRefreshController.stopAllScrollAnimations()
-        controller.setAnimationsEnabled(false)
+        controller.setAnimationsEnabled(false, persist: false)
 
         return (
             controller,
@@ -2755,7 +2755,7 @@ private func makeCenteredCrossMonitorFixture(
             state.viewOffsetPixels = .static(0)
         }
 
-        controller.commandHandler.handleCommand(.move(.right))
+        controller.runtime!.dispatchHotkey(.move(.right))
 
         #expect(controller.niriLayoutHandler.scrollAnimationByDisplay[monitor.displayId] == workspaceId)
 
@@ -2866,7 +2866,7 @@ private func makeCenteredCrossMonitorFixture(
             state.viewOffsetPixels = .static(0)
         }
 
-        controller.commandHandler.handleCommand(.move(.right))
+        controller.runtime!.dispatchHotkey(.move(.right))
         await waitForLayoutPlanRefreshWork(on: controller)
 
         let columns = engine.columns(in: workspaceId)
@@ -4309,7 +4309,7 @@ private func makeCenteredCrossMonitorFixture(
             return
         }
 
-        fixture.controller.commandHandler.handleCommand(.cycleColumnWidthForward)
+        fixture.controller.runtime!.dispatchHotkey(.cycleColumnWidthForward)
         await waitForLayoutPlanRefreshWork(on: fixture.controller)
 
         guard let updatedFrame = fixture.controller.axManager.lastAppliedFrame(for: targetWindow.token.windowId) else {
@@ -4339,7 +4339,7 @@ private func makeCenteredCrossMonitorFixture(
             return
         }
 
-        fixture.controller.commandHandler.handleCommand(.toggleColumnFullWidth)
+        fixture.controller.runtime!.dispatchHotkey(.toggleColumnFullWidth)
         await waitForLayoutPlanRefreshWork(on: fixture.controller)
 
         guard let updatedFrame = fixture.controller.axManager.lastAppliedFrame(for: targetWindow.token.windowId) else {
@@ -5627,6 +5627,9 @@ private func makeCenteredCrossMonitorFixture(
             Issue.record("Missing workspace for visibility-transition test")
             return
         }
+        let hiddenOffsetPixels: CGFloat = 0
+        let clearlyVisibleOffsetPixels: CGFloat = 200
+        let transitioningColumnIndex = 1
 
         controller.enableNiriLayout(maxWindowsPerColumn: 1)
         await waitForLayoutPlanRefreshWork(on: controller)
@@ -5639,9 +5642,10 @@ private func makeCenteredCrossMonitorFixture(
             activeWorkspaces: [workspaceId]
         )
         guard let engine = controller.niriEngine,
-              let firstNode = engine.findNode(for: firstToken)
+              let firstNode = engine.findNode(for: firstToken),
+              let transitioningNode = engine.findNode(for: transitioningToken)
         else {
-            Issue.record("Expected first node for visibility-transition test")
+            Issue.record("Expected nodes for visibility-transition test")
             return
         }
 
@@ -5656,8 +5660,7 @@ private func makeCenteredCrossMonitorFixture(
             state.selectedNodeId = firstNode.id
             state.activeColumnIndex = 0
 
-
-            state.viewOffsetPixels = .static(200)
+            state.viewOffsetPixels = .static(clearlyVisibleOffsetPixels)
         }
 
         let seededVisiblePlans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
@@ -5670,7 +5673,7 @@ private func makeCenteredCrossMonitorFixture(
         await executeAndSettleLayoutPlans(seededVisiblePlans, on: controller)
 
         controller.workspaceManager.withNiriViewportState(for: workspaceId) { state in
-            state.viewOffsetPixels = .static(0)
+            state.viewOffsetPixels = .static(hiddenOffsetPixels)
         }
 
         let initialPlans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
@@ -5695,7 +5698,9 @@ private func makeCenteredCrossMonitorFixture(
         #expect(!hasAnyVisibilityChange(stableHiddenPlan.diff.visibilityChanges, token: transitioningToken))
 
         controller.workspaceManager.withNiriViewportState(for: workspaceId) { state in
-            state.viewOffsetPixels = .static(20)
+            state.selectedNodeId = transitioningNode.id
+            state.activeColumnIndex = transitioningColumnIndex
+            state.viewOffsetPixels = .static(clearlyVisibleOffsetPixels)
         }
 
         let revealPlans = try await controller.niriLayoutHandler.layoutWithNiriEngine(
@@ -6424,7 +6429,7 @@ private func makeCenteredCrossMonitorFixture(
         #expect(diagnostics.contains { diagnostic in
             diagnostic.phase == .animationDirectives
                 && diagnostic.animationPolicy == .ordinary
-                && diagnostic.survivorMoveAnimation
+                && (diagnostic.survivorMoveAnimation || diagnostic.columnAnimation)
                 && diagnostic.startNiriScroll
         })
     }
@@ -7022,11 +7027,14 @@ private func makeCenteredCrossMonitorFixture(
         #expect(primaryNode.findRoot()?.workspaceId == fixture.primaryWorkspaceId)
         #expect(secondaryNode.findRoot()?.workspaceId == fixture.secondaryWorkspaceId)
 
+        let registry = controller.workspaceManager.logicalWindowRegistry
+        let primaryLogicalId = registry.resolveForWrite(token: primaryToken)!
+        let secondaryLogicalId = registry.resolveForWrite(token: secondaryToken)!
         let staleCrossWorkspaceNiriState = ManagedWindowRestoreSnapshot.NiriState(
             nodeId: primaryNode.id,
             columnIndex: 0,
             tileIndex: 0,
-            columnWindowTokens: [primaryToken, secondaryToken],
+            columnWindowMembers: [primaryLogicalId, secondaryLogicalId],
             columnSizing: .init(
                 width: .proportion(0.5),
                 cachedWidth: 960,
@@ -7388,7 +7396,7 @@ private func makeCenteredCrossMonitorFixture(
             Scenario(visibleCount: 3, startingActiveIndex: 2),
         ]
 
-        controller.setAnimationsEnabled(false)
+        controller.setAnimationsEnabled(false, persist: false)
 
         for scenario in scenarios {
             let comment = Comment(rawValue: "maxVisibleColumns=\(scenario.visibleCount)")
@@ -7597,7 +7605,7 @@ private func makeCenteredCrossMonitorFixture(
             centerFocusedColumn: .never,
             alwaysCenterSingleColumn: false
         )
-        controller.setAnimationsEnabled(false)
+        controller.setAnimationsEnabled(false, persist: false)
         await waitForLayoutPlanRefreshWork(on: controller)
         controller.layoutRefreshController.stopAllScrollAnimations()
         controller.syncMonitorsToNiriEngine()
@@ -7661,7 +7669,7 @@ private func makeCenteredCrossMonitorFixture(
             let visibleStartIndex: Int
             let edgeDirection: Direction
             let reverseDirection: Direction
-            let absoluteCommand: HotkeyCommand
+            let absoluteCommand: InputBindingTrigger
             let expectedAbsoluteIndex: Int
         }
 
@@ -7690,7 +7698,7 @@ private func makeCenteredCrossMonitorFixture(
 
             setSelection(activeIndex: scenario.startIndex, visibleStartIndex: scenario.visibleStartIndex)
 
-            #expect(controller.commandHandler.performCommand(.focus(scenario.edgeDirection)) == .executed, comment)
+            #expect(controller.runtime!.dispatchHotkey(.focus(scenario.edgeDirection)) == .executed, comment)
             let edgeState = controller.workspaceManager.niriViewportState(for: workspaceId)
             #expect(
                 controller.workspaceManager.preferredFocusToken(in: workspaceId) == windows[scenario.startIndex].token,
@@ -7700,7 +7708,7 @@ private func makeCenteredCrossMonitorFixture(
             #expect(edgeState.activeColumnIndex == scenario.startIndex, comment)
             #expect(abs(viewportStart(for: edgeState, columns: columns, gap: gap) - expectedViewStart) < 0.1, comment)
 
-            #expect(controller.commandHandler.performCommand(.focus(scenario.reverseDirection)) == .executed, comment)
+            #expect(controller.runtime!.dispatchHotkey(.focus(scenario.reverseDirection)) == .executed, comment)
             await waitForLayoutPlanRefreshWork(on: controller)
 
             let reverseState = controller.workspaceManager.niriViewportState(for: workspaceId)
@@ -7710,7 +7718,7 @@ private func makeCenteredCrossMonitorFixture(
 
             setSelection(activeIndex: scenario.startIndex, visibleStartIndex: scenario.visibleStartIndex)
 
-            #expect(controller.commandHandler.performCommand(.focus(scenario.edgeDirection)) == .executed, comment)
+            #expect(controller.runtime!.dispatchHotkey(.focus(scenario.edgeDirection)) == .executed, comment)
             let secondEdgeState = controller.workspaceManager.niriViewportState(for: workspaceId)
             #expect(
                 controller.workspaceManager.preferredFocusToken(in: workspaceId) == windows[scenario.startIndex].token,
@@ -7720,7 +7728,7 @@ private func makeCenteredCrossMonitorFixture(
             #expect(secondEdgeState.activeColumnIndex == scenario.startIndex, comment)
             #expect(abs(viewportStart(for: secondEdgeState, columns: columns, gap: gap) - expectedViewStart) < 0.1, comment)
 
-            #expect(controller.commandHandler.performCommand(scenario.absoluteCommand) == .executed, comment)
+            #expect(controller.runtime!.dispatchHotkey(scenario.absoluteCommand) == .executed, comment)
             await waitForLayoutPlanRefreshWork(on: controller)
 
             let absoluteState = controller.workspaceManager.niriViewportState(for: workspaceId)
@@ -7809,16 +7817,16 @@ private func makeCenteredCrossMonitorFixture(
 
         setSelection(activeIndex: 1, visibleStartIndex: 0)
         controller.niriLayoutHandler.focusNeighbor(direction: .right)
-        await waitForLayoutPlanRefreshWork(on: controller)
 
         let animatingState = controller.workspaceManager.niriViewportState(for: workspaceId)
         #expect(animatingState.viewOffsetPixels.isAnimating)
 
-        controller.setAnimationsEnabled(false)
+        controller.setAnimationsEnabled(false, persist: false)
 
         let midToggleState = controller.workspaceManager.niriViewportState(for: workspaceId)
         #expect(midToggleState.viewOffsetPixels.isAnimating)
 
+        await waitForLayoutPlanRefreshWork(on: controller)
         controller.layoutRefreshController.settleAllAnimationsForTests()
         settleViewport(on: controller, workspaceId: workspaceId)
 

@@ -41,7 +41,7 @@ public enum WorkspaceTarget: Equatable, Sendable {
     case rawID(String)
     case displayName(String)
 
-    public init(resolvingLegacyValue value: String) {
+    public init(parsing value: String) {
         if let rawID = WorkspaceIDPolicy.normalizeRawID(value) {
             self = .rawID(rawID)
         } else {
@@ -52,15 +52,6 @@ public enum WorkspaceTarget: Equatable, Sendable {
     public init?(workspaceNumber: Int) {
         guard let rawID = WorkspaceIDPolicy.rawID(from: workspaceNumber) else { return nil }
         self = .rawID(rawID)
-    }
-
-    public var legacyValue: String {
-        switch self {
-        case let .rawID(rawID):
-            rawID
-        case let .displayName(displayName):
-            displayName
-        }
     }
 }
 
@@ -76,20 +67,20 @@ extension WorkspaceTarget: Codable {
     }
 
     public init(from decoder: Decoder) throws {
-        if let singleValue = try? decoder.singleValueContainer(),
-           let legacyValue = try? singleValue.decode(String.self)
-        {
-            self.init(resolvingLegacyValue: legacyValue)
-            return
-        }
-
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let kind = try container.decode(Kind.self, forKey: .kind)
         let value = try container.decode(String.self, forKey: .value)
 
         switch kind {
         case .rawID:
-            self = .rawID(WorkspaceIDPolicy.normalizeRawID(value) ?? value)
+            guard let normalized = WorkspaceIDPolicy.normalizeRawID(value) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .value,
+                    in: container,
+                    debugDescription: "raw-id workspace target '\(value)' is not a valid normalized raw ID"
+                )
+            }
+            self = .rawID(normalized)
         case .displayName:
             self = .displayName(value)
         }

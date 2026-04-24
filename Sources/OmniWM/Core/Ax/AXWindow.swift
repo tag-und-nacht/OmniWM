@@ -314,6 +314,18 @@ enum AXWindowService {
 
     static func setFrame(
         _ window: AXWindowRef,
+        frame: FrameState.Frame,
+        currentFrameHint: CGRect? = nil
+    ) -> AXFrameWriteResult {
+        assert(
+            frame.space == .appKit && frame.isVisibleFrame,
+            "AXWindowService.setFrame requires AppKit visible-frame coordinates; got \(frame.space)/\(frame.isVisibleFrame ? "visible" : "full")"
+        )
+        return setFrame(window, frame: frame.rect, currentFrameHint: currentFrameHint)
+    }
+
+    static func setFrame(
+        _ window: AXWindowRef,
         frame: CGRect,
         currentFrameHint: CGRect? = nil
     ) -> AXFrameWriteResult {

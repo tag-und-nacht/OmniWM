@@ -103,12 +103,12 @@ struct ResizeConfiguration {
     static let `default` = ResizeConfiguration()
 }
 
-struct LayoutGaps {
+struct LayoutGaps: Equatable {
     var horizontal: CGFloat
     var vertical: CGFloat
     var outer: OuterGaps
 
-    struct OuterGaps {
+    struct OuterGaps: Equatable {
         var left: CGFloat
         var right: CGFloat
         var top: CGFloat

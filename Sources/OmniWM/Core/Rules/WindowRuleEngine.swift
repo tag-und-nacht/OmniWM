@@ -253,18 +253,20 @@ final class WindowRuleEngine {
     }
 
     private var compiledUserRules: [CompiledRule] = []
-    private let builtInRules: [CompiledRule]
+    private var builtInRules: [CompiledRule]
     private var titleFetchBundleIds: Set<String> = []
     private(set) var invalidRegexMessagesByRuleId: [UUID: String] = [:]
 
     private(set) var requiresTitle = false
     private(set) var hasDynamicReevaluationRules = false
 
+    private var capabilityResolver: WindowCapabilityProfileResolver?
+
     init() {
-        builtInRules = Self.makeBuiltInRules()
-        titleFetchBundleIds = Self.titleBundleIds(from: builtInRules)
-        requiresTitle = !titleFetchBundleIds.isEmpty
-        hasDynamicReevaluationRules = builtInRules.contains { $0.requiresDynamicReevaluation }
+        builtInRules = Self.makeBuiltInRules(
+            alwaysFloatBundleIds: Self.staticAlwaysFloatBundleIds()
+        )
+        recomputeIndexes()
     }
 
     var needsWindowReevaluation: Bool {
@@ -274,6 +276,19 @@ final class WindowRuleEngine {
     func requiresTitle(for bundleId: String?) -> Bool {
         guard let bundleId else { return false }
         return titleFetchBundleIds.contains(bundleId.lowercased())
+    }
+
+    func setCapabilityResolver(_ resolver: WindowCapabilityProfileResolver) {
+        capabilityResolver = resolver
+        refreshCapabilityRules()
+    }
+
+    func refreshCapabilityRules() {
+        let alwaysFloatBundleIds: [String] = capabilityResolver
+            .map { $0.bundleIdsWithTransient(.alwaysFloat) }
+            ?? Self.staticAlwaysFloatBundleIds()
+        builtInRules = Self.makeBuiltInRules(alwaysFloatBundleIds: alwaysFloatBundleIds)
+        recomputeIndexes()
     }
 
     func rebuild(rules: [AppRule]) {
@@ -288,7 +303,10 @@ final class WindowRuleEngine {
             )
         }
         self.invalidRegexMessagesByRuleId = invalidRegexMessagesByRuleId
+        recomputeIndexes()
+    }
 
+    private func recomputeIndexes() {
         titleFetchBundleIds = Self.titleBundleIds(from: builtInRules)
         titleFetchBundleIds.formUnion(Self.titleBundleIds(from: compiledUserRules))
         requiresTitle = !titleFetchBundleIds.isEmpty
@@ -324,7 +342,7 @@ final class WindowRuleEngine {
         )
 
         return WindowDecision(
-            disposition: kernelOutput.disposition,
+            disposition: resolvedDisposition(from: kernelOutput),
             source: decisionSource(
                 from: kernelOutput,
                 userRule: userRule
@@ -337,14 +355,37 @@ final class WindowRuleEngine {
         )
     }
 
+    private func resolvedDisposition(from output: WindowDecisionKernelOutput) -> WindowDecisionDisposition {
+        guard capabilityResolver != nil,
+              case .cleanShotRecordingOverlay? = output.builtInSourceKind
+        else { return output.disposition }
+        return .unmanaged
+    }
+
     private func specialCaseKind(for facts: WindowRuleFacts) -> WindowDecisionSpecialCaseKind {
-        guard facts.ax.bundleId == Self.cleanShotBundleId,
-              facts.ax.subrole == (kAXStandardWindowSubrole as String),
-              facts.windowServer?.level == 103
+        guard facts.ax.subrole == (kAXStandardWindowSubrole as String),
+              let level = facts.windowServer?.level,
+              let levelProfile = WindowCapabilityProfileResolver.builtInProfile(forLevel: Int(level)),
+              levelProfile.transient == .unmanaged
         else {
             return .none
         }
 
+        guard let bundleId = facts.ax.bundleId else {
+            return .none
+        }
+
+        let bundleTransient: WindowCapabilityProfile.TransientTreatment?
+        if let resolver = capabilityResolver {
+            bundleTransient = resolver.resolve(for: facts, level: nil).profile.transient
+        } else {
+            bundleTransient = WindowCapabilityProfileResolver
+                .builtInProfile(forBundleId: bundleId)?.transient
+        }
+
+        guard bundleTransient == .unmanaged else {
+            return .none
+        }
         return .cleanShotRecordingOverlay
     }
 
@@ -461,10 +502,18 @@ final class WindowRuleEngine {
         }
     }
 
-    private static func makeBuiltInRules() -> [CompiledRule] {
+    private static func staticAlwaysFloatBundleIds() -> [String] {
+        WindowCapabilityProfileResolver.defaultBundleRules
+            .compactMap { entry -> String? in
+                entry.1.transient == .alwaysFloat ? entry.0 : nil
+            }
+            .sorted()
+    }
+
+    private static func makeBuiltInRules(alwaysFloatBundleIds: [String]) -> [CompiledRule] {
         var rules: [CompiledRule] = []
 
-        for (index, bundleId) in DefaultFloatingApps.bundleIds.sorted().enumerated() {
+        for (index, bundleId) in alwaysFloatBundleIds.enumerated() {
             let rule = AppRule(
                 bundleId: bundleId,
                 layout: .float

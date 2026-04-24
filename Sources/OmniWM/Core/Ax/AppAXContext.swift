@@ -98,6 +98,7 @@ final class AppAXContext {
     @MainActor static var onWindowDestroyed: ((pid_t, Int) -> Void)?
     @MainActor static var onWindowMinimizedChanged: ((pid_t, Int, Bool) -> Void)?
     @MainActor static var onFocusedWindowChanged: ((pid_t) -> Void)?
+    @MainActor static var onWindowFrameChanged: ((pid_t, Int) -> Void)?
 
     @MainActor static var contexts: [pid_t: AppAXContext] = [:]
     @MainActor private static var inFlightCreations: [pid_t: Task<AppAXContext?, Error>] = [:]
@@ -276,6 +277,24 @@ final class AppAXContext {
         }
     }
 
+    nonisolated static func handleWindowFrameChangedCallback(
+        pid: pid_t,
+        refcon: UnsafeMutableRawPointer?,
+        handler: (@MainActor @Sendable (pid_t, Int) -> Void)? = nil
+    ) {
+        guard let windowId = destroyNotificationWindowId(from: refcon) else {
+            return
+        }
+
+        scheduleOnMainRunLoop {
+            if let handler {
+                handler(pid, windowId)
+            } else {
+                AppAXContext.onWindowFrameChanged?(pid, windowId)
+            }
+        }
+    }
+
     nonisolated private static func subscribeTrackedWindowNotifications(
         observer: AXObserver,
         element: AXUIElement,
@@ -285,10 +304,18 @@ final class AppAXContext {
             return false
         }
 
+        // kAXMovedNotification / kAXResizedNotification feed the runtime's
+        // frame-write outcome reducer (so user-driven moves/resizes invalidate
+        // restorable frames and confirm in-flight WM-driven writes). Apps can
+        // emit these at high frequency under user drag — the callback enqueues
+        // through `RefreshScheduler` and must stay O(1) per CLAUDE.md AX rules.
+        // No new TCC entitlement: AX trust is already required to subscribe.
         let notifications: [CFString] = [
             kAXUIElementDestroyedNotification as CFString,
             kAXWindowMiniaturizedNotification as CFString,
-            kAXWindowDeminiaturizedNotification as CFString
+            kAXWindowDeminiaturizedNotification as CFString,
+            kAXMovedNotification as CFString,
+            kAXResizedNotification as CFString
         ]
         var fullySubscribed = true
 
@@ -770,6 +797,8 @@ private func axWindowNotificationCallback(
             refcon: refcon,
             isMinimized: false
         )
+    case kAXMovedNotification, kAXResizedNotification:
+        AppAXContext.handleWindowFrameChangedCallback(pid: pid, refcon: refcon)
     default:
         return
     }

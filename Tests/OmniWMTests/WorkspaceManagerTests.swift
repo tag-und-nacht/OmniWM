@@ -479,7 +479,7 @@ struct WorkspaceManagerTests {
             nodeId: nil,
             columnIndex: 0,
             tileIndex: 0,
-            columnWindowTokens: [token],
+            columnWindowMembers: [LogicalWindowId(value: 1)],
             columnSizing: .init(
                 width: .fixed(640),
                 cachedWidth: 640,
@@ -503,12 +503,11 @@ struct WorkspaceManagerTests {
             nodeId: nil,
             columnIndex: 1,
             tileIndex: 0,
-            columnWindowTokens: [token],
+            columnWindowMembers: [LogicalWindowId(value: 1)],
             columnSizing: baseState.columnSizing,
             windowSizing: baseState.windowSizing
         )
         let baseSnapshot = ManagedWindowRestoreSnapshot(
-            token: token,
             workspaceId: workspaceId,
             frame: frame,
             topologyProfile: TopologyProfile(monitors: [monitor]),
@@ -516,7 +515,6 @@ struct WorkspaceManagerTests {
             replacementMetadata: metadata
         )
         let changedSnapshot = ManagedWindowRestoreSnapshot(
-            token: token,
             workspaceId: workspaceId,
             frame: frame,
             topologyProfile: TopologyProfile(monitors: [monitor]),
@@ -569,7 +567,6 @@ struct WorkspaceManagerTests {
         #expect(
             manager.setManagedRestoreSnapshot(
                 ManagedWindowRestoreSnapshot(
-                    token: token,
                     workspaceId: workspaceId,
                     frame: frame,
                     topologyProfile: manager.topologyProfile,
@@ -583,7 +580,6 @@ struct WorkspaceManagerTests {
         #expect(
             manager.setManagedRestoreSnapshot(
                 ManagedWindowRestoreSnapshot(
-                    token: token,
                     workspaceId: workspaceId,
                     frame: jitteredFrame,
                     topologyProfile: manager.topologyProfile,
@@ -602,7 +598,7 @@ struct WorkspaceManagerTests {
             nodeId: nil,
             columnIndex: 0,
             tileIndex: 0,
-            columnWindowTokens: [token],
+            columnWindowMembers: [LogicalWindowId(value: 1)],
             columnSizing: .init(
                 width: .fixed(640),
                 cachedWidth: 640,
@@ -626,7 +622,6 @@ struct WorkspaceManagerTests {
         #expect(
             manager.setManagedRestoreSnapshot(
                 ManagedWindowRestoreSnapshot(
-                    token: token,
                     workspaceId: workspaceId,
                     frame: jitteredFrame,
                     topologyProfile: manager.topologyProfile,
@@ -655,7 +650,7 @@ struct WorkspaceManagerTests {
             nodeId: nil,
             columnIndex: 3,
             tileIndex: 0,
-            columnWindowTokens: [token],
+            columnWindowMembers: [LogicalWindowId(value: 1)],
             columnSizing: .init(
                 width: .proportion(0.5),
                 cachedWidth: 1268.0,
@@ -676,14 +671,11 @@ struct WorkspaceManagerTests {
             )
         )
 
-        // Sub-pixel cachedWidth drift and a 1e-4 weight drift (observed per
-        // animation tick) must be reported equivalent to avoid cache-write
-        // storms on every CADisplayLink tick.
         let driftedAnimationTick = ManagedWindowRestoreSnapshot.NiriState(
             nodeId: base.nodeId,
             columnIndex: base.columnIndex,
             tileIndex: base.tileIndex,
-            columnWindowTokens: base.columnWindowTokens,
+            columnWindowMembers: base.columnWindowMembers,
             columnSizing: .init(
                 width: base.columnSizing.width,
                 cachedWidth: 1268.12,
@@ -712,13 +704,11 @@ struct WorkspaceManagerTests {
             )
         )
 
-        // A user-initiated resize that pushes the tile weight to 3.0 must be
-        // reported as a genuine change so the cache refreshes.
         let userResized = ManagedWindowRestoreSnapshot.NiriState(
             nodeId: base.nodeId,
             columnIndex: base.columnIndex,
             tileIndex: base.tileIndex,
-            columnWindowTokens: base.columnWindowTokens,
+            columnWindowMembers: base.columnWindowMembers,
             columnSizing: base.columnSizing,
             windowSizing: .init(
                 height: .auto(weight: 3.0),
@@ -735,13 +725,11 @@ struct WorkspaceManagerTests {
             )
         )
 
-        // Niri's fullscreen-width toggle flips isFullWidth — must not be
-        // masked by the tolerance.
         let fullWidthToggled = ManagedWindowRestoreSnapshot.NiriState(
             nodeId: base.nodeId,
             columnIndex: base.columnIndex,
             tileIndex: base.tileIndex,
-            columnWindowTokens: base.columnWindowTokens,
+            columnWindowMembers: base.columnWindowMembers,
             columnSizing: .init(
                 width: base.columnSizing.width,
                 cachedWidth: base.columnSizing.cachedWidth,
@@ -765,13 +753,11 @@ struct WorkspaceManagerTests {
             )
         )
 
-        // Tile re-ordering in the column (tileIndex 0 → 1) is a structural
-        // change and must always register even with no drift.
         let reorderedTile = ManagedWindowRestoreSnapshot.NiriState(
             nodeId: base.nodeId,
             columnIndex: base.columnIndex,
             tileIndex: 1,
-            columnWindowTokens: base.columnWindowTokens,
+            columnWindowMembers: base.columnWindowMembers,
             columnSizing: base.columnSizing,
             windowSizing: base.windowSizing
         )
@@ -783,7 +769,6 @@ struct WorkspaceManagerTests {
             )
         )
 
-        // nil ↔ non-nil asymmetry stays strict.
         #expect(
             !ManagedWindowRestoreSnapshot.NiriState.isSemanticallyEquivalent(
                 nil,
@@ -1012,7 +997,7 @@ struct WorkspaceManagerTests {
         #expect(sessionChangeCount == 0)
     }
 
-    @Test @MainActor func `assigned monitor repairs missing visible session from kernel resolved active workspace`() {
+    @Test @MainActor func `activate inferred workspace repairs missing visible session from kernel resolved active workspace`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
         settings.workspaceConfigurations = workspaceConfigurations([
@@ -1042,6 +1027,8 @@ struct WorkspaceManagerTests {
 
         #expect(manager.activeWorkspace(on: main.id) == nil)
         #expect(manager.activeWorkspaceOrFirst(on: main.id)?.id == ws1)
+        #expect(manager.activeWorkspace(on: main.id) == nil)
+        #expect(manager.activateInferredWorkspaceIfNeeded(on: main.id))
         #expect(manager.activeWorkspace(on: main.id)?.id == ws1)
         #expect(manager.monitorId(for: ws1) == main.id)
         #expect(sessionChangeCount == 1)
@@ -1908,7 +1895,6 @@ struct WorkspaceManagerTests {
 
         _ = manager.setManagedRestoreSnapshot(
             ManagedWindowRestoreSnapshot(
-                token: firstToken,
                 workspaceId: workspaceId,
                 frame: firstFrame,
                 topologyProfile: manager.topologyProfile,
@@ -1919,7 +1905,6 @@ struct WorkspaceManagerTests {
         )
         _ = manager.setManagedRestoreSnapshot(
             ManagedWindowRestoreSnapshot(
-                token: secondToken,
                 workspaceId: workspaceId,
                 frame: secondFrame,
                 topologyProfile: manager.topologyProfile,
@@ -2052,7 +2037,6 @@ struct WorkspaceManagerTests {
 
         _ = manager.setManagedRestoreSnapshot(
             ManagedWindowRestoreSnapshot(
-                token: firstToken,
                 workspaceId: workspaceOne,
                 frame: firstFrame,
                 topologyProfile: manager.topologyProfile,
@@ -2063,7 +2047,6 @@ struct WorkspaceManagerTests {
         )
         _ = manager.setManagedRestoreSnapshot(
             ManagedWindowRestoreSnapshot(
-                token: secondToken,
                 workspaceId: workspaceTwo,
                 frame: secondFrame,
                 topologyProfile: manager.topologyProfile,
@@ -2138,7 +2121,6 @@ struct WorkspaceManagerTests {
 
         _ = manager.setManagedRestoreSnapshot(
             ManagedWindowRestoreSnapshot(
-                token: originalToken,
                 workspaceId: workspaceTwo,
                 frame: originalFrame,
                 topologyProfile: manager.topologyProfile,

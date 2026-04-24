@@ -437,7 +437,8 @@ struct RestorePlanner {
              .managedFocusRequested,
              .managedFocusConfirmed,
              .managedFocusCancelled,
-             .nonManagedFocusChanged:
+             .nonManagedFocusChanged,
+             .commandIntent:
             UInt32(OMNIWM_RESTORE_EVENT_KIND_OTHER)
         }
     }

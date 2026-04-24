@@ -77,13 +77,6 @@ final class WMController {
         var topologyProfile: TopologyProfile
     }
 
-    // Last-known Niri column context per managed token. Survives temporary
-    // Niri-tree absence (e.g. when a macOS native fullscreen transition removes
-    // the window from the tree before the AX fullscreen-enter observation
-    // resolves its restore seed). Written from `captureNiriRestoreState` on
-    // success, retained across destroy, migrated on rekey, and overwritten on
-    // any later successful capture. Reads are validated against the current
-    // workspace and topology before restore code trusts cached membership.
     @ObservationIgnored
     private var lastKnownNiriStateByToken: [WindowToken: LastKnownNiriStateCacheEntry] =
         [:]
@@ -135,8 +128,6 @@ final class WMController {
     @ObservationIgnored
     private(set) lazy var axEventHandler = AXEventHandler(controller: self)
     @ObservationIgnored
-    private(set) lazy var commandHandler = CommandHandler(controller: self)
-    @ObservationIgnored
     private(set) lazy var workspaceNavigationHandler = WorkspaceNavigationHandler(controller: self)
     @ObservationIgnored
     private(set) lazy var layoutRefreshController = LayoutRefreshController(controller: self)
@@ -165,6 +156,14 @@ final class WMController {
     @ObservationIgnored
     weak var runtime: WMRuntime?
     @ObservationIgnored
+    var nativeFullscreenStateProviderForCommand: ((AXWindowRef) -> Bool)?
+    @ObservationIgnored
+    var nativeFullscreenSetterForCommand: ((AXWindowRef, Bool) -> Bool)?
+    @ObservationIgnored
+    var frontmostAppPidProviderForCommand: (() -> pid_t?)?
+    @ObservationIgnored
+    var frontmostFocusedWindowTokenProviderForCommand: (() -> WindowToken?)?
+    @ObservationIgnored
     private var isApplyingRuntimeConfiguration = false
 
     let animationClock = AnimationClock()
@@ -189,7 +188,15 @@ final class WMController {
         focusPolicyEngine = FocusPolicyEngine()
         self.workspaceManager.updateAnimationClock(animationClock)
         hotkeys.onCommand = { [weak self] command in
-            self?.commandHandler.handleCommand(command)
+            guard let self else { return }
+            guard let runtime = self.runtime else {
+                preconditionFailure("WMController.hotkeys.onCommand requires WMRuntime to be attached")
+            }
+            // ExecPlan 03 TX-CMD-01g: route hotkey input through the
+            // unified `dispatchHotkey` path so the controller gates
+            // (`isEnabled`, `!isOverviewOpen`, layout-compat) apply
+            // uniformly with IPC and test paths.
+            _ = runtime.dispatchHotkey(command, source: .keyboard)
         }
         self.workspaceManager.onWindowRemoved = { [weak self] token in
             self?.invalidateManagedRestoreFastPathIdentity(forWindowId: token.windowId)
@@ -211,11 +218,44 @@ final class WMController {
             self?.handleSessionStateChanged()
         }
         axManager.onFrameConfirmed = { [weak self] pid, windowId, frame, frameConfirmResult in
-            self?.recordManagedRestoreGeometry(
-                for: WindowToken(pid: pid, windowId: windowId),
+            guard let self else { return }
+            let token = WindowToken(pid: pid, windowId: windowId)
+            self.recordManagedRestoreGeometry(
+                for: token,
                 frame: frame,
                 reason: .frameConfirmed,
                 frameConfirmResult: frameConfirmResult
+            )
+            if let runtime = self.runtime {
+                let originatingEpoch = runtime.frameWriteOutcomeOriginEpoch(source: .ax)
+                _ = runtime.submit(
+                    WMEffectConfirmation.observedFrame(
+                        token: token,
+                        frame: frame,
+                        source: .ax,
+                        originatingTransactionEpoch: originatingEpoch
+                    )
+                )
+            }
+        }
+        axManager.onFramePending = { [weak self] pid, windowId, frame, requestId in
+            guard let self, let runtime = self.runtime else { return }
+            let token = WindowToken(pid: pid, windowId: windowId)
+            _ = runtime.recordPendingFrameWrite(
+                frame: .init(rect: frame, space: .appKit, isVisibleFrame: true),
+                requestId: requestId,
+                for: token
+            )
+        }
+        axManager.onFrameFailed = { [weak self] pid, windowId, _, failureReason in
+            guard let self, let runtime = self.runtime else { return }
+            let token = WindowToken(pid: pid, windowId: windowId)
+            let originatingEpoch = runtime.frameWriteOutcomeOriginEpoch(source: .ax)
+            _ = runtime.submitAXFrameWriteOutcome(
+                for: token,
+                axFailure: failureReason,
+                originatingTransactionEpoch: originatingEpoch,
+                source: .ax
             )
         }
         focusPolicyEngine.onLeaseChanged = { [weak self] lease in
@@ -251,7 +291,9 @@ final class WMController {
 
     private func routeConfigurationMutationThroughRuntime() -> Bool {
         guard let runtime, !isApplyingRuntimeConfiguration else { return false }
-        runtime.applyCurrentConfiguration()
+        let currentConfiguration = WMRuntimeConfiguration(settings: settings)
+        guard runtime.configuration != currentConfiguration else { return false }
+        runtime.applyConfiguration(currentConfiguration)
         return true
     }
 
@@ -322,8 +364,11 @@ final class WMController {
     }
 
     @discardableResult
-    func submitRuntimeEvent(_ event: WMEvent) -> ReconcileTxn {
-        runtime?.submit(event) ?? workspaceManager.recordReconcileEvent(event)
+    func submitRuntimeEvent(_ event: WMEvent) -> Transaction {
+        guard let runtime else {
+            preconditionFailure("WMController.submitRuntimeEvent requires WMRuntime to be attached")
+        }
+        return runtime.submit(event)
     }
 
     func setAnimationsEnabled(_ enabled: Bool, persist: Bool = true) {
@@ -712,7 +757,10 @@ final class WMController {
         if routeConfigurationMutationThroughRuntime() {
             return
         }
-        workspaceManager.applySettings()
+        guard let runtime else {
+            preconditionFailure("WMController.updateWorkspaceConfig requires WMRuntime to be attached")
+        }
+        runtime.applyWorkspaceSettings(source: .config)
         syncMonitorsToNiriEngine()
         layoutRefreshController.requestFullRescan(reason: .workspaceConfigChanged)
     }
@@ -729,7 +777,7 @@ final class WMController {
         layoutRefreshController.requestFullRescan(reason: .appRulesChanged)
     }
 
-    var hotkeyRegistrationFailures: [HotkeyCommand: HotkeyRegistrationFailureReason] {
+    var hotkeyRegistrationFailures: [InputBindingTrigger: HotkeyRegistrationFailureReason] {
         hotkeys.registrationFailures
     }
 
@@ -1174,11 +1222,15 @@ final class WMController {
             preferredMonitor: preferredMonitor,
             frame: frame
         )
-        workspaceManager.updateFloatingGeometry(
+        guard let runtime else {
+            preconditionFailure("WMController.captureFloatingGeometry requires WMRuntime to be attached")
+        }
+        runtime.updateFloatingGeometry(
             frame: frame,
             for: token,
             referenceMonitor: referenceMonitor,
-            restoreToFloating: true
+            restoreToFloating: true,
+            source: .command
         )
     }
 
@@ -1186,9 +1238,9 @@ final class WMController {
         preferFrontmostWhenNonManagedFocusActive: Bool = false
     ) -> WindowToken? {
         let focusedToken = workspaceManager.focusedToken
-        let frontmostPid = commandHandler.frontmostAppPidProvider?()
+        let frontmostPid = frontmostAppPidProviderForCommand?()
             ?? FrontmostApplicationState.shared.snapshot?.pid
-        let frontmostToken = commandHandler.frontmostFocusedWindowTokenProvider?()
+        let frontmostToken = frontmostFocusedWindowTokenProviderForCommand?()
             ?? frontmostPid.flatMap { axEventHandler.focusedWindowToken(for: $0) }
         if preferFrontmostWhenNonManagedFocusActive, workspaceManager.isNonManagedFocusActive {
             return frontmostToken ?? focusedToken
@@ -1238,7 +1290,8 @@ final class WMController {
     @discardableResult
     private func captureVisibleFloatingGeometry(
         for token: WindowToken,
-        preferredMonitor: Monitor? = nil
+        preferredMonitor: Monitor? = nil,
+        source: WMEventSource = .command
     ) -> CGRect? {
         guard !workspaceManager.isHiddenInCorner(token),
               let entry = workspaceManager.entry(for: token),
@@ -1252,11 +1305,15 @@ final class WMController {
             preferredMonitor: preferredMonitor,
             frame: frame
         )
-        workspaceManager.updateFloatingGeometry(
+        guard let runtime else {
+            preconditionFailure("WMController.captureVisibleFloatingGeometry requires WMRuntime to be attached")
+        }
+        runtime.updateFloatingGeometry(
             frame: frame,
             for: token,
             referenceMonitor: referenceMonitor,
-            restoreToFloating: true
+            restoreToFloating: true,
+            source: source
         )
         return frame
     }
@@ -1264,15 +1321,23 @@ final class WMController {
     @discardableResult
     private func prepareWindowForScratchpadAssignment(
         _ token: WindowToken,
-        preferredMonitor: Monitor? = nil
+        preferredMonitor: Monitor? = nil,
+        source: WMEventSource = .command
     ) -> Bool {
         guard let entry = workspaceManager.entry(for: token) else { return false }
+        guard let runtime else {
+            preconditionFailure("WMController.prepareWindowForScratchpadAssignment requires WMRuntime to be attached")
+        }
         if workspaceManager.manualLayoutOverride(for: token) != .forceFloat {
-            workspaceManager.setManualLayoutOverride(.forceFloat, for: token)
+            runtime.setManualLayoutOverride(.forceFloat, for: token, source: source)
         }
 
         if entry.mode == .floating {
-            return captureVisibleFloatingGeometry(for: token, preferredMonitor: preferredMonitor) != nil
+            return captureVisibleFloatingGeometry(
+                for: token,
+                preferredMonitor: preferredMonitor,
+                source: source
+            ) != nil
                 || workspaceManager.floatingState(for: token) != nil
         }
 
@@ -1282,12 +1347,13 @@ final class WMController {
             preferredMonitor: preferredMonitor,
             frame: frame
         )
-        _ = workspaceManager.setWindowMode(.floating, for: token)
-        workspaceManager.updateFloatingGeometry(
+        _ = runtime.setWindowMode(.floating, for: token, source: source)
+        runtime.updateFloatingGeometry(
             frame: frame,
             for: token,
             referenceMonitor: referenceMonitor,
-            restoreToFloating: true
+            restoreToFloating: true,
+            source: source
         )
         return true
     }
@@ -1324,13 +1390,20 @@ final class WMController {
             return candidate
         }
 
-        if let tiledEntry = workspaceManager.tiledEntries(in: workspaceId).first(where: {
+        let graph = workspaceManager.workspaceGraphSnapshot()
+        let tiledEntries = graph.tiledMembership(in: workspaceId).compactMap {
+            workspaceManager.entry(for: $0.token)
+        }
+        if let tiledEntry = tiledEntries.first(where: {
             $0.token != excludedToken && isManagedWindowDisplayable($0.handle)
         }) {
             return tiledEntry.token
         }
 
-        return workspaceManager.floatingEntries(in: workspaceId).first(where: {
+        let floatingEntries = graph.floatingMembership(in: workspaceId).compactMap {
+            workspaceManager.entry(for: $0.token)
+        }
+        return floatingEntries.first(where: {
             $0.token != excludedToken && isManagedWindowDisplayable($0.handle)
         })?.token
     }
@@ -1338,25 +1411,75 @@ final class WMController {
     private func recoverFocusAfterScratchpadHide(
         in workspaceId: WorkspaceDescriptor.ID,
         excluding token: WindowToken,
-        on monitorId: Monitor.ID?
+        on monitorId: Monitor.ID?,
+        source: WMEventSource
     ) {
-        if let nextFocusToken = visibleFocusRecoveryToken(in: workspaceId, excluding: token) {
-            focusWindow(nextFocusToken)
-            return
+        guard let runtime else {
+            preconditionFailure("WMController.scratchpadHideCleanup requires WMRuntime to be attached")
         }
 
-        _ = workspaceManager.resolveAndSetWorkspaceFocusToken(in: workspaceId, onMonitor: monitorId)
-        if workspaceManager.focusedToken == nil {
+        let registry = workspaceManager.logicalWindowRegistry
+        let hiddenLogicalId = registry.lookup(token: token).liveLogicalId ?? .invalid
+        let wasFocused = workspaceManager.focusedLogicalId == hiddenLogicalId
+
+        let recoveryToken = visibleFocusRecoveryToken(in: workspaceId, excluding: token)
+        let recoveryLogicalId = recoveryToken.flatMap { registry.lookup(token: $0).liveLogicalId }
+
+        let action = runtime.reduceScratchpadHide(
+            hiddenLogicalId: hiddenLogicalId,
+            wasFocused: wasFocused,
+            recoveryCandidate: recoveryLogicalId,
+            workspaceId: workspaceId,
+            monitorId: monitorId
+        )
+
+        applyFocusRecoveryAction(action, source: source)
+    }
+
+    private func applyFocusRecoveryAction(
+        _ action: FocusReducer.RecommendedAction?,
+        source: WMEventSource
+    ) {
+        guard let runtime else { return }
+        switch action {
+        case let .requestFocus(logicalId, _):
+            if let recoveryToken = workspaceManager.logicalWindowRegistry.currentToken(for: logicalId) {
+                focusWindow(recoveryToken, source: source)
+            } else {
+                hideKeyboardFocusBorder(
+                    source: .focusClear,
+                    reason: "scratchpad hide: recovery target retired"
+                )
+            }
+
+        case .clearBorder:
             hideKeyboardFocusBorder(
                 source: .focusClear,
                 reason: "scratchpad hide cleared focused token"
             )
+
+        case let .resolveWorkspaceLastFocused(workspaceId, monitorId):
+            _ = runtime.resolveAndSetWorkspaceFocusToken(
+                in: workspaceId,
+                onMonitor: monitorId,
+                source: source
+            )
+            if workspaceManager.focusedToken == nil {
+                hideKeyboardFocusBorder(
+                    source: .focusClear,
+                    reason: "scratchpad hide: workspace had no remembered focus"
+                )
+            }
+
+        case nil:
+            break
         }
     }
 
     private func hideScratchpadWindow(
         _ entry: WindowModel.Entry,
-        monitor: Monitor
+        monitor: Monitor,
+        source: WMEventSource
     ) {
         let preferredSide = layoutRefreshController.preferredHideSide(for: monitor)
         layoutRefreshController.hideWindow(
@@ -1368,23 +1491,25 @@ final class WMController {
         recoverFocusAfterScratchpadHide(
             in: entry.workspaceId,
             excluding: entry.token,
-            on: monitor.id
+            on: monitor.id,
+            source: source
         )
     }
 
     private func showScratchpadWindow(
         _ entry: WindowModel.Entry,
         on workspaceId: WorkspaceDescriptor.ID,
-        monitor: Monitor
+        monitor: Monitor,
+        source: WMEventSource
     ) {
         if entry.workspaceId != workspaceId {
-            reassignManagedWindow(entry.token, to: workspaceId)
+            reassignManagedWindow(entry.token, to: workspaceId, source: source)
         }
         axManager.markWindowActive(entry.windowId)
 
         if let hiddenState = workspaceManager.hiddenState(for: entry.token) {
             let focusOnRevealSuccess: LayoutRefreshController.PostLayoutAction = { [weak self] in
-                self?.focusWindow(entry.token)
+                self?.focusWindow(entry.token, source: source)
             }
             if hiddenState.isScratchpad {
                 layoutRefreshController.restoreScratchpadWindow(
@@ -1410,7 +1535,7 @@ final class WMController {
             axManager.applyFramesParallel([(entry.pid, entry.windowId, frame)])
         }
 
-        focusWindow(entry.token)
+        focusWindow(entry.token, source: source)
     }
 
     @discardableResult
@@ -1418,7 +1543,8 @@ final class WMController {
         for token: WindowToken,
         to targetMode: TrackedWindowMode,
         preferredMonitor: Monitor? = nil,
-        applyFloatingFrame: Bool? = nil
+        applyFloatingFrame: Bool? = nil,
+        source: WMEventSource = .command
     ) -> Bool {
         guard let entry = workspaceManager.entry(for: token) else { return false }
         let currentMode = entry.mode
@@ -1431,19 +1557,23 @@ final class WMController {
             frame: currentFrame
         )
 
+        guard let runtime else {
+            preconditionFailure("WMController.transitionWindowMode requires WMRuntime to be attached")
+        }
         switch (currentMode, targetMode) {
         case (.tiling, .floating):
             let targetFrame = targetFloatingFrame(
                 for: entry,
                 preferredMonitor: referenceMonitor
             )
-            _ = workspaceManager.setWindowMode(.floating, for: token)
+            _ = runtime.setWindowMode(.floating, for: token, source: source)
             if let targetFrame {
-                workspaceManager.updateFloatingGeometry(
+                runtime.updateFloatingGeometry(
                     frame: targetFrame,
                     for: token,
                     referenceMonitor: referenceMonitor,
-                    restoreToFloating: true
+                    restoreToFloating: true,
+                    source: source
                 )
                 if applyFloatingFrame ?? shouldApplyFloatingFrameImmediately(for: entry.workspaceId) {
                     axManager.forceApplyNextFrame(for: entry.windowId)
@@ -1461,17 +1591,18 @@ final class WMController {
 
         case (.floating, .tiling):
             if let currentFrame {
-                workspaceManager.updateFloatingGeometry(
+                runtime.updateFloatingGeometry(
                     frame: currentFrame,
                     for: token,
                     referenceMonitor: referenceMonitor,
-                    restoreToFloating: true
+                    restoreToFloating: true,
+                    source: source
                 )
             } else if var floatingState = workspaceManager.floatingState(for: token) {
                 floatingState.restoreToFloating = true
-                workspaceManager.setFloatingState(floatingState, for: token)
+                runtime.setFloatingState(floatingState, for: token, source: source)
             }
-            _ = workspaceManager.setWindowMode(.tiling, for: token)
+            _ = runtime.setWindowMode(.tiling, for: token, source: source)
             return true
 
         case (.tiling, .tiling), (.floating, .floating):
@@ -1645,7 +1776,10 @@ final class WMController {
     }
 
     func clearManualWindowOverride(for token: WindowToken) {
-        workspaceManager.setManualLayoutOverride(nil, for: token)
+        guard let runtime else {
+            preconditionFailure("WMController.clearManualWindowOverride requires WMRuntime to be attached")
+        }
+        runtime.setManualLayoutOverride(nil, for: token, source: .command)
     }
 
     private func resolveAXWindowRef(for token: WindowToken) -> AXWindowRef? {
@@ -1659,6 +1793,9 @@ final class WMController {
         for targets: Set<WindowRuleReevaluationTarget>
     ) async -> WindowRuleReevaluationOutcome {
         guard !targets.isEmpty else { return .none }
+        guard let runtime else {
+            preconditionFailure("WMController.reevaluateWindowRules requires WMRuntime to be attached")
+        }
 
         var liveWindowsByToken: [WindowToken: AXWindowRef] = [:]
         var tokensToReevaluate: Set<WindowToken> = []
@@ -1726,11 +1863,6 @@ final class WMController {
             let axRef = liveWindowsByToken[token] ?? existingEntry?.axRef
             guard let axRef else { continue }
 
-            // Same guard as in the full-rescan path: when CGS just
-            // destroyed this windowId, the stale AX ref we still hold
-            // shouldn't be used to re-admit the window under a
-            // synthetic entry. Let `trackPreparedCreate` admit the
-            // genuine replacement when it arrives.
             if existingEntry == nil,
                axEventHandler.isWindowRecentlyDestroyed(windowId: token.windowId)
             {
@@ -1747,9 +1879,10 @@ final class WMController {
                 if let existingEntry {
                     affectedWorkspaceIds.insert(existingEntry.workspaceId)
                     layoutRefreshController.discardHiddenTracking(for: existingEntry.token)
-                    _ = workspaceManager.removeWindow(
+                    _ = runtime.removeWindow(
                         pid: token.pid,
-                        windowId: token.windowId
+                        windowId: token.windowId,
+                        source: .ax
                     )
                     relayoutNeeded = true
                 }
@@ -1767,13 +1900,14 @@ final class WMController {
                 fallbackWorkspaceId: activeWorkspace()?.id
             )
 
-            _ = workspaceManager.addWindow(
+            _ = runtime.admitWindow(
                 axRef,
                 pid: token.pid,
                 windowId: token.windowId,
                 to: workspaceId,
                 mode: oldMode ?? trackedMode,
-                ruleEffects: evaluation.decision.ruleEffects
+                ruleEffects: evaluation.decision.ruleEffects,
+                source: .ax
             )
 
             if let oldMode, oldMode != trackedMode {
@@ -1790,20 +1924,18 @@ final class WMController {
             }
 
             if let updatedEntry = workspaceManager.entry(for: token) {
-                _ = workspaceManager.setManagedReplacementMetadata(
-                    ManagedReplacementMetadata(
-                        bundleId: evaluation.facts.ax.bundleId ?? updatedEntry.managedReplacementMetadata?.bundleId,
-                        workspaceId: updatedEntry.workspaceId,
-                        mode: updatedEntry.mode,
-                        role: evaluation.facts.ax.role ?? updatedEntry.managedReplacementMetadata?.role,
-                        subrole: evaluation.facts.ax.subrole ?? updatedEntry.managedReplacementMetadata?.subrole,
-                        title: evaluation.facts.ax.title ?? updatedEntry.managedReplacementMetadata?.title,
-                        windowLevel: evaluation.facts.windowServer?.level ?? updatedEntry.managedReplacementMetadata?.windowLevel,
-                        parentWindowId: evaluation.facts.windowServer?.parentId ?? updatedEntry.managedReplacementMetadata?.parentWindowId,
-                        frame: evaluation.facts.windowServer?.frame ?? updatedEntry.managedReplacementMetadata?.frame
-                    ),
-                    for: token
+                let metadata = ManagedReplacementMetadata(
+                    bundleId: evaluation.facts.ax.bundleId ?? updatedEntry.managedReplacementMetadata?.bundleId,
+                    workspaceId: updatedEntry.workspaceId,
+                    mode: updatedEntry.mode,
+                    role: evaluation.facts.ax.role ?? updatedEntry.managedReplacementMetadata?.role,
+                    subrole: evaluation.facts.ax.subrole ?? updatedEntry.managedReplacementMetadata?.subrole,
+                    title: evaluation.facts.ax.title ?? updatedEntry.managedReplacementMetadata?.title,
+                    windowLevel: evaluation.facts.windowServer?.level ?? updatedEntry.managedReplacementMetadata?.windowLevel,
+                    parentWindowId: evaluation.facts.windowServer?.parentId ?? updatedEntry.managedReplacementMetadata?.parentWindowId,
+                    frame: evaluation.facts.windowServer?.frame ?? updatedEntry.managedReplacementMetadata?.frame
                 )
+                _ = runtime.setManagedReplacementMetadata(metadata, for: token, source: .ax)
             }
 
             if existingEntry == nil
@@ -1833,7 +1965,7 @@ final class WMController {
         )
     }
 
-    func toggleFocusedWindowFloating() {
+    func toggleFocusedWindowFloating(source: WMEventSource = .command) {
         let token = focusedManagedTokenForCommand()
         guard let token,
               let entry = workspaceManager.entry(for: token)
@@ -1848,10 +1980,10 @@ final class WMController {
             nextOverride = entry.mode == .tiling ? .forceFloat : .forceTile
         }
 
-        applyManagedWindowOverride(nextOverride, for: token, entry: entry)
+        applyManagedWindowOverride(nextOverride, for: token, entry: entry, source: source)
     }
 
-    func assignFocusedWindowToScratchpad() {
+    func assignFocusedWindowToScratchpad(source: WMEventSource = .command) {
         guard let token = focusedManagedTokenForCommand(),
               let entry = workspaceManager.entry(for: token),
               !isManagedWindowSuspendedForNativeFullscreen(token)
@@ -1859,16 +1991,19 @@ final class WMController {
             return
         }
 
+        guard let runtime else {
+            preconditionFailure("WMController.assignFocusedWindowToScratchpad requires WMRuntime to be attached")
+        }
         if workspaceManager.isScratchpadToken(token) {
             guard !workspaceManager.isHiddenInCorner(token) else { return }
-            _ = workspaceManager.clearScratchpadIfMatches(token)
-            applyManagedWindowOverride(.forceTile, for: token, entry: entry)
+            _ = runtime.clearScratchpadIfMatches(token, source: source)
+            applyManagedWindowOverride(.forceTile, for: token, entry: entry, source: source)
             return
         }
 
         if let existingScratchpadToken = workspaceManager.scratchpadToken() {
             if workspaceManager.entry(for: existingScratchpadToken) == nil {
-                _ = workspaceManager.clearScratchpadIfMatches(existingScratchpadToken)
+                _ = runtime.clearScratchpadIfMatches(existingScratchpadToken, source: source)
             } else {
                 return
             }
@@ -1876,11 +2011,15 @@ final class WMController {
 
         let preferredMonitor = monitorForInteraction() ?? workspaceManager.monitor(for: entry.workspaceId)
         let transitionedFromTiling = entry.mode == .tiling
-        guard prepareWindowForScratchpadAssignment(token, preferredMonitor: preferredMonitor) else {
+        guard prepareWindowForScratchpadAssignment(
+            token,
+            preferredMonitor: preferredMonitor,
+            source: source
+        ) else {
             return
         }
 
-        _ = workspaceManager.setScratchpadToken(token)
+        _ = runtime.setScratchpadToken(token, source: source)
 
         guard let updatedEntry = workspaceManager.entry(for: token),
               let hideMonitor = workspaceManager.monitor(for: updatedEntry.workspaceId) ?? preferredMonitor
@@ -1888,7 +2027,7 @@ final class WMController {
             return
         }
 
-        hideScratchpadWindow(updatedEntry, monitor: hideMonitor)
+        hideScratchpadWindow(updatedEntry, monitor: hideMonitor, source: source)
 
         if transitionedFromTiling {
             layoutRefreshController.requestImmediateRelayout(
@@ -1901,9 +2040,13 @@ final class WMController {
     private func applyManagedWindowOverride(
         _ override: ManualWindowOverride?,
         for token: WindowToken,
-        entry: WindowModel.Entry
+        entry: WindowModel.Entry,
+        source: WMEventSource = .command
     ) {
-        workspaceManager.setManualLayoutOverride(override, for: token)
+        guard let runtime else {
+            preconditionFailure("WMController.applyManagedWindowOverride requires WMRuntime to be attached")
+        }
+        runtime.setManualLayoutOverride(override, for: token, source: source)
         let evaluation = evaluateWindowDisposition(
             axRef: entry.axRef,
             pid: token.pid
@@ -1913,9 +2056,10 @@ final class WMController {
             existingEntry: entry
         ) else {
             layoutRefreshController.discardHiddenTracking(for: token)
-            _ = workspaceManager.removeWindow(
+            _ = runtime.removeWindow(
                 pid: token.pid,
-                windowId: token.windowId
+                windowId: token.windowId,
+                source: source
             )
             layoutRefreshController.requestRelayout(
                 reason: .windowRuleReevaluation,
@@ -1928,7 +2072,8 @@ final class WMController {
             for: token,
             to: trackedMode,
             preferredMonitor: monitorForInteraction(),
-            applyFloatingFrame: true
+            applyFloatingFrame: true,
+            source: source
         )
         layoutRefreshController.requestRelayout(
             reason: .windowRuleReevaluation,
@@ -1936,10 +2081,13 @@ final class WMController {
         )
     }
 
-    func toggleScratchpadWindow() {
+    func toggleScratchpadWindow(source: WMEventSource = .command) {
         guard let scratchpadToken = workspaceManager.scratchpadToken() else { return }
+        guard let runtime else {
+            preconditionFailure("WMController.toggleScratchpadWindow requires WMRuntime to be attached")
+        }
         guard let entry = workspaceManager.entry(for: scratchpadToken) else {
-            _ = workspaceManager.clearScratchpadIfMatches(scratchpadToken)
+            _ = runtime.clearScratchpadIfMatches(scratchpadToken, source: source)
             return
         }
         guard !isManagedWindowSuspendedForNativeFullscreen(scratchpadToken) else { return }
@@ -1948,25 +2096,31 @@ final class WMController {
         if let hiddenState = workspaceManager.hiddenState(for: scratchpadToken) {
             let updatedEntry = workspaceManager.entry(for: scratchpadToken) ?? entry
             if hiddenState.isScratchpad || hiddenState.workspaceInactive {
-                showScratchpadWindow(updatedEntry, on: target.workspaceId, monitor: target.monitor)
+                showScratchpadWindow(
+                    updatedEntry,
+                    on: target.workspaceId,
+                    monitor: target.monitor,
+                    source: source
+                )
             }
             return
         }
 
         let hasCapturedGeometry = captureVisibleFloatingGeometry(
             for: scratchpadToken,
-            preferredMonitor: target.monitor
+            preferredMonitor: target.monitor,
+            source: source
         ) != nil || workspaceManager.floatingState(for: scratchpadToken) != nil
         guard hasCapturedGeometry else { return }
 
         if entry.workspaceId == target.workspaceId,
            isManagedWindowDisplayable(entry.handle)
         {
-            hideScratchpadWindow(entry, monitor: target.monitor)
+            hideScratchpadWindow(entry, monitor: target.monitor, source: source)
             return
         }
 
-        showScratchpadWindow(entry, on: target.workspaceId, monitor: target.monitor)
+        showScratchpadWindow(entry, on: target.workspaceId, monitor: target.monitor, source: source)
     }
 
     func workspaceAssignment(pid: pid_t, windowId: Int) -> WorkspaceDescriptor.ID? {
@@ -1991,51 +2145,58 @@ final class WMController {
     func toggleOverview() { windowActionHandler.toggleOverview() }
     func raiseAllFloatingWindows() { windowActionHandler.raiseAllFloatingWindows() }
     @discardableResult
-    func rescueOffscreenWindows() -> Int {
+    func rescueOffscreenWindows(source: WMEventSource = .command) -> Int {
         guard !isLockScreenActive else { return 0 }
 
         var candidates: [RestorePlanner.FloatingRescueCandidate] = []
         let visibleWorkspaceIds = workspaceManager.visibleWorkspaceIds()
+        let workspaceGraph = workspaceManager.workspaceGraphSnapshot()
 
-        for entry in workspaceManager.allFloatingEntries() {
-            guard entry.layoutReason == .standard else { continue }
-            guard visibleWorkspaceIds.contains(entry.workspaceId) else { continue }
-            guard let targetMonitor = workspaceManager.monitor(for: entry.workspaceId)
-                ?? monitorForInteraction()
-                ?? workspaceManager.monitors.first
-            , let floatingState = workspaceManager.floatingState(for: entry.token)
-            else {
-                continue
-            }
+        for workspaceId in workspaceGraph.workspaceOrder where visibleWorkspaceIds.contains(workspaceId) {
+            for graphEntry in workspaceGraph.floatingMembership(in: workspaceId) {
+                guard let entry = workspaceManager.entry(for: graphEntry.token) else { continue }
+                guard entry.layoutReason == .standard else { continue }
+                guard let targetMonitor = workspaceManager.monitor(for: entry.workspaceId)
+                    ?? monitorForInteraction()
+                    ?? workspaceManager.monitors.first
+                , let floatingState = graphEntry.floatingState ?? workspaceManager.floatingState(for: entry.token)
+                else {
+                    continue
+                }
 
-            candidates.append(
-                .init(
-                    token: entry.token,
-                    pid: entry.pid,
-                    windowId: entry.windowId,
-                    workspaceId: entry.workspaceId,
-                    targetMonitor: targetMonitor,
-                    currentFrame: liveFrame(for: entry),
-                    floatingFrame: floatingState.lastFrame,
-                    normalizedOrigin: floatingState.normalizedOrigin,
-                    referenceMonitorId: floatingState.referenceMonitorId,
-                    isScratchpadHidden: workspaceManager.hiddenState(for: entry.token)?.isScratchpad == true,
-                    isWorkspaceInactiveHidden: workspaceManager.hiddenState(for: entry.token)?.workspaceInactive == true
+                candidates.append(
+                    .init(
+                        token: entry.token,
+                        pid: entry.pid,
+                        windowId: entry.windowId,
+                        workspaceId: entry.workspaceId,
+                        targetMonitor: targetMonitor,
+                        currentFrame: liveFrame(for: entry),
+                        floatingFrame: floatingState.lastFrame,
+                        normalizedOrigin: floatingState.normalizedOrigin,
+                        referenceMonitorId: floatingState.referenceMonitorId,
+                        isScratchpadHidden: workspaceManager.hiddenState(for: entry.token)?.isScratchpad == true,
+                        isWorkspaceInactiveHidden: workspaceManager.hiddenState(for: entry.token)?.workspaceInactive == true
+                    )
                 )
-            )
+            }
         }
 
         let rescuePlan = restorePlanner.planFloatingRescue(candidates)
         var frameUpdates: [(pid: pid_t, windowId: Int, frame: CGRect)] = []
         var rescuedEntries: [WindowModel.Entry] = []
 
+        guard let runtime else {
+            preconditionFailure("WMController.rescueOffscreenWindows requires WMRuntime to be attached")
+        }
         for operation in rescuePlan.operations {
             guard let entry = workspaceManager.entry(for: operation.token) else { continue }
-            workspaceManager.updateFloatingGeometry(
+            runtime.updateFloatingGeometry(
                 frame: operation.targetFrame,
                 for: operation.token,
                 referenceMonitor: operation.targetMonitor,
-                restoreToFloating: true
+                restoreToFloating: true,
+                source: source
             )
             axManager.forceApplyNextFrame(for: operation.windowId)
             frameUpdates.append((operation.pid, operation.windowId, operation.targetFrame))
@@ -2054,21 +2215,33 @@ final class WMController {
     func isOverviewOpen() -> Bool { windowActionHandler.isOverviewOpen() }
 
     @discardableResult
-    func resolveAndSetWorkspaceFocusToken(for workspaceId: WorkspaceDescriptor.ID) -> WindowToken? {
-        workspaceManager.resolveAndSetWorkspaceFocusToken(
+    func resolveAndSetWorkspaceFocusToken(
+        for workspaceId: WorkspaceDescriptor.ID,
+        source: WMEventSource = .focusPolicy
+    ) -> WindowToken? {
+        guard let runtime else {
+            preconditionFailure("WMController.resolveAndSetWorkspaceFocusToken requires WMRuntime to be attached")
+        }
+        return runtime.resolveAndSetWorkspaceFocusToken(
             in: workspaceId,
-            onMonitor: workspaceManager.monitorId(for: workspaceId)
+            onMonitor: workspaceManager.monitorId(for: workspaceId),
+            source: source
         )
     }
 
     func reassignManagedWindow(
         _ token: WindowToken,
-        to workspaceId: WorkspaceDescriptor.ID
+        to workspaceId: WorkspaceDescriptor.ID,
+        source: WMEventSource = .command
     ) {
-        workspaceManager.setWorkspace(for: token, to: workspaceId)
+        guard let runtime else {
+            preconditionFailure("WMController.reassignManagedWindow requires WMRuntime to be attached")
+        }
+        runtime.setWorkspace(for: token, to: workspaceId, source: source)
         recordManagedRestoreGeometryIfMaterialStateChanged(
             for: CGWindowID(token.windowId),
-            reason: .workspaceMoved
+            reason: .workspaceMoved,
+            source: source
         )
         guard let entry = workspaceManager.entry(for: token) else { return }
         focusBridge.updateFocusedTargetWorkspace(
@@ -2083,92 +2256,116 @@ final class WMController {
         preferredNodeId: NodeId?
     ) {
         let monitorId = workspaceManager.monitorId(for: workspaceId)
+        guard let runtime else {
+            preconditionFailure("WMController.recoverSourceFocusAfterMove requires WMRuntime to be attached")
+        }
 
         if let engine = niriEngine,
            let preferredNodeId,
            let node = engine.findNode(by: preferredNodeId) as? NiriWindow
         {
-            _ = workspaceManager.commitWorkspaceSelection(
+            _ = runtime.commitWorkspaceSelection(
                 nodeId: node.id,
                 focusedToken: node.token,
                 in: workspaceId,
-                onMonitor: monitorId
+                onMonitor: monitorId,
+                source: .focusPolicy
             )
             return
         }
 
-        _ = workspaceManager.resolveAndSetWorkspaceFocusToken(in: workspaceId, onMonitor: monitorId)
+        _ = runtime.resolveAndSetWorkspaceFocusToken(
+            in: workspaceId,
+            onMonitor: monitorId,
+            source: .focusPolicy
+        )
     }
 
     func ensureFocusedTokenValid(in workspaceId: WorkspaceDescriptor.ID) {
-        guard !shouldSuppressManagedFocusRecovery else { return }
-        guard !workspaceManager.hasPendingNativeFullscreenTransition else { return }
-
-        if let pendingFocusedToken = workspaceManager.pendingFocusedToken,
-           workspaceManager.pendingFocusedWorkspaceId == workspaceId
-        {
-            if let engine = niriEngine,
-               let node = engine.findNode(for: pendingFocusedToken)
-            {
-                _ = workspaceManager.commitWorkspaceSelection(
-                    nodeId: node.id,
-                    focusedToken: pendingFocusedToken,
-                    in: workspaceId,
-                    onMonitor: workspaceManager.monitorId(for: workspaceId)
-                )
-            } else {
-                _ = workspaceManager.applySessionPatch(
-                    .init(
-                        workspaceId: workspaceId,
-                        viewportState: nil,
-                        rememberedFocusToken: pendingFocusedToken
-                    )
-                )
-            }
-            return
+        guard let runtime else {
+            preconditionFailure("WMController.ensureFocusedTokenValid requires WMRuntime to be attached")
         }
 
-        if let focusedToken = workspaceManager.focusedToken,
-           workspaceManager.entry(for: focusedToken)?.workspaceId == workspaceId
-        {
-            if let engine = niriEngine,
-               let node = engine.findNode(for: focusedToken)
-            {
-                _ = workspaceManager.commitWorkspaceSelection(
-                    nodeId: node.id,
-                    focusedToken: focusedToken,
-                    in: workspaceId,
-                    onMonitor: workspaceManager.monitorId(for: workspaceId)
-                )
-            } else {
-                _ = workspaceManager.applySessionPatch(
-                    .init(
-                        workspaceId: workspaceId,
-                        viewportState: nil,
-                        rememberedFocusToken: focusedToken
-                    )
-                )
+        let pendingForWorkspace = workspaceManager.pendingFocusedWorkspaceId == workspaceId
+            ? workspaceManager.pendingFocusedToken
+            : nil
+        let observedForWorkspace: WindowToken? = {
+            guard let token = workspaceManager.focusedToken,
+                  workspaceManager.entry(for: token)?.workspaceId == workspaceId
+            else {
+                return nil
             }
-            return
-        }
+            return token
+        }()
 
-        guard let nextFocusToken = workspaceManager.resolveAndSetWorkspaceFocusToken(
+        let inputs = EnsureWorkspaceFocusPolicy.Inputs(
+            workspaceId: workspaceId,
+            pendingFocusedToken: pendingForWorkspace,
+            pendingHasLayoutNode: pendingForWorkspace.flatMap { niriEngine?.findNode(for: $0) } != nil,
+            observedFocusedToken: observedForWorkspace,
+            observedHasLayoutNode: observedForWorkspace.flatMap { niriEngine?.findNode(for: $0) } != nil,
+            nativeFullscreenSuppressionActive: workspaceManager.hasPendingNativeFullscreenTransition,
+            managedFocusRecoverySuppressed: shouldSuppressManagedFocusRecovery
+        )
+
+        applyEnsureFocusedTokenValidAction(
+            EnsureWorkspaceFocusPolicy.decide(inputs),
             in: workspaceId,
-            onMonitor: workspaceManager.monitorId(for: workspaceId)
-        ) else {
-            return
-        }
+            runtime: runtime
+        )
+    }
 
-        if let engine = niriEngine,
-           let node = engine.findNode(for: nextFocusToken)
-        {
-            _ = workspaceManager.commitWorkspaceSelection(
-                nodeId: node.id,
-                focusedToken: nextFocusToken,
-                in: workspaceId
+    private func applyEnsureFocusedTokenValidAction(
+        _ action: EnsureWorkspaceFocusPolicy.Action,
+        in workspaceId: WorkspaceDescriptor.ID,
+        runtime: WMRuntime
+    ) {
+        switch action {
+        case .suppressed:
+            return
+
+        case let .keepPendingFocus(token, commitLayoutSelection),
+             let .keepObservedFocus(token, commitLayoutSelection):
+            if commitLayoutSelection,
+               let engine = niriEngine,
+               let node = engine.findNode(for: token)
+            {
+                _ = runtime.commitWorkspaceSelection(
+                    nodeId: node.id,
+                    focusedToken: token,
+                    in: workspaceId,
+                    onMonitor: workspaceManager.monitorId(for: workspaceId),
+                    source: .focusPolicy
+                )
+            } else {
+                let patch = WorkspaceSessionPatch(
+                    workspaceId: workspaceId,
+                    viewportState: nil,
+                    rememberedFocusToken: token
+                )
+                _ = runtime.applySessionPatch(patch, source: .focusPolicy)
+            }
+
+        case .resolveRememberedFocus:
+            let nextFocusToken = runtime.resolveAndSetWorkspaceFocusToken(
+                in: workspaceId,
+                onMonitor: workspaceManager.monitorId(for: workspaceId),
+                source: .focusPolicy
             )
+            guard let nextFocusToken else { return }
+
+            if let engine = niriEngine,
+               let node = engine.findNode(for: nextFocusToken)
+            {
+                _ = runtime.commitWorkspaceSelection(
+                    nodeId: node.id,
+                    focusedToken: nextFocusToken,
+                    in: workspaceId,
+                    source: .focusPolicy
+                )
+            }
+            focusWindow(nextFocusToken, source: .focusPolicy)
         }
-        focusWindow(nextFocusToken)
     }
 
     func moveMouseToWindow(_ handle: WindowHandle) {
@@ -2263,11 +2460,11 @@ extension WMController {
         switch target {
         case let .managed(token):
             guard workspaceManager.entry(for: token) != nil else { return }
-            focusWindow(token)
+            focusWindow(token, source: .focusPolicy)
 
         case let .external(target):
             if workspaceManager.entry(for: target.token) != nil {
-                focusWindow(target.token)
+                focusWindow(target.token, source: .focusPolicy)
                 return
             }
             guard !isLockScreenActive else { return }
@@ -2296,55 +2493,56 @@ extension WMController {
         }
     }
 
-    func focusWindow(_ token: WindowToken) {
+    func focusWindow(
+        _ token: WindowToken,
+        source: WMEventSource
+    ) {
         guard let entry = workspaceManager.entry(for: token) else { return }
         guard !isLockScreenActive else { return }
         if hasStartedServices {
             guard !isFrontmostAppLockScreen() else { return }
         }
         guard !isManagedWindowSuspendedForNativeFullscreen(token) else { return }
-        if let runtime {
-            _ = runtime.requestManagedFocus(
-                token: token,
-                workspaceId: entry.workspaceId
-            )
-            return
+        guard let runtime else {
+            preconditionFailure("WMController.focusWindow requires WMRuntime to be attached")
         }
-
-        let result = OrchestrationCore.step(
-            snapshot: orchestrationSnapshot(
-                refresh: .init(
-                    activeRefresh: layoutRefreshController.layoutState.activeRefresh,
-                    pendingRefresh: layoutRefreshController.layoutState.pendingRefresh
-                )
-            ),
-            event: .focusRequested(
-                .init(
-                    token: token,
-                    workspaceId: entry.workspaceId
-                )
-            )
+        _ = runtime.requestManagedFocus(
+            token: token,
+            workspaceId: entry.workspaceId,
+            source: source
         )
-        applyRuntimeFocusRequestResult(result)
     }
 
-    func applyRuntimeFocusRequestResult(_ result: OrchestrationResult) {
+    func applyRuntimeFocusRequestResult(
+        _ result: OrchestrationResult,
+        source: WMEventSource
+    ) {
         focusBridge.applyOrchestrationState(
             nextManagedRequestId: result.snapshot.focus.nextManagedRequestId,
             activeManagedRequest: result.snapshot.focus.activeManagedRequest
         )
-        _ = workspaceManager.applyOrchestrationFocusState(result.snapshot.focus)
+        guard let runtime else {
+            preconditionFailure("WMController.applyRuntimeFocusRequestResult requires WMRuntime to be attached")
+        }
+        _ = runtime.applyOrchestrationFocusState(result.snapshot.focus, source: source)
 
         for action in result.plan.actions {
             switch action {
             case let .beginManagedFocusRequest(requestId, token, workspaceId):
-                _ = workspaceManager.beginManagedFocusRequest(
+                let beginResult = runtime.beginManagedFocusRequestTransaction(
                     token,
                     in: workspaceId,
-                    onMonitor: workspaceManager.monitorId(for: workspaceId)
+                    onMonitor: workspaceManager.monitorId(for: workspaceId),
+                    source: source
                 )
                 let request = focusBridge.activeManagedRequest(requestId: requestId)
                 assert(request?.token == token, "Unexpected focus request id drift for \(token)")
+                if request != nil {
+                    focusBridge.recordOriginTransactionEpoch(
+                        beginResult.transactionEpoch,
+                        for: requestId
+                    )
+                }
             case let .clearManagedFocusState(requestId, token, workspaceId):
                 axEventHandler.clearManagedFocusStateForOrchestration(
                     requestId: requestId,
@@ -2367,7 +2565,7 @@ extension WMController {
                     },
                     onDeferredFocus: { [weak self] deferred in
                         guard let self, self.workspaceManager.entry(for: deferred) != nil else { return }
-                        self.focusWindow(deferred)
+                        self.focusWindow(deferred, source: source)
                     }
                 )
             case .beginNativeFullscreenRestoreActivation,
@@ -2387,8 +2585,11 @@ extension WMController {
         }
     }
 
-    func focusWindow(_ handle: WindowHandle) {
-        focusWindow(handle.id)
+    func focusWindow(
+        _ handle: WindowHandle,
+        source: WMEventSource
+    ) {
+        focusWindow(handle.id, source: source)
     }
 
     func keyboardFocusTarget(for token: WindowToken, axRef: AXWindowRef) -> KeyboardFocusTarget {
@@ -2443,6 +2644,9 @@ extension WMController {
         if let floatingState = workspaceManager.floatingState(for: token) {
             return floatingState.lastFrame
         }
+        if let lastAppliedFrame = axManager.lastAppliedFrame(for: token.windowId) {
+            return lastAppliedFrame
+        }
         return nil
     }
 
@@ -2461,7 +2665,7 @@ extension WMController {
         let columnId: NodeId
         let workspaceColumnIds: [NodeId]
         let tileIndex: Int?
-        let columnWindowTokens: [WindowToken]
+        let columnWindowMembers: [LogicalWindowId]
         let columnSizing: ManagedWindowRestoreSnapshot.NiriState.ColumnSizing
         let windowSizing: ManagedWindowRestoreSnapshot.NiriState.WindowSizing
 
@@ -2469,7 +2673,7 @@ extension WMController {
             guard let snapshot else { return false }
             guard snapshot.nodeId == nodeId,
                   snapshot.tileIndex == tileIndex,
-                  snapshot.columnWindowTokens == columnWindowTokens,
+                  snapshot.columnWindowMembers == columnWindowMembers,
                   snapshot.columnSizing == columnSizing,
                   snapshot.windowSizing == windowSizing,
                   let snapshotColumnIndex = snapshot.columnIndex,
@@ -2519,7 +2723,6 @@ extension WMController {
 
         var provisionalSnapshot: ManagedWindowRestoreSnapshot {
             ManagedWindowRestoreSnapshot(
-                token: token,
                 workspaceId: entry.workspaceId,
                 frame: frame,
                 topologyProfile: topologyProfile,
@@ -2545,14 +2748,16 @@ extension WMController {
 
     func recordManagedRestoreGeometryIfMaterialStateChanged(
         for windowId: CGWindowID,
-        reason: ManagedRestoreTriggerReason
+        reason: ManagedRestoreTriggerReason,
+        source: WMEventSource = .command
     ) {
         guard let entry = workspaceManager.entry(forWindowId: Int(windowId)) else { return }
         guard let frame = resolveManagedRestoreMaterialStateFrame(for: entry.token) else { return }
         _ = persistManagedRestoreSnapshotIfNeeded(
             for: entry.token,
             frame: frame,
-            reason: reason
+            reason: reason,
+            source: source
         )
     }
 
@@ -2561,7 +2766,8 @@ extension WMController {
         for token: WindowToken,
         frame: CGRect,
         reason: ManagedRestoreTriggerReason = .frameConfirmed,
-        frameConfirmResult: FrameConfirmResult? = nil
+        frameConfirmResult: FrameConfirmResult? = nil,
+        source: WMEventSource = .command
     ) -> Bool {
         guard let entry = workspaceManager.entry(for: token) else { return false }
         guard workspaceManager.layoutReason(for: token) != .nativeFullscreen else { return false }
@@ -2586,7 +2792,11 @@ extension WMController {
             return false
         }
 
-        guard workspaceManager.setManagedRestoreSnapshot(snapshot, for: token) else {
+        guard let runtime else {
+            preconditionFailure("WMController.recordManagedRestoreGeometry requires WMRuntime to be attached")
+        }
+        let didStoreSnapshot = runtime.setManagedRestoreSnapshot(snapshot, for: token, source: source)
+        guard didStoreSnapshot else {
             return false
         }
         cacheManagedRestoreFastPathIdentity(
@@ -2652,7 +2862,6 @@ extension WMController {
             needsFactRefresh: preview.needsFactRefresh
         )
         return ManagedWindowRestoreSnapshot(
-            token: preview.token,
             workspaceId: preview.entry.workspaceId,
             frame: preview.frame,
             topologyProfile: preview.topologyProfile,
@@ -2735,13 +2944,6 @@ extension WMController {
 
     private func invalidateManagedRestoreFastPathIdentity(forWindowId windowId: Int) {
         managedRestoreFastPathIdentitiesByWindowId.removeValue(forKey: windowId)
-        // `lastKnownNiriStateByToken` is intentionally NOT cleared here. Its
-        // whole reason to exist is to survive transient Niri-tree absence
-        // during a macOS native fullscreen transition — if a brief
-        // removal/re-add cycle fires on the token between "capture succeeded
-        // pre-fullscreen" and "suspend resolves the restore seed", dropping
-        // the entry on removal would defeat the cache. Stale entries are
-        // overwritten on any future successful capture.
     }
 
     private func invalidateManagedRestoreFastPathIdentityForRekey(
@@ -2761,22 +2963,7 @@ extension WMController {
         guard let cacheEntry = lastKnownNiriStateByToken.removeValue(forKey: oldToken) else {
             return
         }
-        let state = cacheEntry.state
-        let migratedState = ManagedWindowRestoreSnapshot.NiriState(
-            nodeId: state.nodeId,
-            columnIndex: state.columnIndex,
-            tileIndex: state.tileIndex,
-            columnWindowTokens: state.columnWindowTokens.map { member in
-                member == oldToken ? newToken : member
-            },
-            columnSizing: state.columnSizing,
-            windowSizing: state.windowSizing
-        )
-        lastKnownNiriStateByToken[newToken] = LastKnownNiriStateCacheEntry(
-            state: migratedState,
-            workspaceId: cacheEntry.workspaceId,
-            topologyProfile: cacheEntry.topologyProfile
-        )
+        lastKnownNiriStateByToken[newToken] = cacheEntry
     }
 
     private func lastKnownNiriState(
@@ -2917,11 +3104,15 @@ extension WMController {
         let columnWindowTokens = column.windowNodes.map(\.token)
         let tileIndex = columnWindowTokens.firstIndex(of: token)
         let columnIndex = engine.columnIndex(of: column, in: workspaceId)
+        let registry = workspaceManager.logicalWindowRegistry
+        let columnWindowMembers = columnWindowTokens.compactMap { siblingToken in
+            registry.resolveForWrite(token: siblingToken)
+        }
         let niriState = ManagedWindowRestoreSnapshot.NiriState(
             nodeId: node.id,
             columnIndex: columnIndex,
             tileIndex: tileIndex,
-            columnWindowTokens: columnWindowTokens,
+            columnWindowMembers: columnWindowMembers,
             columnSizing: ManagedWindowRestoreSnapshot.NiriState.ColumnSizing(
                 width: column.width,
                 cachedWidth: column.cachedWidth,
@@ -2943,11 +3134,6 @@ extension WMController {
         )
         let previous = lastKnownNiriStateByToken[token]
         let topologyProfile = workspaceManager.topologyProfile
-        // Gate cache writes on a tolerance-aware comparison:
-        // niri's kernel re-derives cached widths and tile weights every
-        // animation tick, which structural `==` would report as "changed"
-        // on every frame. The tolerance here must stay below the minimum
-        // delta of a deliberate user resize.
         let isEquivalentToPrevious = previous?.workspaceId == workspaceId
             && previous?.topologyProfile == topologyProfile
             && ManagedWindowRestoreSnapshot.NiriState.isSemanticallyEquivalent(
@@ -2982,12 +3168,16 @@ extension WMController {
         let workspaceColumns = engine.columns(in: workspaceId)
         let columnWindowTokens = column.windowNodes.map(\.token)
         let tileIndex = columnWindowTokens.firstIndex(of: token)
+        let registry = workspaceManager.logicalWindowRegistry
+        let columnWindowMembers = columnWindowTokens.compactMap { siblingToken in
+            registry.resolveForWrite(token: siblingToken)
+        }
         return ManagedRestoreFastPathNiriState(
             nodeId: node.id,
             columnId: column.id,
             workspaceColumnIds: workspaceColumns.map(\.id),
             tileIndex: tileIndex,
-            columnWindowTokens: columnWindowTokens,
+            columnWindowMembers: columnWindowMembers,
             columnSizing: ManagedWindowRestoreSnapshot.NiriState.ColumnSizing(
                 width: column.width,
                 cachedWidth: column.cachedWidth,
@@ -3020,11 +3210,6 @@ extension WMController {
         )
     }
 
-    // Tolerance used when checking whether a managed restore snapshot's frame
-    // matches the window's display bounds (i.e. the snapshot was captured
-    // after the window had already entered macOS native fullscreen). Values
-    // within 1pt cover typical rounding between AX frames and screen bounds
-    // without producing false positives for legitimate full-tile columns.
     private static let managedSnapshotDisplayBoundsMatchTolerance: CGFloat = 1.0
 
     private func frameMatchesTokenDisplayBounds(
@@ -3124,12 +3309,11 @@ extension WMController {
         frame: CGRect
     ) -> WorkspaceManager.NativeFullscreenRecord.RestoreSnapshot {
         if let snapshot = makeManagedWindowRestoreSnapshot(for: token, frame: frame) {
-            // Only persist if we captured a non-nil niriState. Persisting a
-            // nil-niriState snapshot would pin that nil in place via
-            // `shouldShortCircuitManagedRestoreSnapshot`, poisoning every
-            // future fullscreen restore for this window.
             if snapshot.niriState != nil {
-                _ = workspaceManager.setManagedRestoreSnapshot(snapshot, for: token)
+                guard let runtime else {
+                    preconditionFailure("WMController.ensureNativeFullscreenRestoreSnapshot requires WMRuntime to be attached")
+                }
+                _ = runtime.setManagedRestoreSnapshot(snapshot, for: token, source: .command)
             }
             let cachedNiriState = lastKnownNiriState(
                 for: token,
@@ -3179,21 +3363,7 @@ extension WMController {
         )
 
         if let managedSnapshot = workspaceManager.managedRestoreSnapshot(for: token) {
-            // The cache reflects the most recent successful Niri capture and
-            // is strictly more recent than the persisted snapshot, so it wins
-            // whenever it is available. If the persisted snapshot was saved
-            // at a moment when `captureNiriRestoreState` returned nil (e.g. a
-            // transient Niri-tree absence), managedSnapshot.niriState is nil
-            // and the fast-path identity short-circuit can pin that nil in
-            // place indefinitely — the cache is how we still recover.
             let effectiveNiriState = cachedNiriState ?? managedSnapshot.niriState
-            // If the snapshot was first captured while the window was already
-            // in macOS native fullscreen (app launched fullscreen, Space/Mission
-            // Control handoff, etc.), `managedSnapshot.frame` was recorded as
-            // the display rect — restoring to it later would be a no-op. In
-            // that case, if the niri cache still says the column is not
-            // full-width, prefer the niri-cache enrichment path below, which
-            // reads the pre-fullscreen tile geometry from niri's layout engine.
             let managedFrameMatchesDisplayBounds =
                 frameMatchesTokenDisplayBounds(managedSnapshot.frame, token: token)
             let niriIndicatesTiledColumn =
@@ -3211,12 +3381,6 @@ extension WMController {
             }
         }
 
-        // The managed restore snapshot write can be gated off (e.g. when AX
-        // facts for the app have not yet loaded), so we may have a last-known
-        // Niri column context cached even though the full snapshot never made
-        // it to disk. Pair it with any preserved managed geometry we can still
-        // find so the fullscreen restore has column-membership information the
-        // frame-only fallback would otherwise drop.
         if let cachedNiriState,
            let preservedFrame = preservedManagedGeometryFrame(for: token)
         {
@@ -3284,7 +3448,14 @@ extension WMController {
         guard let snapshot = seed.restoreSnapshot else {
             return false
         }
-        return workspaceManager.seedNativeFullscreenRestoreSnapshot(snapshot, for: token)
+        guard let runtime else {
+            preconditionFailure("WMController.seedNativeFullscreenRestoreSnapshot requires WMRuntime to be attached")
+        }
+        return runtime.seedNativeFullscreenRestoreSnapshot(
+            snapshot,
+            for: token,
+            source: .command
+        )
     }
 
     @discardableResult
@@ -3298,11 +3469,15 @@ extension WMController {
             path: path,
             strategy: .preTransitionCapture
         )
-        return workspaceManager.requestNativeFullscreenEnter(
+        guard let runtime else {
+            preconditionFailure("WMController.requestManagedNativeFullscreenEnter requires WMRuntime to be attached")
+        }
+        return runtime.requestNativeFullscreenEnter(
             token,
             in: workspaceId,
             restoreSnapshot: seed.restoreSnapshot,
-            restoreFailure: seed.restoreFailure
+            restoreFailure: seed.restoreFailure,
+            source: .command
         )
     }
 
@@ -3311,11 +3486,6 @@ extension WMController {
         _ token: WindowToken,
         path: NativeFullscreenRestoreSeedPath
     ) -> Bool {
-        // The OS re-asserts fullscreen on every rescan cycle (and AX
-        // notifications can fire more than once per transition), which
-        // previously ran the seed-resolution / suspend pipeline in a tight
-        // loop. Once the record is already `.suspended` with a seed snapshot
-        // in place, there is nothing for a follow-up call to change.
         if let record = workspaceManager.nativeFullscreenRecord(for: token),
            record.transition == .suspended,
            record.restoreSnapshot != nil
@@ -3327,10 +3497,25 @@ extension WMController {
             path: path,
             strategy: .fullscreenDetectedManagedGeometryOnly
         )
-        return workspaceManager.markNativeFullscreenSuspended(
+        let eventSource: WMEventSource = switch path {
+        case .commandDrivenEnter, .commandExitSetFailure:
+            .command
+        case .manualCapture,
+             .directActivationEnter,
+             .fullRescanExistingEntryFullscreen,
+             .fullRescanNativeFullscreenRestore,
+             .delayedSameTokenFullscreenReappearance,
+             .delayedReplacementTokenFullscreenReappearance:
+            .ax
+        }
+        guard let runtime else {
+            preconditionFailure("WMController.suspendManagedWindowForNativeFullscreen requires WMRuntime to be attached")
+        }
+        return runtime.markNativeFullscreenSuspended(
             token,
             restoreSnapshot: seed.restoreSnapshot,
-            restoreFailure: seed.restoreFailure
+            restoreFailure: seed.restoreFailure,
+            source: eventSource
         )
     }
 
@@ -3367,7 +3552,7 @@ extension WMController {
         matchingPid: pid_t? = nil,
         matchingWindowId: Int? = nil
     ) -> Bool {
-        borderCoordinator.hideBorder(
+        return borderCoordinator.hideBorder(
             source: source,
             reason: reason,
             matchingToken: matchingToken,
@@ -3418,5 +3603,28 @@ extension WMController {
 
     var isInteractiveGestureActive: Bool {
         mouseEventHandler.isInteractiveGestureActive
+    }
+
+
+    @discardableResult
+    func routeBeginNativeFullscreenRestore(
+        for token: WindowToken,
+        source: WMEventSource = .ax
+    ) -> WorkspaceManager.NativeFullscreenRecord? {
+        guard let runtime else {
+            preconditionFailure("WMController.routeBeginNativeFullscreenRestore requires WMRuntime to be attached")
+        }
+        return runtime.beginNativeFullscreenRestore(for: token, source: source)
+    }
+
+    @discardableResult
+    func routeRestoreNativeFullscreenRecord(
+        for token: WindowToken,
+        source: WMEventSource = .ax
+    ) -> ParentKind? {
+        guard let runtime else {
+            preconditionFailure("WMController.routeRestoreNativeFullscreenRecord requires WMRuntime to be attached")
+        }
+        return runtime.restoreNativeFullscreenRecord(for: token, source: source)
     }
 }

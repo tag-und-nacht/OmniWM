@@ -33,8 +33,21 @@ final class AXManager {
     var onAppTerminated: ((pid_t) -> Void)?
     var currentWindowsAsyncOverride: (@MainActor () async -> [(AXWindowRef, pid_t, Int)])?
     var fullRescanEnumerationOverrideForTests: (@MainActor () async -> FullRescanEnumerationSnapshot)?
-    var frameApplyOverrideForTests: (([AXFrameApplicationRequest]) -> [AXFrameApplyResult])?
+    var frameApplyOverrideForTests: (([AXFrameApplicationRequest]) -> [AXFrameApplyResult])? {
+        didSet {
+            frameApplyOverrideConfirmsPositionPlansForTests = false
+        }
+    }
+    private(set) var frameApplyOverrideConfirmsPositionPlansForTests = false
     var onFrameConfirmed: ((pid_t, Int, CGRect, FrameConfirmResult) -> Void)?
+    var onFramePending: ((pid_t, Int, CGRect, AXFrameRequestId) -> Void)?
+    /// Invoked when a batched AX frame write reaches its terminal failure
+    /// state (the retry budget is exhausted or the failure is non-retryable).
+    /// Wired to `WMRuntime.submitAXFrameWriteOutcome` so the runtime's
+    /// quarantine / retry / failure-handling state machine can advance —
+    /// previously the failure path notified the request observer but left
+    /// the runtime side unwired, so quarantine never transitioned.
+    var onFrameFailed: ((pid_t, Int, CGRect, AXFrameWriteFailureReason) -> Void)?
 
     private struct PendingFrameObserver {
         var windowId: Int
@@ -133,6 +146,15 @@ final class AXManager {
 
     var usesFrameApplyOverrideForTests: Bool {
         frameApplyOverrideForTests != nil
+    }
+
+    func markFrameApplyOverrideConfirmsPositionPlansForTests() {
+        precondition(frameApplyOverrideForTests != nil)
+        frameApplyOverrideConfirmsPositionPlansForTests = true
+    }
+
+    func clearFrameApplyOverridePositionConfirmationForTests() {
+        frameApplyOverrideConfirmsPositionPlansForTests = false
     }
 
     func hasPendingFrameWrite(for windowId: Int) -> Bool {
@@ -383,6 +405,7 @@ final class AXManager {
             let requestId = makeNextFrameApplicationRequestId()
             pendingFrameWrites[windowId] = frame
             recentFrameWriteFailures.removeValue(forKey: windowId)
+            onFramePending?(pid, windowId, frame, requestId)
             if isRetry,
                let existingObserverRequestId,
                var pendingObserver = pendingFrameObserversByRequestId[existingObserverRequestId],
@@ -598,6 +621,20 @@ final class AXManager {
                   shouldRetryFrameWrite(after: resolvedResult)
             else {
                 retryBudgetByWindowId.removeValue(forKey: resolvedWindowId)
+                // Terminal failure: emit `onFrameFailed` so the runtime's
+                // outcome state machine can mark quarantine and the
+                // FrameReducer can record the failed write. Without this,
+                // a failed write only updated AXManager-local state and the
+                // runtime stayed waiting for a confirmation that would
+                // never arrive.
+                if let failureReason = resolvedResult.writeResult.failureReason {
+                    onFrameFailed?(
+                        resolvedResult.pid,
+                        resolvedWindowId,
+                        resolvedResult.targetFrame,
+                        failureReason
+                    )
+                }
                 notifyPendingFrameObserver(with: resolvedResult)
                 continue
             }

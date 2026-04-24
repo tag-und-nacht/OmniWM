@@ -68,15 +68,36 @@ private func makePersistedRestoreCatalogFixture(
 
 private func writeSettingsExport(
     _ export: SettingsExport,
-    to url: URL,
-    preserveVersion: Bool = false
+    to url: URL
 ) throws {
-    var canonical = export
-    if !preserveVersion {
-        canonical.version = SettingsFilePersistence.configVersion
-    }
     try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-    try SettingsTOMLCodec.encode(canonical).write(to: url, options: .atomic)
+    try SettingsTOMLCodec.encode(export).write(to: url, options: .atomic)
+}
+
+private func atomicallyReplaceSettingsDataForTests(
+    _ data: Data,
+    at url: URL,
+    preservingModificationDate modificationDate: Date
+) throws {
+    let directory = url.deletingLastPathComponent()
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+    let tempURL = directory.appendingPathComponent(".settings.toml.\(UUID().uuidString).tmp", isDirectory: false)
+    try data.write(to: tempURL, options: .withoutOverwriting)
+    try FileManager.default.setAttributes([.modificationDate: modificationDate], ofItemAtPath: tempURL.path)
+
+    let result = tempURL.withUnsafeFileSystemRepresentation { sourcePath -> CInt in
+        guard let sourcePath else { return -1 }
+        return url.withUnsafeFileSystemRepresentation { destinationPath -> CInt in
+            guard let destinationPath else { return -1 }
+            return Darwin.rename(sourcePath, destinationPath)
+        }
+    }
+
+    if result != 0 {
+        try? FileManager.default.removeItem(at: tempURL)
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
 }
 
 @Suite struct MonitorSettingsStoreTests {
@@ -130,16 +151,6 @@ private func writeSettingsExport(
         #expect(result?.maxVisibleColumns == 3)
     }
 
-    @Test func rebindPromotesLegacyNameEntryToDisplayId() {
-        let monitor = makeSettingsTestMonitor(displayId: 99, name: "Legacy")
-        let settings = [
-            MonitorNiriSettings(monitorName: "Legacy", maxVisibleColumns: 2),
-        ]
-
-        let rebound = MonitorSettingsStore.rebound(settings, to: [monitor])
-        #expect(rebound.first?.monitorDisplayId == 99)
-        #expect(rebound.first?.monitorName == "Legacy")
-    }
 }
 
 @Suite @MainActor struct RuntimeStateStoreTests {
@@ -176,23 +187,6 @@ private func writeSettingsExport(
         #expect(FileManager.default.fileExists(atPath: persistence.fileURL.path))
     }
 
-    @Test func unsupportedSchemaVersionIsRenamedAsideAndReplacedWithDefaults() throws {
-        let defaults = makeTestDefaults()
-        let directory = configurationDirectoryForTests(defaults: defaults)
-        let url = directory.appendingPathComponent("settings.toml", isDirectory: false)
-        var export = SettingsExport.defaults()
-        export.version = SettingsFilePersistence.configVersion + 1
-        try writeSettingsExport(export, to: url, preserveVersion: true)
-
-        let persistence = SettingsFilePersistence(directory: directory, startWatching: false)
-        let loaded = persistence.load()
-        let corruptURL = directory.appendingPathComponent("settings.toml.corrupt", isDirectory: false)
-
-        #expect(loaded == SettingsExport.defaults())
-        #expect(FileManager.default.fileExists(atPath: url.path))
-        #expect(FileManager.default.fileExists(atPath: corruptURL.path))
-    }
-
     @Test func corruptFileIsRenamedAsideAndReplacedWithDefaults() throws {
         let defaults = makeTestDefaults()
         let directory = configurationDirectoryForTests(defaults: defaults)
@@ -209,24 +203,6 @@ private func writeSettingsExport(
         #expect(FileManager.default.fileExists(atPath: corruptURL.path))
     }
 
-    @Test func legacySettingsJsonIsIgnoredWhenTomlMissing() throws {
-        let defaults = makeTestDefaults()
-        let directory = configurationDirectoryForTests(defaults: defaults)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let legacyJsonURL = directory.appendingPathComponent("settings.json", isDirectory: false)
-        let tomlURL = directory.appendingPathComponent("settings.toml", isDirectory: false)
-        let legacyJsonPayload = #"{"version": 4, "hotkeysEnabled": false}"#
-        try Data(legacyJsonPayload.utf8).write(to: legacyJsonURL)
-
-        let persistence = SettingsFilePersistence(directory: directory, startWatching: false)
-        let export = persistence.load()
-
-        #expect(export == SettingsExport.defaults())
-        #expect(FileManager.default.fileExists(atPath: tomlURL.path))
-        #expect(FileManager.default.fileExists(atPath: legacyJsonURL.path))
-        let legacyContents = try String(contentsOf: legacyJsonURL, encoding: .utf8)
-        #expect(legacyContents == legacyJsonPayload)
-    }
 }
 
 @Suite @MainActor struct SettingsStorePersistenceTests {
@@ -251,17 +227,6 @@ private func writeSettingsExport(
         #expect(reloaded.focusFollowsWindowToMonitor == true)
         #expect(reloaded.mouseWarpAxis == .vertical)
         #expect(reloaded.workspaceConfigurations == settings.workspaceConfigurations)
-    }
-
-    @Test func missingCanonicalFileIgnoresLegacyDefaultsKeys() {
-        let defaults = makeTestDefaults()
-        defaults.set(true, forKey: "settings.focusFollowsWindowToMonitor")
-        defaults.set(false, forKey: "settings.hotkeysEnabled")
-
-        let settings = SettingsStore(defaults: defaults)
-
-        #expect(settings.focusFollowsWindowToMonitor == SettingsExport.defaults().focusFollowsWindowToMonitor)
-        #expect(settings.hotkeysEnabled == SettingsExport.defaults().hotkeysEnabled)
     }
 
     @Test func runtimeStateSidecarKeepsRestoreCatalogOutOfSettingsFile() throws {
@@ -421,6 +386,54 @@ private func writeSettingsExport(
         #expect(reloaded)
     }
 
+    @Test func externalAtomicReplacementReloadsWhenSizeAndModificationDateMatchLastWrite() async throws {
+        let defaults = makeTestDefaults()
+        let directory = configurationDirectoryForTests(defaults: defaults)
+        let settings = SettingsStore(
+            persistence: SettingsFilePersistence(directory: directory),
+            runtimeState: RuntimeStateStore(directory: directory)
+        )
+        var reloadCount = 0
+        settings.onExternalSettingsReloaded = {
+            reloadCount += 1
+        }
+
+        let originalData = try Data(contentsOf: settings.settingsFileURL)
+        let originalModificationDate = try #require(
+            settings.settingsFileURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+        )
+
+        let export = try SettingsTOMLCodec.decode(originalData)
+        let sameDigitGapCandidates = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map(Double.init)
+        var replacementExport: SettingsExport?
+        var replacementData: Data?
+        for gapSize in sameDigitGapCandidates where gapSize != export.gapSize {
+            var candidate = export
+            candidate.gapSize = gapSize
+            let candidateData = try SettingsTOMLCodec.encode(candidate)
+            guard candidateData.count == originalData.count else { continue }
+            replacementExport = candidate
+            replacementData = candidateData
+            break
+        }
+        let unwrappedReplacementExport = try #require(replacementExport)
+        let unwrappedReplacementData = try #require(replacementData)
+
+        try atomicallyReplaceSettingsDataForTests(
+            unwrappedReplacementData,
+            at: settings.settingsFileURL,
+            preservingModificationDate: originalModificationDate
+        )
+
+        let reloaded = await waitForConditionForTests(
+            timeoutNanoseconds: 20_000_000_000
+        ) {
+            reloadCount == 1 && settings.gapSize == unwrappedReplacementExport.gapSize
+        }
+
+        #expect(reloaded)
+    }
+
     @Test func invalidExternalEditLeavesCurrentSettingsUnchanged() async throws {
         let defaults = makeTestDefaults()
         let directory = configurationDirectoryForTests(defaults: defaults)
@@ -441,61 +454,5 @@ private func writeSettingsExport(
         #expect(reloadCount == 0)
         let rawData = try Data(contentsOf: settings.settingsFileURL)
         #expect(String(data: rawData, encoding: .utf8) == invalidPayload)
-    }
-}
-
-@Suite struct CodableBackwardCompatTests {
-    @Test func monitorNiriDecodesLegacyStringFields() throws {
-        let json = """
-        {
-            "id": "00000000-0000-0000-0000-000000000001",
-            "monitorName": "Test",
-            "centerFocusedColumn": "always",
-            "singleWindowAspectRatio": "4:3"
-        }
-        """
-        let decoded = try JSONDecoder().decode(MonitorNiriSettings.self, from: Data(json.utf8))
-        #expect(decoded.centerFocusedColumn == .always)
-        #expect(decoded.singleWindowAspectRatio == .ratio4x3)
-    }
-
-    @Test func monitorNiriDecodesUnknownEnumAsNil() throws {
-        let json = """
-        {
-            "id": "00000000-0000-0000-0000-000000000001",
-            "monitorName": "Test",
-            "centerFocusedColumn": "futureValue",
-            "singleWindowAspectRatio": "99:1"
-        }
-        """
-        let decoded = try JSONDecoder().decode(MonitorNiriSettings.self, from: Data(json.utf8))
-        #expect(decoded.centerFocusedColumn == nil)
-        #expect(decoded.singleWindowAspectRatio == nil)
-    }
-
-    @Test func monitorBarDecodesUnknownPositionAsNil() throws {
-        let json = """
-        {
-            "id": "00000000-0000-0000-0000-000000000001",
-            "monitorName": "Test",
-            "position": "unknownPosition",
-            "windowLevel": "unknownLevel"
-        }
-        """
-        let decoded = try JSONDecoder().decode(MonitorBarSettings.self, from: Data(json.utf8))
-        #expect(decoded.position == nil)
-        #expect(decoded.windowLevel == nil)
-    }
-
-    @Test func monitorDwindleDecodesUnknownRatioAsNil() throws {
-        let json = """
-        {
-            "id": "00000000-0000-0000-0000-000000000001",
-            "monitorName": "Test",
-            "singleWindowAspectRatio": "unknownRatio"
-        }
-        """
-        let decoded = try JSONDecoder().decode(MonitorDwindleSettings.self, from: Data(json.utf8))
-        #expect(decoded.singleWindowAspectRatio == nil)
     }
 }

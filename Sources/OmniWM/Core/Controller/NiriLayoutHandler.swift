@@ -3,6 +3,7 @@ import AppKit
 import Foundation
 import QuartzCore
 
+
 private func hasPendingNiriAnimationWork(
     state: ViewportState,
     engine: NiriLayoutEngine,
@@ -57,10 +58,59 @@ private func fixedViewportRemovalOldFrames(
         self.controller = controller
     }
 
+    private func requiredRuntime(_ context: String) -> WMRuntime {
+        guard let runtime = controller?.runtime else {
+            preconditionFailure("\(context) requires WMRuntime to be attached")
+        }
+        return runtime
+    }
+
     private func hiddenPlacementMonitorContexts() -> [HiddenPlacementMonitorContext] {
         guard let controller else { return [] }
-        return Monitor.sortedByPosition(controller.workspaceManager.monitors)
-            .map(HiddenPlacementMonitorContext.init)
+        let topology = LayoutProjectionContext.project(controller: controller).topology
+        return topology.order.compactMap { monitorId in
+            topology.node(monitorId).map(HiddenPlacementMonitorContext.init)
+        }
+    }
+
+    private func fallbackNodeFromGraph(
+        in workspaceId: WorkspaceDescriptor.ID,
+        engine: NiriLayoutEngine,
+        graph: WorkspaceGraph
+    ) -> NiriWindow? {
+        guard let workspaceNode = graph.node(for: workspaceId) else { return nil }
+        let tiledEntries = graph.tiledMembership(in: workspaceId)
+        let entriesByLogicalId = Dictionary(
+            tiledEntries.map { ($0.logicalId, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+
+        if let lastFocused = workspaceNode.lastTiledFocusedLogicalId,
+           let entry = entriesByLogicalId[lastFocused],
+           let node = graphResolvedNode(entry, in: workspaceId, engine: engine)
+        {
+            return node
+        }
+
+        for entry in tiledEntries {
+            if let node = graphResolvedNode(entry, in: workspaceId, engine: engine) {
+                return node
+            }
+        }
+        return nil
+    }
+
+    private func graphResolvedNode(
+        _ entry: WorkspaceGraph.WindowEntry,
+        in workspaceId: WorkspaceDescriptor.ID,
+        engine: NiriLayoutEngine
+    ) -> NiriWindow? {
+        guard let node = engine.findNode(forLogicalId: entry.logicalId) ?? engine.findNode(for: entry.token),
+              engine.findColumn(containing: node, in: workspaceId) != nil
+        else {
+            return nil
+        }
+        return node
     }
 
     @discardableResult
@@ -131,12 +181,16 @@ private func fixedViewportRemovalOldFrames(
             return
         }
 
-        guard let monitor = controller.workspaceManager.monitors.first(where: { $0.displayId == displayId }) else {
+        let projectionContext = LayoutProjectionContext.project(controller: controller)
+        let topology = projectionContext.topology
+
+        guard let monitorNode = topology.node(forDisplay: displayId) else {
             controller.layoutRefreshController.stopScrollAnimation(for: displayId)
             return
         }
+        let monitor = monitorNode.monitor
 
-        guard controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id == wsId else {
+        guard monitorNode.activeWorkspaceId == wsId else {
             controller.layoutRefreshController.stopScrollAnimation(for: displayId)
             return
         }
@@ -144,45 +198,53 @@ private func fixedViewportRemovalOldFrames(
         let windowAnimationsRunning = engine.tickAllWindowAnimations(in: wsId, at: targetTime)
         let columnAnimationsRunning = engine.tickAllColumnAnimations(in: wsId, at: targetTime)
 
-        controller.workspaceManager.withNiriViewportState(for: wsId) { state in
+        let runtime = requiredRuntime("NiriLayoutHandler.tickScrollAnimation")
+        let tick = runtime.withNiriViewportState(for: wsId, source: .animation) { state in
             let viewportAnimationRunning = state.advanceAnimations(at: targetTime)
-
-            self.applyFramesOnDemand(
-                wsId: wsId,
+            return (
                 state: state,
-                engine: engine,
-                monitor: monitor,
-                animationTime: targetTime
+                viewportAnimationRunning: viewportAnimationRunning,
+                animationsOngoing: viewportAnimationRunning
+                    || windowAnimationsRunning
+                    || columnAnimationsRunning
             )
+        }
 
-            let animationsOngoing = viewportAnimationRunning
-                || windowAnimationsRunning
-                || columnAnimationsRunning
+        applyFramesOnDemand(
+            wsId: wsId,
+            state: tick.state,
+            engine: engine,
+            monitor: monitor,
+            animationTime: targetTime,
+            projectionContext: projectionContext
+        )
 
-            if let diagnostic = removalDiagnosticByWorkspace[wsId] {
-                self.emitNiriRemovalAnimationDiagnostic(
-                    diagnostic.withPhase(
-                        .displayLinkTick,
-                        survivorMoveAnimation: windowAnimationsRunning,
-                        columnAnimation: columnAnimationsRunning,
-                        viewportAnimation: viewportAnimationRunning,
-                        startNiriScroll: true
-                    )
+        if let diagnostic = removalDiagnosticByWorkspace[wsId] {
+            emitNiriRemovalAnimationDiagnostic(
+                diagnostic.withPhase(
+                    .displayLinkTick,
+                    survivorMoveAnimation: windowAnimationsRunning,
+                    columnAnimation: columnAnimationsRunning,
+                    viewportAnimation: tick.viewportAnimationRunning,
+                    startNiriScroll: true
                 )
-            }
+            )
+        }
 
-            if !animationsOngoing {
-                self.finalizeAnimation()
-                var activeIds = Set<WorkspaceDescriptor.ID>()
-                for mon in controller.workspaceManager.monitors {
-                    if let ws = controller.workspaceManager.activeWorkspaceOrFirst(on: mon.id) {
-                        activeIds.insert(ws.id)
-                    }
+        if !tick.animationsOngoing {
+            finalizeAnimation()
+            var activeIds = Set<WorkspaceDescriptor.ID>()
+            for monitorId in topology.order {
+                guard let node = topology.node(monitorId),
+                      let activeWorkspaceId = node.activeWorkspaceId
+                else {
+                    continue
                 }
-                controller.layoutRefreshController.hideInactiveWorkspaces(activeWorkspaceIds: activeIds)
-                self.removalDiagnosticByWorkspace.removeValue(forKey: wsId)
-                controller.layoutRefreshController.stopScrollAnimation(for: displayId)
+                activeIds.insert(activeWorkspaceId)
             }
+            controller.layoutRefreshController.hideInactiveWorkspaces(activeWorkspaceIds: activeIds)
+            removalDiagnosticByWorkspace.removeValue(forKey: wsId)
+            controller.layoutRefreshController.stopScrollAnimation(for: displayId)
         }
     }
 
@@ -191,18 +253,20 @@ private func fixedViewportRemovalOldFrames(
         state: ViewportState,
         engine: NiriLayoutEngine,
         monitor: Monitor,
-        animationTime: TimeInterval? = nil
+        animationTime: TimeInterval? = nil,
+        projectionContext: LayoutProjectionContext? = nil
     ) {
-        guard let controller,
-              let activeWorkspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id,
-              let snapshot = makeWorkspaceSnapshot(
-                  workspaceId: wsId,
-                  monitor: monitor,
-                  viewportState: state,
-                  useScrollAnimationPath: true,
-                  removalSeed: nil,
-                  isActiveWorkspace: activeWorkspaceId == wsId
-              )
+        guard let controller else { return }
+        let context = projectionContext ?? LayoutProjectionContext.project(controller: controller)
+        let activeWorkspaceId = context.topology.node(monitor.id)?.activeWorkspaceId
+        guard let snapshot = makeWorkspaceSnapshot(
+            workspaceId: wsId,
+            monitor: monitor,
+            viewportState: state,
+            useScrollAnimationPath: true,
+            removalSeed: nil,
+            isActiveWorkspace: activeWorkspaceId == wsId
+        )
         else {
             return
         }
@@ -219,22 +283,33 @@ private func fixedViewportRemovalOldFrames(
     private func finalizeAnimation() {
         guard let controller else { return }
 
-        let focusedTarget = controller.currentKeyboardFocusTargetForRendering()
-        let preferredFrame: CGRect? = if let focusedTarget,
-                                         focusedTarget.isManaged,
-                                         let node = controller.niriEngine?.findNode(for: focusedTarget.token)
+        let focusedTarget: KeyboardFocusTarget?
+        if controller.workspaceManager.pendingFocusedToken != nil,
+           let confirmedToken = controller.workspaceManager.focusedToken
         {
-            node.renderedFrame ?? node.frame
+            focusedTarget = controller.managedKeyboardFocusTarget(for: confirmedToken)
+                ?? controller.currentKeyboardFocusTargetForRendering()
         } else {
-            nil
+            focusedTarget = controller.currentKeyboardFocusTargetForRendering()
         }
+        let preferredFrame = focusedTarget
+            .flatMap { $0.isManaged ? controller.preferredKeyboardFocusFrame(for: $0.token) : nil }
         if let token = focusedTarget?.token {
-            _ = controller.reapplyKeyboardFocusBorderIfMatching(
-                token: token,
-                preferredFrame: preferredFrame,
-                phase: .animationSettled,
-                policy: .coordinated
-            )
+            if token == controller.workspaceManager.focusedToken {
+                _ = controller.renderKeyboardFocusBorder(
+                    for: focusedTarget,
+                    preferredFrame: preferredFrame,
+                    policy: controller.workspaceManager.pendingFocusedToken != nil ? .direct : .coordinated,
+                    source: .borderReapplyAnimationSettled
+                )
+            } else {
+                _ = controller.reapplyKeyboardFocusBorderIfMatching(
+                    token: token,
+                    preferredFrame: preferredFrame,
+                    phase: .animationSettled,
+                    policy: .coordinated
+                )
+            }
         } else {
             _ = controller.renderKeyboardFocusBorder(
                 policy: .coordinated,
@@ -252,12 +327,13 @@ private func fixedViewportRemovalOldFrames(
     func cancelActiveAnimations(for workspaceId: WorkspaceDescriptor.ID) {
         guard let controller else { return }
 
-        for (displayId, wsId) in scrollAnimationByDisplay where wsId == workspaceId {
-            controller.layoutRefreshController.stopScrollAnimation(for: displayId)
+        let runtime = requiredRuntime("NiriLayoutHandler.cancelActiveAnimations")
+        runtime.withNiriViewportState(for: workspaceId, source: .animation) { state in
+            state.cancelAnimation()
         }
 
-        controller.workspaceManager.withNiriViewportState(for: workspaceId) { state in
-            state.cancelAnimation()
+        for (displayId, wsId) in scrollAnimationByDisplay where wsId == workspaceId {
+            controller.layoutRefreshController.stopScrollAnimation(for: displayId)
         }
     }
 
@@ -267,16 +343,17 @@ private func fixedViewportRemovalOldFrames(
         removalSeeds: [WorkspaceDescriptor.ID: NiriWindowRemovalSeed] = [:]
     ) async throws -> [WorkspaceLayoutPlan] {
         guard let controller, let engine = controller.niriEngine else { return [] }
+        let projectionContext = LayoutProjectionContext.project(controller: controller)
         var plans: [WorkspaceLayoutPlan] = []
         for wsId in activeWorkspaces.sorted(by: { $0.uuidString < $1.uuidString }) {
             try Task.checkCancellation()
-            guard let workspace = controller.workspaceManager.descriptor(for: wsId),
-                  let monitor = controller.workspaceManager.monitor(for: wsId)
+            guard let workspaceNode = projectionContext.graph.node(for: wsId),
+                  let monitorNode = projectionContext.monitorNode(for: wsId)
             else { continue }
 
-            let layoutType = controller.settings.layoutType(for: workspace.name)
-            if layoutType == .dwindle { continue }
-            let isActiveWorkspace = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id == wsId
+            if workspaceNode.layoutType == .dwindle { continue }
+            let monitor = monitorNode.monitor
+            let isActiveWorkspace = monitorNode.activeWorkspaceId == wsId
 
             guard let snapshot = makeWorkspaceSnapshot(
                 workspaceId: wsId,
@@ -284,17 +361,19 @@ private func fixedViewportRemovalOldFrames(
                 viewportState: nil,
                 useScrollAnimationPath: useScrollAnimationPath,
                 removalSeed: removalSeeds[wsId],
-                isActiveWorkspace: isActiveWorkspace
+                isActiveWorkspace: isActiveWorkspace,
+                projectionContext: projectionContext
             ) else { continue }
 
-            plans.append(
-                buildRelayoutPlan(
-                    snapshot: snapshot,
-                    engine: engine,
-                    monitor: monitor
-                )
+            let plan = buildRelayoutPlan(
+                snapshot: snapshot,
+                engine: engine,
+                monitor: monitor
             )
+            plans.append(plan)
 
+            try Task.checkCancellation()
+            await controller.layoutRefreshController.debugHooks.onWorkspaceLayoutPlanBuilt?(.niri, wsId)
             try Task.checkCancellation()
             await Task.yield()
         }
@@ -309,44 +388,76 @@ private func fixedViewportRemovalOldFrames(
         viewportState: ViewportState?,
         useScrollAnimationPath: Bool,
         removalSeed: NiriWindowRemovalSeed?,
-        isActiveWorkspace: Bool
+        isActiveWorkspace: Bool,
+        projectionContext: LayoutProjectionContext? = nil
     ) -> NiriWorkspaceSnapshot? {
         guard let controller else { return nil }
+        let context = projectionContext ?? LayoutProjectionContext.project(controller: controller)
 
         let shouldResolveConstraints = viewportState == nil
-        let orientation = controller.niriEngine?.monitor(for: monitor.id)?.orientation
-            ?? controller.settings.effectiveOrientation(for: monitor)
-        guard let refreshInput = controller.layoutRefreshController.buildRefreshInput(
-            workspaceId: wsId,
-            monitor: monitor,
-            resolveConstraints: shouldResolveConstraints,
-            orientation: orientation,
-            isActiveWorkspace: isActiveWorkspace
+        guard controller.layoutRefreshController.warmWindowConstraints(
+            for: context.graph.tiledMembership(in: wsId),
+            resolveConstraints: shouldResolveConstraints
         ) else {
             return nil
         }
 
         let effectiveViewportState = viewportState ?? controller.workspaceManager.niriViewportState(for: wsId)
-        let interactionWorkspaceId = controller.activeWorkspace()?.id
+        let interactionWorkspaceId = context.activeWorkspaceIdForInteraction
 
-        return NiriWorkspaceSnapshot(
+        return makeProjectionSnapshot(
             workspaceId: wsId,
-            monitor: refreshInput.monitor,
-            windows: refreshInput.windows,
+            monitor: monitor,
             viewportState: effectiveViewportState,
-            preferredFocusToken: controller.workspaceManager.preferredFocusToken(in: wsId),
-            confirmedFocusedToken: controller.workspaceManager.focusedToken,
-            pendingFocusedToken: controller.workspaceManager.pendingFocusedToken,
-            pendingFocusedWorkspaceId: controller.workspaceManager.pendingFocusedWorkspaceId,
-            isNonManagedFocusActive: controller.workspaceManager.isNonManagedFocusActive,
+            useScrollAnimationPath: useScrollAnimationPath,
+            removalSeed: removalSeed,
+            isActiveWorkspace: isActiveWorkspace,
+            isInteractionWorkspace: interactionWorkspaceId == wsId,
+            projectionContext: context
+        )
+    }
+
+    @MainActor
+    private func makeProjectionSnapshot(
+        workspaceId wsId: WorkspaceDescriptor.ID,
+        monitor _: Monitor,
+        viewportState: ViewportState,
+        useScrollAnimationPath: Bool,
+        removalSeed: NiriWindowRemovalSeed?,
+        isActiveWorkspace: Bool,
+        isInteractionWorkspace: Bool,
+        projectionContext: LayoutProjectionContext? = nil
+    ) -> NiriWorkspaceSnapshot? {
+        guard let controller else { return nil }
+        let manager = controller.workspaceManager
+        let context = projectionContext ?? LayoutProjectionContext.project(controller: controller)
+        guard let monitorNode = context.monitorNode(for: wsId) else { return nil }
+        let topologyMonitor = monitorNode.monitor
+        let orientationOverride = controller.niriEngine?.monitor(for: monitorNode.monitorId)?.orientation
+            ?? controller.settings.effectiveOrientation(for: topologyMonitor)
+
+        return NiriProjectionBuilder(
+            graph: context.graph,
+            topology: context.topology,
+            lifecycle: manager
+        ).buildSnapshot(
+            for: wsId,
+            monitorId: monitorNode.monitorId,
+            viewportState: viewportState,
+            preferredFocusToken: manager.preferredFocusToken(in: wsId),
+            confirmedFocusedToken: manager.focusedToken,
+            pendingFocusedToken: manager.pendingFocusedToken,
+            pendingFocusedWorkspaceId: manager.pendingFocusedWorkspaceId,
+            isNonManagedFocusActive: manager.isNonManagedFocusActive,
             hasCompletedInitialRefresh: controller.layoutRefreshController.layoutState.hasCompletedInitialRefresh,
             useScrollAnimationPath: useScrollAnimationPath,
             removalSeed: removalSeed,
-            gap: CGFloat(controller.workspaceManager.gaps),
-            outerGaps: controller.workspaceManager.outerGaps,
-            displayRefreshRate: controller.layoutRefreshController.layoutState.refreshRateByDisplay[monitor.displayId] ?? 60.0,
-            isActiveWorkspace: refreshInput.isActiveWorkspace,
-            isInteractionWorkspace: interactionWorkspaceId == wsId
+            gap: CGFloat(manager.gaps),
+            outerGaps: manager.outerGaps,
+            displayRefreshRate: controller.layoutRefreshController.layoutState.refreshRateByDisplay[monitorNode.displayId] ?? 60.0,
+            isActiveWorkspace: isActiveWorkspace,
+            isInteractionWorkspace: isInteractionWorkspace,
+            orientationOverride: orientationOverride
         )
     }
 
@@ -492,6 +603,10 @@ private func fixedViewportRemovalOldFrames(
         snapshot: NiriWorkspaceSnapshot
     ) -> TopologySyncResult {
         syncAnimationRefreshRate(snapshot.displayRefreshRate, engine: pass.engine, state: &state)
+        pass.engine.reconcileLogicalMembership(
+            for: snapshot.windows,
+            in: pass.wsId
+        )
         let windowTokens = snapshot.windows.map(\.token)
         let existingHandleIds = pass.engine.root(for: pass.wsId)?.windowIdSet ?? []
         let newTokens = windowTokens.filter { !existingHandleIds.contains($0) }
@@ -558,6 +673,7 @@ private func fixedViewportRemovalOldFrames(
             state: &state,
             motion: motion
         )
+        pass.engine.bindLogicalMembership(for: snapshot.windows)
 
         pass.engine.prepareColumnWidths(
             in: pass.wsId,
@@ -588,12 +704,15 @@ private func fixedViewportRemovalOldFrames(
         let selectedToken = state.selectedNodeId
             .flatMap { pass.engine.findNode(by: $0) as? NiriWindow }?
             .token
-        let rememberedFocusToken: WindowToken? = if removalAnchorNodeId != nil {
-            selectedToken
-        } else if plan.result.remembered_focus_window_id != 0 {
+        let plannedRememberedFocusToken: WindowToken? = if plan.result.remembered_focus_window_id != 0 {
             pass.engine.findWindow(in: plan, id: plan.result.remembered_focus_window_id)?.token
         } else {
-            selectedToken
+            nil
+        }
+        let rememberedFocusToken: WindowToken? = if removalAnchorNodeId != nil {
+            selectedToken ?? plannedRememberedFocusToken
+        } else {
+            plannedRememberedFocusToken ?? selectedToken
         }
         let newWindowToken: WindowToken? = if snapshot.hasCompletedInitialRefresh,
                                               snapshot.isActiveWorkspace,
@@ -786,8 +905,7 @@ private func fixedViewportRemovalOldFrames(
             engine: pass.engine,
             directBorderUpdate: snapshot.useScrollAnimationPath,
             isInteractionWorkspace: snapshot.isInteractionWorkspace,
-            canRestoreHiddenWorkspaceWindows: snapshot.isActiveWorkspace,
-            forceHiddenReapply: snapshot.windows.contains { $0.isRestoringNativeFullscreen }
+            canRestoreHiddenWorkspaceWindows: snapshot.isActiveWorkspace
         )
 
         var plan = WorkspaceLayoutPlan(
@@ -936,8 +1054,7 @@ private func fixedViewportRemovalOldFrames(
         engine: NiriLayoutEngine,
         directBorderUpdate: Bool,
         isInteractionWorkspace: Bool,
-        canRestoreHiddenWorkspaceWindows: Bool,
-        forceHiddenReapply: Bool = false
+        canRestoreHiddenWorkspaceWindows: Bool
     ) -> WorkspaceLayoutDiff {
         var diff = WorkspaceLayoutDiff()
         let suspendedTokens = Set(
@@ -992,7 +1109,7 @@ private func fixedViewportRemovalOldFrames(
                 } else {
                     previousOffscreenSide != side
                 }
-                if forceHiddenReapply || shouldEmitHide {
+                if shouldEmitHide {
                     diff.visibilityChanges.append(.hide(request))
                 }
                 continue
@@ -1049,12 +1166,16 @@ private func fixedViewportRemovalOldFrames(
             return
         }
 
-        var infos: [TabbedColumnOverlayInfo] = []
-        for monitor in controller.workspaceManager.monitors {
-            guard let workspace = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)
-            else { continue }
+        let topology = LayoutProjectionContext.project(controller: controller).topology
 
-            for column in engine.columns(in: workspace.id) where column.isTabbed {
+        var infos: [TabbedColumnOverlayInfo] = []
+        for monitorId in topology.order {
+            guard let monitorNode = topology.node(monitorId),
+                  let workspaceId = monitorNode.activeWorkspaceId
+            else { continue }
+            let monitor = monitorNode.monitor
+
+            for column in engine.columns(in: workspaceId) where column.isTabbed {
                 guard let frame = column.renderedFrame ?? column.frame else { continue }
                 guard TabbedColumnOverlayManager.shouldShowOverlay(
                     columnFrame: frame,
@@ -1069,7 +1190,7 @@ private func fixedViewportRemovalOldFrames(
 
                 infos.append(
                     TabbedColumnOverlayInfo(
-                        workspaceId: workspace.id,
+                        workspaceId: workspaceId,
                         columnId: column.id,
                         columnFrame: frame,
                         tabCount: windows.count,
@@ -1099,7 +1220,7 @@ private func fixedViewportRemovalOldFrames(
 
         let target = windows[storageIndex]
         var state = controller.workspaceManager.niriViewportState(for: workspaceId)
-        if let monitor = controller.workspaceManager.monitor(for: workspaceId) {
+        if let monitor = LayoutProjectionContext.project(controller: controller).monitor(for: workspaceId) {
             syncAnimationRefreshRate(for: monitor, engine: engine, state: &state)
             let gap = CGFloat(controller.workspaceManager.gaps)
             engine.ensureSelectionVisible(
@@ -1115,13 +1236,15 @@ private func fixedViewportRemovalOldFrames(
             target, in: workspaceId, state: &state,
             options: .init(activateWindow: false, ensureVisible: false, startAnimation: false)
         )
-        _ = controller.workspaceManager.applySessionPatch(
-            .init(
-                workspaceId: workspaceId,
-                viewportState: state,
-                rememberedFocusToken: nil
-            )
+        let patch = WorkspaceSessionPatch(
+            workspaceId: workspaceId,
+            viewportState: state,
+            rememberedFocusToken: nil
         )
+        guard let runtime = controller.runtime else {
+            preconditionFailure("NiriLayoutHandler.applyTabbedColumn requires WMRuntime to be attached")
+        }
+        _ = runtime.applySessionPatch(patch, source: .command)
         let updatedState = controller.workspaceManager.niriViewportState(for: workspaceId)
         if updatedState.viewOffsetPixels.isAnimating || engine.hasAnyWindowAnimationsRunning(in: workspaceId) {
             controller.layoutRefreshController.startScrollAnimation(for: workspaceId)
@@ -1131,41 +1254,44 @@ private func fixedViewportRemovalOldFrames(
 
 
 
-    func focusNeighbor(direction: Direction) {
+    func focusNeighbor(
+        direction: Direction,
+        source: WMEventSource = .command
+    ) {
         guard let controller else { return }
         guard let engine = controller.niriEngine else { return }
-        guard let wsId = controller.activeWorkspace()?.id else { return }
+        let projectionContext = LayoutProjectionContext.project(controller: controller)
+        guard let wsId = projectionContext.activeWorkspaceIdForInteraction
+        else { return }
 
         var state = controller.workspaceManager.niriViewportState(for: wsId)
         guard let currentId = state.selectedNodeId,
               let currentNode = engine.findNode(by: currentId)
         else {
-            if let lastFocused = controller.workspaceManager.lastFocusedToken(in: wsId),
-               let lastNode = engine.findNode(for: lastFocused)
-            {
-                activateNode(
-                    lastNode, in: wsId, state: &state,
-                    options: .init(activateWindow: false, ensureVisible: false, layoutRefresh: false, startAnimation: false)
-                )
-            } else if let firstToken = controller.workspaceManager.tiledEntries(in: wsId).first?.token,
-                      let firstNode = engine.findNode(for: firstToken)
-            {
+            if let firstNode = fallbackNodeFromGraph(
+                in: wsId,
+                engine: engine,
+                graph: projectionContext.graph
+            ) {
                 activateNode(
                     firstNode, in: wsId, state: &state,
+                    source: source,
                     options: .init(activateWindow: false, ensureVisible: false, layoutRefresh: false, startAnimation: false)
                 )
             }
-            _ = controller.workspaceManager.applySessionPatch(
-                .init(
-                    workspaceId: wsId,
-                    viewportState: state,
-                    rememberedFocusToken: nil
-                )
+            let patch = WorkspaceSessionPatch(
+                workspaceId: wsId,
+                viewportState: state,
+                rememberedFocusToken: nil
             )
+            guard let runtime = controller.runtime else {
+                preconditionFailure("NiriLayoutHandler.focusNeighbor requires WMRuntime to be attached")
+            }
+            _ = runtime.applySessionPatch(patch, source: source)
             return
         }
 
-        guard let monitor = controller.workspaceManager.monitor(for: wsId) else { return }
+        guard let monitor = projectionContext.monitor(for: wsId) else { return }
         syncAnimationRefreshRate(for: monitor, engine: engine, state: &state)
         let gap = CGFloat(controller.workspaceManager.gaps)
         let workingFrame = controller.insetWorkingFrame(for: monitor)
@@ -1187,43 +1313,53 @@ private func fixedViewportRemovalOldFrames(
         ) {
             activateNode(
                 newNode, in: wsId, state: &state,
+                source: source,
                 options: .init(activateWindow: false, ensureVisible: false)
             )
         }
-        _ = controller.workspaceManager.applySessionPatch(
-            .init(
-                workspaceId: wsId,
-                viewportState: state,
-                rememberedFocusToken: nil
-            )
+        let patch = WorkspaceSessionPatch(
+            workspaceId: wsId,
+            viewportState: state,
+            rememberedFocusToken: nil
         )
+        guard let runtime = controller.runtime else {
+            preconditionFailure("NiriLayoutHandler.focusNeighbor requires WMRuntime to be attached")
+        }
+        _ = runtime.applySessionPatch(patch, source: source)
     }
 
-    func toggleFullscreen() {
+    func toggleFullscreen(source: WMEventSource = .command) {
         guard let controller else { return }
-        withNiriWorkspaceContext { engine, wsId, motion, state, _, _, _ in
+        let result = withNiriWorkspaceContext(source: source) {
+            engine, wsId, motion, state, _, _, _ -> (NiriLayoutEngine, WorkspaceDescriptor.ID, ViewportState)? in
             guard let currentId = state.selectedNodeId,
                   let currentNode = engine.findNode(by: currentId),
                   let windowNode = currentNode as? NiriWindow
-            else { return }
+            else { return nil }
 
             engine.toggleFullscreen(windowNode, motion: motion, state: &state)
+            return (engine, wsId, state)
+        } ?? nil
 
-            controller.layoutRefreshController.requestImmediateRelayout(
-                reason: .layoutCommand,
-                affectedWorkspaceIds: [wsId]
-            )
-            startScrollAnimationIfNeeded(for: wsId, state: state, engine: engine)
-        }
+        guard let (engine, wsId, state) = result else { return }
+        controller.layoutRefreshController.requestImmediateRelayout(
+            reason: .layoutCommand,
+            affectedWorkspaceIds: [wsId]
+        )
+        startScrollAnimationIfNeeded(for: wsId, state: state, engine: engine)
     }
 
-    func cycleSize(forward: Bool) {
+    func cycleSize(
+        forward: Bool,
+        source: WMEventSource = .command
+    ) {
         guard let controller else { return }
-        withNiriWorkspaceContext { engine, wsId, motion, state, _, workingFrame, gaps in
+        let result = withNiriWorkspaceContext(source: source) {
+            engine, wsId, motion, state, _, workingFrame, gaps -> (NiriLayoutEngine, WorkspaceDescriptor.ID, ViewportState)? in
             guard let currentId = state.selectedNodeId,
                   let windowNode = engine.findNode(by: currentId) as? NiriWindow,
                   let column = engine.findColumn(containing: windowNode, in: wsId)
-            else { return }
+            else { return nil }
 
             engine.toggleColumnWidth(
                 column,
@@ -1234,21 +1370,25 @@ private func fixedViewportRemovalOldFrames(
                 workingFrame: workingFrame,
                 gaps: gaps
             )
-            controller.layoutRefreshController.requestImmediateRelayout(
-                reason: .layoutCommand,
-                affectedWorkspaceIds: [wsId]
-            )
-            startScrollAnimationIfNeeded(for: wsId, state: state, engine: engine)
-        }
+            return (engine, wsId, state)
+        } ?? nil
+
+        guard let (engine, wsId, state) = result else { return }
+        controller.layoutRefreshController.requestImmediateRelayout(
+            reason: .layoutCommand,
+            affectedWorkspaceIds: [wsId]
+        )
+        startScrollAnimationIfNeeded(for: wsId, state: state, engine: engine)
     }
 
-    func toggleColumnFullWidth() {
+    func toggleColumnFullWidth(source: WMEventSource = .command) {
         guard let controller else { return }
-        withNiriWorkspaceContext { engine, wsId, motion, state, _, workingFrame, gaps in
+        let result = withNiriWorkspaceContext(source: source) {
+            engine, wsId, motion, state, _, workingFrame, gaps -> (NiriLayoutEngine, WorkspaceDescriptor.ID, ViewportState)? in
             guard let currentId = state.selectedNodeId,
                   let windowNode = engine.findNode(by: currentId) as? NiriWindow,
                   let column = engine.findColumn(containing: windowNode, in: wsId)
-            else { return }
+            else { return nil }
 
             engine.toggleFullWidth(
                 column,
@@ -1258,30 +1398,37 @@ private func fixedViewportRemovalOldFrames(
                 workingFrame: workingFrame,
                 gaps: gaps
             )
-            controller.layoutRefreshController.requestImmediateRelayout(
-                reason: .layoutCommand,
-                affectedWorkspaceIds: [wsId]
-            )
-            startScrollAnimationIfNeeded(for: wsId, state: state, engine: engine)
-        }
+            return (engine, wsId, state)
+        } ?? nil
+
+        guard let (engine, wsId, state) = result else { return }
+        controller.layoutRefreshController.requestImmediateRelayout(
+            reason: .layoutCommand,
+            affectedWorkspaceIds: [wsId]
+        )
+        startScrollAnimationIfNeeded(for: wsId, state: state, engine: engine)
     }
 
-    func balanceSizes() {
+    func balanceSizes(source: WMEventSource = .command) {
         guard let controller else { return }
-        withNiriWorkspaceContext { engine, wsId, motion, _, _, workingFrame, gaps in
+        let result = withNiriWorkspaceContext(source: source) {
+            engine, wsId, motion, _, _, workingFrame, gaps -> (NiriLayoutEngine, WorkspaceDescriptor.ID, Bool) in
             engine.balanceSizes(
                 in: wsId,
                 motion: motion,
                 workingAreaWidth: workingFrame.width,
                 gaps: gaps
             )
-            controller.layoutRefreshController.requestImmediateRelayout(
-                reason: .layoutCommand,
-                affectedWorkspaceIds: [wsId]
-            )
-            if engine.hasAnyColumnAnimationsRunning(in: wsId) {
-                controller.layoutRefreshController.startScrollAnimation(for: wsId)
-            }
+            return (engine, wsId, engine.hasAnyColumnAnimationsRunning(in: wsId))
+        }
+
+        guard let (_, wsId, shouldStartAnimation) = result else { return }
+        controller.layoutRefreshController.requestImmediateRelayout(
+            reason: .layoutCommand,
+            affectedWorkspaceIds: [wsId]
+        )
+        if shouldStartAnimation {
+            controller.layoutRefreshController.startScrollAnimation(for: wsId)
         }
     }
 
@@ -1308,13 +1455,16 @@ private func fixedViewportRemovalOldFrames(
     func syncMonitorsToNiriEngine() {
         guard let controller, let engine = controller.niriEngine else { return }
 
-        let currentMonitors = controller.workspaceManager.monitors
+        let projectionContext = LayoutProjectionContext.project(controller: controller)
+        let currentMonitors = projectionContext.topology.order.compactMap {
+            projectionContext.topology.node($0)?.monitor
+        }
         engine.updateMonitors(currentMonitors)
 
         let workspaceAssignments: [(workspaceId: WorkspaceDescriptor.ID, monitor: Monitor)] =
-            controller.workspaceManager.workspaces.compactMap { workspace in
-                guard let monitor = controller.workspaceManager.monitor(for: workspace.id) else { return nil }
-                return (workspaceId: workspace.id, monitor: monitor)
+            projectionContext.graph.workspaceOrder.compactMap { workspaceId in
+                guard let monitor = projectionContext.monitor(for: workspaceId) else { return nil }
+                return (workspaceId: workspaceId, monitor: monitor)
         }
         engine.syncWorkspaceAssignments(workspaceAssignments)
 
@@ -1324,8 +1474,19 @@ private func fixedViewportRemovalOldFrames(
     func refreshResolvedMonitorSettings() {
         guard let controller, let engine = controller.niriEngine else { return }
 
-        for monitor in controller.workspaceManager.monitors {
-            let resolved = controller.settings.resolvedNiriSettings(for: monitor)
+        let topology = LayoutProjectionContext.project(controller: controller).topology
+        let global = engine.globalResolvedSettings()
+        for monitorId in topology.order {
+            guard let monitor = topology.node(monitorId)?.monitor else { continue }
+            let override = controller.settings.niriSettings(for: monitor)
+            let resolved = ResolvedNiriSettings(
+                maxVisibleColumns: override?.maxVisibleColumns ?? global.maxVisibleColumns,
+                maxWindowsPerColumn: override?.maxWindowsPerColumn ?? global.maxWindowsPerColumn,
+                centerFocusedColumn: override?.centerFocusedColumn ?? global.centerFocusedColumn,
+                alwaysCenterSingleColumn: override?.alwaysCenterSingleColumn ?? global.alwaysCenterSingleColumn,
+                singleWindowAspectRatio: override?.singleWindowAspectRatio ?? global.singleWindowAspectRatio,
+                infiniteLoop: override?.infiniteLoop ?? global.infiniteLoop
+            )
             engine.updateMonitorSettings(resolved, for: monitor.id)
         }
     }
@@ -1361,6 +1522,7 @@ private func fixedViewportRemovalOldFrames(
         _ node: NiriNode,
         in workspaceId: WorkspaceDescriptor.ID,
         state: inout ViewportState,
+        source: WMEventSource = .command,
         options: NodeActivationOptions = NodeActivationOptions()
     ) {
         guard let controller, let engine = controller.niriEngine else { return }
@@ -1371,7 +1533,9 @@ private func fixedViewportRemovalOldFrames(
             engine.activateWindow(node.id)
         }
 
-        if options.ensureVisible, let monitor = controller.workspaceManager.monitor(for: workspaceId) {
+        if options.ensureVisible,
+           let monitor = LayoutProjectionContext.project(controller: controller).monitor(for: workspaceId)
+        {
             syncAnimationRefreshRate(for: monitor, engine: engine, state: &state)
             let gap = CGFloat(controller.workspaceManager.gaps)
             let workingFrame = controller.insetWorkingFrame(for: monitor)
@@ -1386,11 +1550,15 @@ private func fixedViewportRemovalOldFrames(
         }
 
         let focusedToken = (node as? NiriWindow)?.token
-        _ = controller.workspaceManager.commitWorkspaceSelection(
+        guard let runtime = controller.runtime else {
+            preconditionFailure("NiriLayoutHandler.activateNode requires WMRuntime to be attached")
+        }
+        _ = runtime.commitWorkspaceSelection(
             nodeId: node.id,
             focusedToken: focusedToken,
             in: workspaceId,
-            onMonitor: controller.workspaceManager.monitorId(for: workspaceId)
+            onMonitor: controller.workspaceManager.monitorId(for: workspaceId),
+            source: source
         )
 
         if let windowNode = node as? NiriWindow {
@@ -1409,10 +1577,11 @@ private func fixedViewportRemovalOldFrames(
             let focusToken = options.axFocus ? (node as? NiriWindow)?.token : nil
             let materialStateWindowId = (node as? NiriWindow)?.token.windowId
             if let focusToken {
-                _ = controller.workspaceManager.beginManagedFocusRequest(
+                _ = runtime.beginManagedFocusRequest(
                     focusToken,
                     in: workspaceId,
-                    onMonitor: controller.workspaceManager.monitorId(for: workspaceId)
+                    onMonitor: controller.workspaceManager.monitorId(for: workspaceId),
+                    source: source
                 )
             }
             controller.layoutRefreshController.requestImmediateRelayout(
@@ -1426,7 +1595,7 @@ private func fixedViewportRemovalOldFrames(
                     )
                 }
                 if let focusToken {
-                    controller?.focusWindow(focusToken)
+                    controller?.focusWindow(focusToken, source: source)
                 }
             }
             if options.startAnimation, state.viewOffsetPixels.isAnimating {
@@ -1434,7 +1603,7 @@ private func fixedViewportRemovalOldFrames(
             }
         } else {
             if options.axFocus, let windowNode = node as? NiriWindow {
-                controller.focusWindow(windowNode.token)
+                controller.focusWindow(windowNode.token, source: source)
             }
             if options.startAnimation, state.viewOffsetPixels.isAnimating {
                 controller.layoutRefreshController.startScrollAnimation(for: workspaceId)
@@ -1443,21 +1612,30 @@ private func fixedViewportRemovalOldFrames(
     }
 
     func withNiriOperationContext(
-        perform operation: (NiriOperationContext, inout ViewportState) -> Bool
+        source: WMEventSource = .command,
+        perform operation: (NiriOperationContext, inout ViewportState) -> NiriOperationPostCommit?
     ) {
         guard let controller else { return }
-        var animatingWorkspaceId: WorkspaceDescriptor.ID?
 
         guard let engine = controller.niriEngine else { return }
-        guard let wsId = controller.activeWorkspace()?.id else { return }
+        let projectionContext = LayoutProjectionContext.project(controller: controller)
+        guard let wsId = projectionContext.activeWorkspaceIdForInteraction
+        else { return }
 
-        controller.workspaceManager.withNiriViewportState(for: wsId) { state in
+        let runtime = requiredRuntime("NiriLayoutHandler.withNiriOperationContext")
+        let postCommit: (
+            context: NiriOperationContext,
+            action: NiriOperationPostCommit,
+            state: ViewportState
+        )? = runtime.withNiriViewportState(for: wsId, source: source) { state in
             guard let currentId = state.selectedNodeId,
                   let currentNode = engine.findNode(by: currentId),
                   let windowNode = currentNode as? NiriWindow
-            else { return }
+            else { return nil }
 
-            guard let monitor = controller.workspaceManager.monitor(for: wsId) else { return }
+            guard let monitor = projectionContext.monitor(for: wsId) else {
+                return nil
+            }
             syncAnimationRefreshRate(for: monitor, engine: engine, state: &state)
             let workingFrame = controller.insetWorkingFrame(for: monitor)
             let gaps = CGFloat(controller.workspaceManager.gaps)
@@ -1473,45 +1651,57 @@ private func fixedViewportRemovalOldFrames(
                 gaps: gaps
             )
 
-            if operation(ctx, &state) {
-                animatingWorkspaceId = wsId
+            guard let postCommit = operation(ctx, &state) else {
+                return nil
             }
+            return (context: ctx, action: postCommit, state: state)
         }
 
-        if let wsId = animatingWorkspaceId {
-            controller.layoutRefreshController.startScrollAnimation(for: wsId)
+        if let postCommit,
+           postCommit.action.apply(context: postCommit.context, state: postCommit.state)
+        {
+            controller.layoutRefreshController.startScrollAnimation(for: postCommit.context.wsId)
         }
     }
 
-    func withNiriWorkspaceContext(
-        perform: (NiriLayoutEngine, WorkspaceDescriptor.ID, MotionSnapshot, inout ViewportState, Monitor, CGRect, CGFloat) -> Void
-    ) {
-        guard let controller else { return }
-        guard let engine = controller.niriEngine else { return }
-        guard let wsId = controller.activeWorkspace()?.id else { return }
-        guard let monitor = controller.workspaceManager.monitor(for: wsId) else { return }
+    @discardableResult
+    func withNiriWorkspaceContext<Result>(
+        source: WMEventSource = .command,
+        perform: (NiriLayoutEngine, WorkspaceDescriptor.ID, MotionSnapshot, inout ViewportState, Monitor, CGRect, CGFloat) -> Result
+    ) -> Result? {
+        guard let controller else { return nil }
+        guard let engine = controller.niriEngine else { return nil }
+        let projectionContext = LayoutProjectionContext.project(controller: controller)
+        guard let wsId = projectionContext.activeWorkspaceIdForInteraction
+        else { return nil }
+        guard let monitor = projectionContext.monitor(for: wsId) else { return nil }
         let motion = controller.motionPolicy.snapshot()
         let workingFrame = controller.insetWorkingFrame(for: monitor)
         let gaps = CGFloat(controller.workspaceManager.gaps)
-        controller.workspaceManager.withNiriViewportState(for: wsId) { state in
+        let runtime = requiredRuntime("NiriLayoutHandler.withNiriWorkspaceContext")
+        return runtime.withNiriViewportState(for: wsId, source: source) { state in
             syncAnimationRefreshRate(for: monitor, engine: engine, state: &state)
-            perform(engine, wsId, motion, &state, monitor, workingFrame, gaps)
+            return perform(engine, wsId, motion, &state, monitor, workingFrame, gaps)
         }
     }
 
-    func withNiriWorkspaceContext(
+    @discardableResult
+    func withNiriWorkspaceContext<Result>(
         for workspaceId: WorkspaceDescriptor.ID,
-        perform: (NiriLayoutEngine, WorkspaceDescriptor.ID, MotionSnapshot, inout ViewportState, Monitor, CGRect, CGFloat) -> Void
-    ) {
-        guard let controller else { return }
-        guard let engine = controller.niriEngine else { return }
-        guard let monitor = controller.workspaceManager.monitor(for: workspaceId) else { return }
+        source: WMEventSource = .command,
+        perform: (NiriLayoutEngine, WorkspaceDescriptor.ID, MotionSnapshot, inout ViewportState, Monitor, CGRect, CGFloat) -> Result
+    ) -> Result? {
+        guard let controller else { return nil }
+        guard let engine = controller.niriEngine else { return nil }
+        guard let monitor = LayoutProjectionContext.project(controller: controller).monitor(for: workspaceId)
+        else { return nil }
         let motion = controller.motionPolicy.snapshot()
         let workingFrame = controller.insetWorkingFrame(for: monitor)
         let gaps = CGFloat(controller.workspaceManager.gaps)
-        controller.workspaceManager.withNiriViewportState(for: workspaceId) { state in
+        let runtime = requiredRuntime("NiriLayoutHandler.withNiriWorkspaceContextForWorkspace")
+        return runtime.withNiriViewportState(for: workspaceId, source: source) { state in
             syncAnimationRefreshRate(for: monitor, engine: engine, state: &state)
-            perform(engine, workspaceId, motion, &state, monitor, workingFrame, gaps)
+            return perform(engine, workspaceId, motion, &state, monitor, workingFrame, gaps)
         }
     }
 
@@ -1664,30 +1854,30 @@ private extension NiriLayoutHandler {
         window.stopMoveAnimations()
     }
 
-    /// Native fullscreen exits often leave the restoring window in a fresh single-window
-    /// column because the macOS space transition removes it from the Niri tree and topology
-    /// sync re-adds it as a new column. If the captured `niriState` says the window shared a
-    /// column with one or more siblings, re-attach it to the column that currently hosts those
-    /// siblings so alt-left/right and visibility match the pre-fullscreen state.
     private func reconcileNativeFullscreenColumn(
         restoringWindow window: NiriWindow,
         niriState: ManagedWindowRestoreSnapshot.NiriState,
         in engine: NiriLayoutEngine,
         workspaceId: WorkspaceDescriptor.ID
     ) {
-        let storedMembers = niriState.columnWindowTokens
-        guard storedMembers.count > 1 else { return }
+        guard let controller else { return }
+        let registry = controller.workspaceManager.logicalWindowRegistry
+        let restoringLogicalId = registry.resolveForRead(token: window.token)
+        let storedLogicalMembers = niriState.columnWindowMembers
+        guard storedLogicalMembers.count > 1 else { return }
         guard let currentColumn = engine.column(of: window) else { return }
-        let token = window.token
         guard let currentRoot = currentColumn.findRoot(),
               currentRoot.workspaceId == workspaceId
         else { return }
 
-        let siblingTokens = storedMembers.filter { $0 != token }
+        let siblingLogicalIds = storedLogicalMembers.filter { $0 != restoringLogicalId }
         var sameWorkspaceColumns: [ObjectIdentifier: NiriContainer] = [:]
         var hasForeignSibling = false
-        for siblingToken in siblingTokens {
-            guard let siblingNode = engine.findNode(for: siblingToken),
+        for siblingLogicalId in siblingLogicalIds {
+            guard let record = registry.record(for: siblingLogicalId),
+                  record.primaryPhase != .retired,
+                  let siblingToken = record.currentToken,
+                  let siblingNode = engine.findNode(for: siblingToken),
                   let siblingColumn = engine.column(of: siblingNode)
             else {
                 continue
@@ -1711,7 +1901,7 @@ private extension NiriLayoutHandler {
         }
 
         let storedIndex = niriState.tileIndex
-            ?? storedMembers.firstIndex(of: token)
+            ?? restoringLogicalId.flatMap { storedLogicalMembers.firstIndex(of: $0) }
             ?? targetColumn.children.count
         let insertIndex = max(0, min(storedIndex, targetColumn.children.count))
 
@@ -1750,6 +1940,80 @@ struct NodeActivationOptions {
     var startAnimation: Bool = true
 }
 
+@MainActor struct NiriOperationPostCommit {
+    enum Kind {
+        case simple
+        case predictedAnimation(oldFrames: [WindowToken: CGRect])
+        case capturedAnimation(oldFrames: [WindowToken: CGRect])
+    }
+
+    let kind: Kind
+
+    func apply(context: NiriOperationContext, state: ViewportState) -> Bool {
+        switch kind {
+        case .simple:
+            context.controller.layoutRefreshController.requestImmediateRelayout(
+                reason: .layoutCommand,
+                affectedWorkspaceIds: [context.wsId]
+            )
+        case let .predictedAnimation(oldFrames):
+            let scale = context.controller.layoutRefreshController.backingScale(for: context.monitor)
+            let workingArea = WorkingAreaContext(
+                workingFrame: context.workingFrame,
+                viewFrame: context.monitor.frame,
+                scale: scale
+            )
+            let layoutGaps = LayoutGaps(
+                horizontal: context.gaps,
+                vertical: context.gaps,
+                outer: context.controller.workspaceManager.outerGaps
+            )
+            let animationTime = (context.engine.animationClock?.now() ?? CACurrentMediaTime()) + 2.0
+            let topology = LayoutProjectionContext.project(controller: context.controller).topology
+            let hiddenPlacementMonitors = topology.order.compactMap { monitorId in
+                topology.node(monitorId).map(HiddenPlacementMonitorContext.init)
+            }
+            let newFrames = context.engine.calculateCombinedLayoutUsingPools(
+                in: context.wsId,
+                monitor: context.monitor,
+                gaps: layoutGaps,
+                state: state,
+                workingArea: workingArea,
+                animationTime: animationTime,
+                hiddenPlacementMonitors: hiddenPlacementMonitors
+            ).frames
+            _ = context.engine.triggerMoveAnimations(
+                in: context.wsId,
+                oldFrames: oldFrames,
+                newFrames: newFrames,
+                motion: context.motion
+            )
+            context.controller.layoutRefreshController.requestImmediateRelayout(
+                reason: .layoutCommand,
+                affectedWorkspaceIds: [context.wsId]
+            )
+        case let .capturedAnimation(oldFrames):
+            context.controller.layoutRefreshController.requestImmediateRelayout(
+                reason: .layoutCommand,
+                affectedWorkspaceIds: [context.wsId]
+            )
+            let newFrames = context.engine.captureWindowFrames(in: context.wsId)
+            _ = context.engine.triggerMoveAnimations(
+                in: context.wsId,
+                oldFrames: oldFrames,
+                newFrames: newFrames,
+                motion: context.motion
+            )
+        }
+
+        return hasPendingNiriAnimationWork(
+            state: state,
+            engine: context.engine,
+            workspaceId: context.wsId
+        )
+    }
+}
+
 @MainActor struct NiriOperationContext {
     let controller: WMController
     let engine: NiriLayoutEngine
@@ -1760,73 +2024,20 @@ struct NodeActivationOptions {
     let workingFrame: CGRect
     let gaps: CGFloat
 
-    private func hasPendingAnimationWork(state: ViewportState) -> Bool {
-        hasPendingNiriAnimationWork(state: state, engine: engine, workspaceId: wsId)
-    }
-
     func commitWithPredictedAnimation(
-        state: ViewportState,
         oldFrames: [WindowToken: CGRect]
-    ) -> Bool {
-        let scale = controller.layoutRefreshController.backingScale(for: monitor)
-        let workingArea = WorkingAreaContext(
-            workingFrame: workingFrame,
-            viewFrame: monitor.frame,
-            scale: scale
-        )
-        let layoutGaps = LayoutGaps(
-            horizontal: gaps,
-            vertical: gaps,
-            outer: controller.workspaceManager.outerGaps
-        )
-        let animationTime = (engine.animationClock?.now() ?? CACurrentMediaTime()) + 2.0
-        let newFrames = engine.calculateCombinedLayoutUsingPools(
-            in: wsId,
-            monitor: monitor,
-            gaps: layoutGaps,
-            state: state,
-            workingArea: workingArea,
-            animationTime: animationTime,
-            hiddenPlacementMonitors: Monitor.sortedByPosition(controller.workspaceManager.monitors)
-                .map(HiddenPlacementMonitorContext.init)
-        ).frames
-        _ = engine.triggerMoveAnimations(
-            in: wsId,
-            oldFrames: oldFrames,
-            newFrames: newFrames,
-            motion: motion
-        )
-        controller.layoutRefreshController.requestImmediateRelayout(
-            reason: .layoutCommand,
-            affectedWorkspaceIds: [wsId]
-        )
-        return hasPendingAnimationWork(state: state)
+    ) -> NiriOperationPostCommit {
+        NiriOperationPostCommit(kind: .predictedAnimation(oldFrames: oldFrames))
     }
 
     func commitWithCapturedAnimation(
-        state: ViewportState,
         oldFrames: [WindowToken: CGRect]
-    ) -> Bool {
-        controller.layoutRefreshController.requestImmediateRelayout(
-            reason: .layoutCommand,
-            affectedWorkspaceIds: [wsId]
-        )
-        let newFrames = engine.captureWindowFrames(in: wsId)
-        _ = engine.triggerMoveAnimations(
-            in: wsId,
-            oldFrames: oldFrames,
-            newFrames: newFrames,
-            motion: motion
-        )
-        return hasPendingAnimationWork(state: state)
+    ) -> NiriOperationPostCommit {
+        NiriOperationPostCommit(kind: .capturedAnimation(oldFrames: oldFrames))
     }
 
-    func commitSimple(state: ViewportState) -> Bool {
-        controller.layoutRefreshController.requestImmediateRelayout(
-            reason: .layoutCommand,
-            affectedWorkspaceIds: [wsId]
-        )
-        return hasPendingAnimationWork(state: state)
+    func commitSimple() -> NiriOperationPostCommit {
+        NiriOperationPostCommit(kind: .simple)
     }
 }
 

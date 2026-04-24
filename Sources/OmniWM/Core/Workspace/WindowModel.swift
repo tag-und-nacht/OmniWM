@@ -109,17 +109,10 @@ struct ManagedWindowRestoreSnapshot: Equatable {
         let nodeId: NodeId?
         let columnIndex: Int?
         let tileIndex: Int?
-        let columnWindowTokens: [WindowToken]
+        let columnWindowMembers: [LogicalWindowId]
         let columnSizing: ColumnSizing
         let windowSizing: WindowSizing
 
-        // Niri's layout kernel re-derives cached widths and tile weights on
-        // every animation tick (CADisplayLink driven), producing sub-pixel
-        // and ~1e-4 drift that structural `==` reports as "changed". We use
-        // this tolerance for gating cache-writes / snapshot persistence so
-        // animation noise does not churn the managed-restore cache, while
-        // deliberate user resizes (which move weights by much more) still
-        // register.
         static let defaultSemanticWeightTolerance: CGFloat = 1e-3
 
         static func isSemanticallyEquivalent(
@@ -150,7 +143,7 @@ struct ManagedWindowRestoreSnapshot: Equatable {
             guard nodeId == other.nodeId,
                   columnIndex == other.columnIndex,
                   tileIndex == other.tileIndex,
-                  columnWindowTokens == other.columnWindowTokens
+                  columnWindowMembers == other.columnWindowMembers
             else {
                 return false
             }
@@ -166,7 +159,6 @@ struct ManagedWindowRestoreSnapshot: Equatable {
         }
     }
 
-    let token: WindowToken
     let workspaceId: WorkspaceDescriptor.ID
     let frame: CGRect
     let topologyProfile: TopologyProfile
@@ -200,27 +192,14 @@ struct ManagedWindowRestoreSnapshot: Equatable {
         )
     }
 
-    func rekeyed(
-        to newToken: WindowToken,
-        replacementMetadata: ManagedReplacementMetadata?
+    func withReplacementMetadata(
+        _ replacementMetadata: ManagedReplacementMetadata?
     ) -> ManagedWindowRestoreSnapshot {
         ManagedWindowRestoreSnapshot(
-            token: newToken,
             workspaceId: workspaceId,
             frame: frame,
             topologyProfile: topologyProfile,
-            niriState: niriState.map { niriState in
-                ManagedWindowRestoreSnapshot.NiriState(
-                    nodeId: niriState.nodeId,
-                    columnIndex: niriState.columnIndex,
-                    tileIndex: niriState.tileIndex,
-                    columnWindowTokens: niriState.columnWindowTokens.map {
-                        $0 == token ? newToken : $0
-                    },
-                    columnSizing: niriState.columnSizing,
-                    windowSizing: niriState.windowSizing
-                )
-            },
+            niriState: niriState,
             replacementMetadata: replacementMetadata ?? self.replacementMetadata
         )
     }
@@ -362,11 +341,6 @@ private func optionalWeightedSizesSemanticallyEquivalent(
 final class WindowModel {
     typealias WindowKey = WindowToken
 
-    private struct WorkspaceModeKey: Hashable {
-        let workspaceId: WorkspaceDescriptor.ID
-        let mode: TrackedWindowMode
-    }
-
     enum HiddenReason: Equatable {
         case workspaceInactive
         case layoutTransient(HideSide)
@@ -466,7 +440,6 @@ final class WindowModel {
         var restoreIntent: RestoreIntent?
         var replacementCorrelation: ReplacementCorrelation?
         var managedReplacementMetadata: ManagedReplacementMetadata?
-        var managedRestoreSnapshot: ManagedWindowRestoreSnapshot?
         var floatingState: FloatingState?
         var manualLayoutOverride: ManualWindowOverride?
         var ruleEffects: ManagedWindowRuleEffects = .none
@@ -477,8 +450,11 @@ final class WindowModel {
         var layoutReason: LayoutReason = .standard
         var parentKind: ParentKind = .tilingContainer
         var prevParentKind: ParentKind?
-        var cachedConstraints: WindowSizeConstraints?
-        var constraintsCacheTime: Date?
+        // Per-window AX size-constraint cache moved out of `Entry` into
+        // `WindowConstraintCache` (ExecPlan 01, slice WGT-SS-06) so the TTL
+        // logic lives behind a focused type. WindowModel holds the cache as
+        // a peer; entry mutations that should invalidate the cache call
+        // `constraintCache.invalidate(for: entry.token)` explicitly.
 
         var token: WindowToken { handle.id }
         var pid: pid_t { token.pid }
@@ -495,7 +471,6 @@ final class WindowModel {
             restoreIntent: RestoreIntent? = nil,
             replacementCorrelation: ReplacementCorrelation? = nil,
             managedReplacementMetadata: ManagedReplacementMetadata?,
-            managedRestoreSnapshot: ManagedWindowRestoreSnapshot? = nil,
             floatingState: FloatingState?,
             manualLayoutOverride: ManualWindowOverride?,
             ruleEffects: ManagedWindowRuleEffects,
@@ -518,7 +493,6 @@ final class WindowModel {
             self.restoreIntent = restoreIntent
             self.replacementCorrelation = replacementCorrelation
             self.managedReplacementMetadata = managedReplacementMetadata
-            self.managedRestoreSnapshot = managedRestoreSnapshot
             self.floatingState = floatingState
             self.manualLayoutOverride = manualLayoutOverride
             self.ruleEffects = ruleEffects
@@ -528,13 +502,10 @@ final class WindowModel {
 
     private(set) var entries: [WindowToken: Entry] = [:]
     private var entryByWindowId: [Int: Entry] = [:]
-    private var tokensByWorkspace: [WorkspaceDescriptor.ID: [WindowToken]] = [:]
-    private var tokenIndexByWorkspace: [WorkspaceDescriptor.ID: [WindowToken: Int]] = [:]
-    private var tokensByWorkspaceMode: [WorkspaceModeKey: [WindowToken]] = [:]
-    private var tokenIndexByWorkspaceMode: [WorkspaceModeKey: [WindowToken: Int]] = [:]
     private var tokensByPid: [pid_t: [WindowToken]] = [:]
     private var tokenIndexByPid: [pid_t: [WindowToken: Int]] = [:]
     private var missingDetectionCountByToken: [WindowToken: Int] = [:]
+    private var constraintCache = WindowConstraintCache()
 
     private func appendToken<Key: Hashable>(
         _ token: WindowToken,
@@ -602,13 +573,6 @@ final class WindowModel {
     private func appendIndexes(for entry: Entry) {
         let token = entry.token
         entryByWindowId[entry.windowId] = entry
-        appendToken(token, to: entry.workspaceId, tokensByKey: &tokensByWorkspace, tokenIndexByKey: &tokenIndexByWorkspace)
-        appendToken(
-            token,
-            to: WorkspaceModeKey(workspaceId: entry.workspaceId, mode: entry.mode),
-            tokensByKey: &tokensByWorkspaceMode,
-            tokenIndexByKey: &tokenIndexByWorkspaceMode
-        )
         appendToken(token, to: entry.pid, tokensByKey: &tokensByPid, tokenIndexByKey: &tokenIndexByPid)
     }
 
@@ -617,34 +581,12 @@ final class WindowModel {
         let windowId = windowId ?? entry.windowId
 
         entryByWindowId.removeValue(forKey: windowId)
-        removeToken(token, from: entry.workspaceId, tokensByKey: &tokensByWorkspace, tokenIndexByKey: &tokenIndexByWorkspace)
-        removeToken(
-            token,
-            from: WorkspaceModeKey(workspaceId: entry.workspaceId, mode: entry.mode),
-            tokensByKey: &tokensByWorkspaceMode,
-            tokenIndexByKey: &tokenIndexByWorkspaceMode
-        )
         removeToken(token, from: token.pid, tokensByKey: &tokensByPid, tokenIndexByKey: &tokenIndexByPid)
     }
 
     private func rekeyIndexes(for entry: Entry, from oldToken: WindowToken, to newToken: WindowToken) {
         entryByWindowId.removeValue(forKey: oldToken.windowId)
         entryByWindowId[newToken.windowId] = entry
-
-        replaceToken(
-            from: oldToken,
-            to: newToken,
-            in: entry.workspaceId,
-            tokensByKey: &tokensByWorkspace,
-            tokenIndexByKey: &tokenIndexByWorkspace
-        )
-        replaceToken(
-            from: oldToken,
-            to: newToken,
-            in: WorkspaceModeKey(workspaceId: entry.workspaceId, mode: entry.mode),
-            tokensByKey: &tokensByWorkspaceMode,
-            tokenIndexByKey: &tokenIndexByWorkspaceMode
-        )
 
         if oldToken.pid == newToken.pid {
             replaceToken(
@@ -680,8 +622,7 @@ final class WindowModel {
             }
             if entry.ruleEffects != ruleEffects {
                 entry.ruleEffects = ruleEffects
-                entry.cachedConstraints = nil
-                entry.constraintsCacheTime = nil
+                constraintCache.invalidate(for: entry.token)
             }
             missingDetectionCountByToken.removeValue(forKey: token)
             return token
@@ -715,14 +656,11 @@ final class WindowModel {
         if oldToken == newToken {
             guard let entry = entries[oldToken] else { return nil }
             entry.axRef = newAXRef
-            entry.cachedConstraints = nil
-            entry.constraintsCacheTime = nil
+            // AX ref change can invalidate cached constraints (the new ref
+            // may report different size limits even at the same token).
+            constraintCache.invalidate(for: oldToken)
             if let managedReplacementMetadata {
                 entry.managedReplacementMetadata = managedReplacementMetadata
-                entry.managedRestoreSnapshot = entry.managedRestoreSnapshot?.rekeyed(
-                    to: newToken,
-                    replacementMetadata: managedReplacementMetadata
-                )
             }
             return entry
         }
@@ -735,15 +673,12 @@ final class WindowModel {
 
         entry.handle.id = newToken
         entry.axRef = newAXRef
-        entry.cachedConstraints = nil
-        entry.constraintsCacheTime = nil
+        // Token rebind: drop the cached constraints under the old token.
+        // Don't carry them across the rebind because the AX ref also changed.
+        constraintCache.invalidate(for: oldToken)
         if let managedReplacementMetadata {
             entry.managedReplacementMetadata = managedReplacementMetadata
         }
-        entry.managedRestoreSnapshot = entry.managedRestoreSnapshot?.rekeyed(
-            to: newToken,
-            replacementMetadata: managedReplacementMetadata
-        )
         entries[newToken] = entry
         rekeyIndexes(for: entry, from: oldToken, to: newToken)
 
@@ -760,38 +695,7 @@ final class WindowModel {
 
     func updateWorkspace(for token: WindowToken, workspace: WorkspaceDescriptor.ID) {
         guard let entry = entries[token] else { return }
-        let oldWorkspace = entry.workspaceId
-        if oldWorkspace != workspace {
-            removeToken(token, from: oldWorkspace, tokensByKey: &tokensByWorkspace, tokenIndexByKey: &tokenIndexByWorkspace)
-            removeToken(
-                token,
-                from: WorkspaceModeKey(workspaceId: oldWorkspace, mode: entry.mode),
-                tokensByKey: &tokensByWorkspaceMode,
-                tokenIndexByKey: &tokenIndexByWorkspaceMode
-            )
-            appendToken(token, to: workspace, tokensByKey: &tokensByWorkspace, tokenIndexByKey: &tokenIndexByWorkspace)
-            appendToken(
-                token,
-                to: WorkspaceModeKey(workspaceId: workspace, mode: entry.mode),
-                tokensByKey: &tokensByWorkspaceMode,
-                tokenIndexByKey: &tokenIndexByWorkspaceMode
-            )
-        }
         entry.workspaceId = workspace
-    }
-
-    func windows(in workspace: WorkspaceDescriptor.ID) -> [Entry] {
-        guard let tokens = tokensByWorkspace[workspace] else { return [] }
-        return tokens.compactMap { entries[$0] }
-    }
-
-    func windows(
-        in workspace: WorkspaceDescriptor.ID,
-        mode: TrackedWindowMode
-    ) -> [Entry] {
-        let key = WorkspaceModeKey(workspaceId: workspace, mode: mode)
-        guard let tokens = tokensByWorkspaceMode[key] else { return [] }
-        return tokens.compactMap { entries[$0] }
     }
 
     func workspace(for token: WindowToken) -> WorkspaceDescriptor.ID? {
@@ -829,33 +733,13 @@ final class WindowModel {
         Array(entries.values)
     }
 
-    func allEntries(mode: TrackedWindowMode) -> [Entry] {
-        tokensByWorkspaceMode
-            .filter { $0.key.mode == mode }
-            .values
-            .flatMap { $0.compactMap { entries[$0] } }
-    }
-
     func mode(for token: WindowToken) -> TrackedWindowMode? {
         entries[token]?.mode
     }
 
     func setMode(_ mode: TrackedWindowMode, for token: WindowToken) {
         guard let entry = entries[token], entry.mode != mode else { return }
-        let oldMode = entry.mode
-        removeToken(
-            token,
-            from: WorkspaceModeKey(workspaceId: entry.workspaceId, mode: oldMode),
-            tokensByKey: &tokensByWorkspaceMode,
-            tokenIndexByKey: &tokenIndexByWorkspaceMode
-        )
         entry.mode = mode
-        appendToken(
-            token,
-            to: WorkspaceModeKey(workspaceId: entry.workspaceId, mode: mode),
-            tokensByKey: &tokensByWorkspaceMode,
-            tokenIndexByKey: &tokenIndexByWorkspaceMode
-        )
     }
 
     func floatingState(for token: WindowToken) -> FloatingState? {
@@ -887,7 +771,10 @@ final class WindowModel {
     }
 
     func setObservedState(_ state: ObservedWindowState, for token: WindowToken) {
-        entries[token]?.observedState = state
+        guard let entry = entries[token] else { return }
+        var next = state
+        next.frame = entry.observedState.frame
+        entry.observedState = next
     }
 
     func desiredState(for token: WindowToken) -> DesiredWindowState? {
@@ -895,7 +782,10 @@ final class WindowModel {
     }
 
     func setDesiredState(_ state: DesiredWindowState, for token: WindowToken) {
-        entries[token]?.desiredState = state
+        guard let entry = entries[token] else { return }
+        var next = state
+        next.floatingFrame = entry.desiredState.floatingFrame
+        entry.desiredState = next
     }
 
     func restoreIntent(for token: WindowToken) -> RestoreIntent? {
@@ -922,13 +812,6 @@ final class WindowModel {
         entries[token]?.managedReplacementMetadata = metadata
     }
 
-    func managedRestoreSnapshot(for token: WindowToken) -> ManagedWindowRestoreSnapshot? {
-        entries[token]?.managedRestoreSnapshot
-    }
-
-    func setManagedRestoreSnapshot(_ snapshot: ManagedWindowRestoreSnapshot?, for token: WindowToken) {
-        entries[token]?.managedRestoreSnapshot = snapshot
-    }
 
     func setHiddenState(_ state: HiddenState?, for token: WindowToken) {
         guard let entry = entries[token] else { return }
@@ -985,21 +868,37 @@ final class WindowModel {
         return prevKind
     }
 
-    func confirmedMissingKeys(keys activeKeys: Set<WindowKey>, requiredConsecutiveMisses: Int = 1) -> [WindowKey] {
+    struct MissingKeyDelta {
+        var confirmed: [WindowKey]
+        var delayed: [WindowKey]
+        var cleared: [WindowKey]
+    }
+
+    func confirmedMissingKeysWithDelta(
+        keys activeKeys: Set<WindowKey>,
+        requiredConsecutiveMisses: Int = 1
+    ) -> MissingKeyDelta {
         let threshold = max(1, requiredConsecutiveMisses)
         let knownTokens = Array(entries.keys)
 
+        var cleared: [WindowKey] = []
         for token in knownTokens where activeKeys.contains(token) {
-            missingDetectionCountByToken.removeValue(forKey: token)
+            if missingDetectionCountByToken.removeValue(forKey: token) != nil {
+                cleared.append(token)
+            }
         }
 
         let missingTokens = knownTokens.filter { !activeKeys.contains($0) }
-        var confirmedMissing: [WindowToken] = []
+        var confirmedMissing: [WindowKey] = []
+        var delayed: [WindowKey] = []
         confirmedMissing.reserveCapacity(missingTokens.count)
+        delayed.reserveCapacity(missingTokens.count)
 
         for token in missingTokens {
             if entries[token]?.layoutReason == .nativeFullscreen {
-                missingDetectionCountByToken.removeValue(forKey: token)
+                if missingDetectionCountByToken.removeValue(forKey: token) != nil {
+                    cleared.append(token)
+                }
                 continue
             }
             let misses = (missingDetectionCountByToken[token] ?? 0) + 1
@@ -1008,6 +907,7 @@ final class WindowModel {
                 missingDetectionCountByToken.removeValue(forKey: token)
             } else {
                 missingDetectionCountByToken[token] = misses
+                delayed.append(token)
             }
         }
 
@@ -1015,7 +915,18 @@ final class WindowModel {
             missingDetectionCountByToken = missingDetectionCountByToken.filter { entries[$0.key] != nil }
         }
 
-        return confirmedMissing
+        return MissingKeyDelta(
+            confirmed: confirmedMissing,
+            delayed: delayed,
+            cleared: cleared
+        )
+    }
+
+    func confirmedMissingKeys(keys activeKeys: Set<WindowKey>, requiredConsecutiveMisses: Int = 1) -> [WindowKey] {
+        confirmedMissingKeysWithDelta(
+            keys: activeKeys,
+            requiredConsecutiveMisses: requiredConsecutiveMisses
+        ).confirmed
     }
 
     @discardableResult
@@ -1024,23 +935,17 @@ final class WindowModel {
         guard let entry = entries[key] else { return nil }
         removeIndexes(for: entry, token: key, windowId: key.windowId)
         entries.removeValue(forKey: key)
+        constraintCache.invalidate(for: key)
         return entry
     }
 
     func cachedConstraints(for token: WindowToken, maxAge: TimeInterval = 5.0) -> WindowSizeConstraints? {
-        guard let entry = entries[token],
-              let cached = entry.cachedConstraints,
-              let cacheTime = entry.constraintsCacheTime,
-              Date().timeIntervalSince(cacheTime) < maxAge
-        else {
-            return nil
-        }
-        return cached
+        guard entries[token] != nil else { return nil }
+        return constraintCache.cachedConstraints(for: token, maxAge: maxAge)
     }
 
     func setCachedConstraints(_ constraints: WindowSizeConstraints, for token: WindowToken) {
-        guard let entry = entries[token] else { return }
-        entry.cachedConstraints = constraints.normalized()
-        entry.constraintsCacheTime = Date()
+        guard entries[token] != nil else { return }
+        constraintCache.setCachedConstraints(constraints, for: token)
     }
 }

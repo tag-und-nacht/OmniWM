@@ -233,8 +233,10 @@ extension OrchestrationPlan.Action {
         case let .continueManagedFocusRequest(requestId, reason, source, origin):
             "continueManagedFocusRequest request=\(requestId) reason=\(reason.rawValue) source=\(source.rawValue) origin=\(origin.rawValue)"
         case let .confirmManagedActivation(token, workspaceId, monitorId, isWorkspaceActive, appFullscreen, source):
+            // swiftlint:disable:next line_length
             "confirmManagedActivation token=\(orchestrationDebugToken(token)) workspace=\(orchestrationDebugWorkspace(workspaceId)) monitor=\(orchestrationDebugMonitor(monitorId)) workspace_active=\(orchestrationDebugFlag(isWorkspaceActive)) fullscreen=\(orchestrationDebugFlag(appFullscreen)) source=\(source.rawValue)"
         case let .beginNativeFullscreenRestoreActivation(token, workspaceId, monitorId, isWorkspaceActive, source):
+            // swiftlint:disable:next line_length
             "beginNativeFullscreenRestoreActivation token=\(orchestrationDebugToken(token)) workspace=\(orchestrationDebugWorkspace(workspaceId)) monitor=\(orchestrationDebugMonitor(monitorId)) workspace_active=\(orchestrationDebugFlag(isWorkspaceActive)) source=\(source.rawValue)"
         case let .enterNonManagedFallback(pid, token, appFullscreen, source):
             "enterNonManagedFallback pid=\(pid) token=\(orchestrationDebugToken(token)) fullscreen=\(orchestrationDebugFlag(appFullscreen)) source=\(source.rawValue)"

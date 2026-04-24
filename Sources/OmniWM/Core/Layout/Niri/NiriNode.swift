@@ -682,6 +682,8 @@ class NiriContainer: NiriNode {
 class NiriWindow: NiriNode {
     var token: WindowToken
 
+    var logicalId: LogicalWindowId = .invalid
+
     var sizingMode: SizingMode = .normal
 
     var height: WeightedSize = .default
@@ -703,8 +705,9 @@ class NiriWindow: NiriNode {
     var moveXAnimation: MoveAnimation?
     var moveYAnimation: MoveAnimation?
 
-    init(token: WindowToken) {
+    init(token: WindowToken, logicalId: LogicalWindowId = .invalid) {
         self.token = token
+        self.logicalId = logicalId
         super.init()
     }
 

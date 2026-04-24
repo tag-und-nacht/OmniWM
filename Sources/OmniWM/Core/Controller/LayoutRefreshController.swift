@@ -9,6 +9,11 @@ private let niriRemovalDiagnosticsLog = Logger(
     category: "niri-removal"
 )
 
+private let layoutShutdownRaceLog = Logger(
+    subsystem: "com.omniwm.core",
+    category: "LayoutRefreshController.ShutdownRace"
+)
+
 @MainActor final class LayoutRefreshController: NSObject {
     typealias PostLayoutAction = RefreshScheduler.PostLayoutAction
 
@@ -35,6 +40,7 @@ private let niriRemovalDiagnosticsLog = Logger(
         var onRelayout: ((RefreshReason, RefreshRoute) async -> Bool)?
         var onVisibilityRefresh: ((RefreshReason) async -> Bool)?
         var onWindowRemoval: ((RefreshReason, [WindowRemovalPayload]) -> Bool)?
+        var onWorkspaceLayoutPlanBuilt: ((LayoutType, WorkspaceDescriptor.ID) async -> Void)?
         var onNiriRemovalAnimationDiagnostic: ((NiriRemovalAnimationDiagnostic) -> Void)?
     }
 
@@ -433,7 +439,7 @@ private let niriRemovalDiagnosticsLog = Logger(
             }
         }
 
-        let preferredSides = preferredHideSides(for: controller.workspaceManager.monitors)
+        let preferredSides = preferredHideSides()
         for ws in controller.workspaceManager.workspaces where workspaceIds.contains(ws.id) {
             guard let monitor = controller.workspaceManager.monitor(for: ws.id) else { continue }
             let isActive = controller.workspaceManager.activeWorkspace(on: monitor.id)?.id == ws.id
@@ -506,7 +512,9 @@ private let niriRemovalDiagnosticsLog = Logger(
             )
         }
 
-        if !plan.effects.nativeFullscreenRestoreWorkspaceIds.isEmpty,
+        let canValidateFocus = controller.runtime != nil
+        if canValidateFocus,
+           !plan.effects.nativeFullscreenRestoreWorkspaceIds.isEmpty,
            !controller.workspaceManager.isAppFullscreenActive,
            !controller.workspaceManager.hasPendingNativeFullscreenTransition,
            !controller.shouldSuppressManagedFocusRecovery
@@ -525,8 +533,10 @@ private let niriRemovalDiagnosticsLog = Logger(
             refreshFocusedBorderForVisibilityState(on: controller)
         }
 
-        for workspaceId in plan.effects.focusValidationWorkspaceIds {
-            controller.ensureFocusedTokenValid(in: workspaceId)
+        if canValidateFocus {
+            for workspaceId in plan.effects.focusValidationWorkspaceIds {
+                controller.ensureFocusedTokenValid(in: workspaceId)
+            }
         }
 
         for postLayoutAction in plan.postLayoutActions {
@@ -577,19 +587,15 @@ private let niriRemovalDiagnosticsLog = Logger(
                 }
             }
 
-            var mergedConstraints = constraints
-            if resolveConstraints {
-                if let minW = entry.ruleEffects.minWidth {
-                    mergedConstraints.minSize.width = max(mergedConstraints.minSize.width, minW)
-                }
-                if let minH = entry.ruleEffects.minHeight {
-                    mergedConstraints.minSize.height = max(mergedConstraints.minSize.height, minH)
-                }
-                mergedConstraints = mergedConstraints.normalized()
-            }
+            let mergedConstraints = constraints.applyingRuleMinimumSizeEffects(
+                LayoutConstraintRuleEffects(ruleEffects: entry.ruleEffects)
+            )
 
             snapshots.append(
                 LayoutWindowSnapshot(
+                    logicalId: controller.workspaceManager
+                        .logicalWindowRegistry
+                        .resolveForRead(token: entry.token) ?? .invalid,
                     token: entry.token,
                     constraints: mergedConstraints,
                     hiddenState: controller.workspaceManager.hiddenState(for: entry.token),
@@ -602,6 +608,38 @@ private let niriRemovalDiagnosticsLog = Logger(
         }
 
         return snapshots
+    }
+
+    @discardableResult
+    func warmWindowConstraints(
+        for entries: [WorkspaceGraph.WindowEntry],
+        resolveConstraints: Bool
+    ) -> Bool {
+        guard let controller else { return false }
+        guard resolveConstraints else { return true }
+
+        for entry in entries {
+            if controller.workspaceManager.cachedConstraints(for: entry.token) != nil {
+                continue
+            }
+            guard let windowEntry = controller.workspaceManager.entry(for: entry.token) else {
+                continue
+            }
+            let currentSize = fastFrame(
+                for: windowEntry.token,
+                axRef: windowEntry.axRef
+            )?.size
+            let resolved = AXWindowService.sizeConstraints(
+                windowEntry.axRef,
+                currentSize: currentSize
+            )
+            controller.workspaceManager.setCachedConstraints(
+                resolved,
+                for: windowEntry.token
+            )
+        }
+
+        return true
     }
 
     func buildMonitorSnapshot(
@@ -628,7 +666,10 @@ private let niriRemovalDiagnosticsLog = Logger(
     ) -> WorkspaceRefreshInput? {
         guard let controller else { return nil }
 
-        let entries = controller.workspaceManager.tiledEntries(in: workspaceId)
+        let graph = controller.workspaceManager.workspaceGraphSnapshot()
+        let entries = graph.tiledMembership(in: workspaceId).compactMap {
+            controller.workspaceManager.entry(for: $0.token)
+        }
         let windows = buildWindowSnapshots(for: entries, resolveConstraints: resolveConstraints)
         let monitorSnapshot = buildMonitorSnapshot(for: monitor, orientation: orientation)
 
@@ -641,7 +682,26 @@ private let niriRemovalDiagnosticsLog = Logger(
     }
 
     private func applySessionPatch(_ patch: WorkspaceSessionPatch) {
-        controller?.workspaceManager.applySessionPatch(patch)
+        guard let controller else { return }
+        // `WMController.runtime` is `weak`. `executeLayoutPlan` always calls
+        // `applySessionPatch`, so a teardown that releases the runtime
+        // between scheduler tick and apply would crash the WM here. Soft-
+        // return preserves the AppKit-shutdown ordering without a no-op
+        // hazard at runtime nominal operation: under nominal operation the
+        // runtime is always attached.
+        guard let runtime = controller.runtime else {
+            layoutShutdownRaceLog.notice("LayoutRefreshController.applySessionPatch: WMRuntime detached during shutdown; skipping session patch")
+            return
+        }
+        _ = runtime.applySessionPatch(patch, source: .service)
+    }
+
+    private func setHiddenState(_ state: WindowModel.HiddenState?, for token: WindowToken) {
+        guard let controller else { return }
+        guard let runtime = controller.runtime else {
+            preconditionFailure("LayoutRefreshController.setHiddenState requires WMRuntime to be attached")
+        }
+        runtime.setHiddenState(state, for: token, source: .service)
     }
 
     private func applyAnimationDirectives(
@@ -696,7 +756,7 @@ private let niriRemovalDiagnosticsLog = Logger(
         }
 
         controller.axEventHandler.noteFocusedRemovalRecoveryFocusRequested(token)
-        controller.focusWindow(token)
+        controller.focusWindow(token, source: .focusPolicy)
         if controller.focusBridge.activeManagedRequest(for: token) == nil {
             controller.axEventHandler.completeFocusedRemovalRecovery(
                 workspaceId: entry.workspaceId,
@@ -1176,6 +1236,10 @@ private let niriRemovalDiagnosticsLog = Logger(
             workspacePlans.append(contentsOf: plans)
         }
 
+        let postRescanRegistry = controller.workspaceManager.logicalWindowRegistry
+        controller.niriEngine?.syncLogicalIds(from: postRescanRegistry)
+        controller.dwindleEngine?.syncLogicalIds(from: postRescanRegistry)
+
         var effects = RefreshExecutionEffects()
         let pendingBarProjectionInvalidations =
             controller.niriEngine?.pendingWorkspaceBarProjectionInvalidationIds() ?? []
@@ -1267,7 +1331,9 @@ private let niriRemovalDiagnosticsLog = Logger(
                 )
             }
 
-            if payload.shouldRecoverFocus, payload.layoutType == .dwindle {
+            if payload.shouldRecoverFocus,
+               payload.layoutType == .dwindle || payload.removedNodeId == nil
+            {
                 focusedWorkspacesToRecover.insert(payload.workspaceId)
             }
         }
@@ -1368,6 +1434,9 @@ private let niriRemovalDiagnosticsLog = Logger(
 
     private func buildFullRefreshExecutionPlan() async throws -> RefreshExecutionPlan {
         guard let controller else { return .init() }
+        guard let runtime = controller.runtime else {
+            preconditionFailure("LayoutRefreshController.performFullRescan requires WMRuntime to be attached")
+        }
 
         let enumerationSnapshot = await controller.axManager.fullRescanEnumerationSnapshot()
         let windows = enumerationSnapshot.windows
@@ -1385,13 +1454,6 @@ private let niriRemovalDiagnosticsLog = Logger(
                 }
             }
 
-            // During native-FS space transitions, macOS can surface a
-            // destroyed AX ref in the enumeration for a brief window
-            // before the replacement-create notification fires. Admitting
-            // it here produces a zombie entry that the next destroy
-            // notification has to tear down again. Skip the enumeration
-            // hit and let `AXEventHandler.trackPreparedCreate` be the
-            // authoritative admission for the replacement window.
             if controller.workspaceManager.entry(forPid: pid, windowId: winId) == nil,
                controller.axEventHandler.isWindowRecentlyDestroyed(windowId: winId)
             {
@@ -1485,9 +1547,9 @@ private let niriRemovalDiagnosticsLog = Logger(
                             for: existingEntry.token,
                             path: .fullRescanNativeFullscreenRestore
                         )
-                        _ = controller.workspaceManager.beginNativeFullscreenRestore(for: existingEntry.token)
+                        controller.routeBeginNativeFullscreenRestore(for: existingEntry.token)
                     } else {
-                        _ = controller.workspaceManager.restoreNativeFullscreenRecord(for: existingEntry.token)
+                        controller.routeRestoreNativeFullscreenRecord(for: existingEntry.token)
                     }
                     wsForWindow = existingEntry.workspaceId
                     ruleEffects = existingEntry.ruleEffects
@@ -1497,7 +1559,10 @@ private let niriRemovalDiagnosticsLog = Logger(
                         path: .fullRescanExistingEntryFullscreen
                     )
                     let existingAssignment = controller.workspaceAssignment(pid: pid, windowId: winId)
-                    wsForWindow = existingAssignment ?? defaultWorkspace
+                    let nativeFullscreenWorkspace = controller.workspaceManager
+                        .nativeFullscreenRecord(for: existingEntry.token)?
+                        .workspaceId
+                    wsForWindow = existingAssignment ?? nativeFullscreenWorkspace ?? defaultWorkspace
                     ruleEffects = decision.ruleEffects
                 } else {
                     let existingAssignment = controller.workspaceAssignment(pid: pid, windowId: winId)
@@ -1511,13 +1576,14 @@ private let niriRemovalDiagnosticsLog = Logger(
             }
             let oldMode = existingEntry?.mode
 
-            _ = controller.workspaceManager.addWindow(
+            _ = runtime.admitWindow(
                 ax,
                 pid: pid,
                 windowId: winId,
                 to: wsForWindow,
                 mode: oldMode ?? trackedMode,
-                ruleEffects: ruleEffects
+                ruleEffects: ruleEffects,
+                source: .ax
             )
 
             if shouldPreservePreFullscreenState {
@@ -1543,9 +1609,10 @@ private let niriRemovalDiagnosticsLog = Logger(
 
         for token in decisionBasedRemovals {
             discardHiddenTracking(for: token)
-            _ = controller.workspaceManager.removeWindow(
+            _ = runtime.removeWindow(
                 pid: token.pid,
-                windowId: token.windowId
+                windowId: token.windowId,
+                source: .ax
             )
         }
 
@@ -1574,14 +1641,15 @@ private let niriRemovalDiagnosticsLog = Logger(
             }
         }
 
-        // Defense in depth: AX enumeration occasionally drops windows for
-        // a single cycle even outside FS transitions (e.g. an app briefly
-        // stops responding, a burst of CGS events flushes the per-app
-        // context). Requiring two consecutive misses makes the missing-
-        // window purge robust to that noise at a cost of at most one
-        // extra rescan delay when a window is genuinely destroyed.
-        controller.workspaceManager.removeMissing(keys: seenKeys, requiredConsecutiveMisses: 2)
-        controller.workspaceManager.garbageCollectUnusedWorkspaces(focusedWorkspaceId: focusedWorkspaceId)
+        runtime.removeMissingWindows(
+            keys: seenKeys,
+            requiredConsecutiveMisses: 2,
+            source: .service
+        )
+        runtime.garbageCollectUnusedWorkspaces(
+            focusedWorkspaceId: focusedWorkspaceId,
+            source: .service
+        )
 
         try Task.checkCancellation()
 
@@ -1610,6 +1678,10 @@ private let niriRemovalDiagnosticsLog = Logger(
             workspacePlans.append(contentsOf: plans)
         }
 
+        let postRescanRegistry = controller.workspaceManager.logicalWindowRegistry
+        controller.niriEngine?.syncLogicalIds(from: postRescanRegistry)
+        controller.dwindleEngine?.syncLogicalIds(from: postRescanRegistry)
+
         var effects = RefreshExecutionEffects()
         effects.visibility = .init(activeWorkspaceIds: activeWorkspaceIds)
         effects.requestWorkspaceBarRefresh = true
@@ -1634,17 +1706,6 @@ private let niriRemovalDiagnosticsLog = Logger(
     private func shouldPreserveMissingWindowsDuringNativeFullscreen(
         controller: WMController
     ) -> Bool {
-        // A running FS lifecycle must shield every managed entry from the
-        // missing-window purge. But AX enumeration is also noisy *around*
-        // FS transitions — for a few hundred ms before a suspend record
-        // materializes and after a finalize clears it, non-active-space
-        // windows frequently fail to enumerate even though they still
-        // exist. `isWithinNativeFullscreenLifecycleGrace` extends the
-        // shield across those gaps, keyed off a monotonic timestamp that
-        // any NFR transition updates. Without this, a single missed
-        // enumeration during the transition tail was enough to purge
-        // tokens and have them re-admitted on the currently-active
-        // workspace, which is the bug we are fixing here.
         controller.workspaceManager.hasNativeFullscreenLifecycleContext
             || controller.workspaceManager.isWithinNativeFullscreenLifecycleGrace
     }
@@ -1746,7 +1807,7 @@ private let niriRemovalDiagnosticsLog = Logger(
     fileprivate func clearHiddenRecord(for token: WindowToken) {
         clearHiddenOrigin(for: token)
         resetWorkspaceInactiveHideRetryState(forWindowId: token.windowId)
-        controller?.workspaceManager.setHiddenState(nil, for: token)
+        setHiddenState(nil, for: token)
     }
 
     func discardHiddenTracking(for token: WindowToken) {
@@ -2046,7 +2107,8 @@ private let niriRemovalDiagnosticsLog = Logger(
 
 
         var inactiveWindowJobs: [(pid: pid_t, windowId: Int)] = []
-        let hiddenPlacementMonitors = controller.workspaceManager.monitors.map(HiddenPlacementMonitorContext.init)
+        let topology = projectedTopology(controller: controller)
+        let hiddenPlacementMonitors = hiddenPlacementMonitorContexts(from: topology)
         for snapshot in resolvedWorkspaceEntries where !activeWorkspaceIds.contains(snapshot.workspace.id) {
             for entry in snapshot.entries {
                 inactiveWindowJobs.append((entry.handle.pid, entry.windowId))
@@ -2056,7 +2118,7 @@ private let niriRemovalDiagnosticsLog = Logger(
             controller.axManager.cancelPendingFrameJobs(inactiveWindowJobs)
         }
 
-        let preferredSides = preferredHideSides(for: controller.workspaceManager.monitors)
+        let preferredSides = topology.preferredHideSides()
         for snapshot in resolvedWorkspaceEntries where !activeWorkspaceIds.contains(snapshot.workspace.id) {
             guard let monitor = controller.workspaceManager.monitor(for: snapshot.workspace.id) else { continue }
             let preferredSide = preferredSides[monitor.id] ?? .right
@@ -2111,6 +2173,9 @@ private let niriRemovalDiagnosticsLog = Logger(
 
     fileprivate func applyPositionPlans(_ plans: [WindowPositionPlan]) {
         guard let controller, !plans.isEmpty else { return }
+        guard let runtime = controller.runtime else {
+            preconditionFailure("LayoutRefreshController.applyPositionPlans requires WMRuntime to be attached")
+        }
 
         controller.axManager.applyPositionsViaSkyLight(
             plans.map { (windowId: $0.entry.windowId, origin: $0.origin) },
@@ -2118,8 +2183,18 @@ private let niriRemovalDiagnosticsLog = Logger(
         )
 
         let verifyEpsilon: CGFloat = 1.0
+        let shouldUseTestPositionOverride = controller.axManager
+            .frameApplyOverrideConfirmsPositionPlansForTests
         for plan in plans {
             let targetFrame = CGRect(origin: plan.origin, size: plan.frameSize)
+            if shouldUseTestPositionOverride {
+                controller.axManager.confirmFrameWrite(
+                    for: plan.entry.windowId,
+                    pid: plan.entry.pid,
+                    frame: targetFrame
+                )
+                continue
+            }
             if let observedOrigin = observedWindowOrigin(plan.entry),
                abs(observedOrigin.x - plan.origin.x) <= verifyEpsilon,
                abs(observedOrigin.y - plan.origin.y) <= verifyEpsilon
@@ -2132,6 +2207,12 @@ private let niriRemovalDiagnosticsLog = Logger(
                 continue
             }
 
+            let outcomeOrigin = runtime.frameWriteOutcomeOriginEpoch(source: .ax)
+            _ = runtime.recordPendingFrameWrite(
+                frame: .init(rect: targetFrame, space: .appKit, isVisibleFrame: true),
+                requestId: outcomeOrigin.value,
+                for: plan.entry.token
+            )
             let result = AXWindowService.setFrame(plan.entry.axRef, frame: targetFrame)
             if result.isVerifiedSuccess {
                 controller.axManager.confirmFrameWrite(
@@ -2140,6 +2221,12 @@ private let niriRemovalDiagnosticsLog = Logger(
                     frame: result.observedFrame ?? targetFrame
                 )
             }
+            runtime.submitAXFrameWriteOutcome(
+                for: plan.entry.token,
+                axFailure: result.failureReason,
+                originatingTransactionEpoch: outcomeOrigin,
+                source: .ax
+            )
         }
     }
 
@@ -2405,13 +2492,13 @@ private let niriRemovalDiagnosticsLog = Logger(
                     handleUnavailableWorkspaceInactiveHide(entry)
                     return
                 }
-                controller.workspaceManager.setHiddenState(normalizedHiddenState, for: entry.token)
+                setHiddenState(normalizedHiddenState, for: entry.token)
                 controller.axManager.suppressFrameWrites([frameEntry])
                 rememberHiddenOrigin(for: entry.token, origin: plan.origin)
                 return
             }
 
-            controller.workspaceManager.setHiddenState(
+            setHiddenState(
                 normalizedHiddenState,
                 for: entry.token
             )
@@ -2423,7 +2510,7 @@ private let niriRemovalDiagnosticsLog = Logger(
                 verified: verifiedHideTokens.contains(entry.token)
             )
         case let .alreadyHidden(hiddenState, origin):
-            controller.workspaceManager.setHiddenState(
+            setHiddenState(
                 normalizedHiddenStateForCurrentWorkspace(
                     hiddenState,
                     workspaceIsCurrentlyActive: workspaceIsCurrentlyActive,
@@ -2512,7 +2599,7 @@ private let niriRemovalDiagnosticsLog = Logger(
         let baseReveal = Self.hiddenEdgeReveal(isZoomApp: isZoomApp(pid))
         let hiddenPlacementMonitor = HiddenPlacementMonitorContext(monitor)
         let resolvedHiddenPlacementMonitors = hiddenPlacementMonitors
-            ?? controller.workspaceManager.monitors.map(HiddenPlacementMonitorContext.init)
+            ?? hiddenPlacementMonitorContexts(from: projectedTopology(controller: controller))
 
         switch reason {
         case .scratchpad, .workspaceInactive:
@@ -2594,50 +2681,34 @@ private let niriRemovalDiagnosticsLog = Logger(
         return CGPoint(x: min(max(0, x), 1), y: min(max(0, y), 1))
     }
 
-    private func preferredHideSides(for monitors: [Monitor]) -> [Monitor.ID: HideSide] {
-        let important = 10
-        var preferredSides: [Monitor.ID: HideSide] = [:]
-
-        for monitor in monitors {
-            let monitorFrame = monitor.frame
-            let xOff = monitorFrame.width * 0.1
-            let yOff = monitorFrame.height * 0.1
-
-            let bottomRight = CGPoint(x: monitorFrame.maxX, y: monitorFrame.minY)
-            let bottomLeft = CGPoint(x: monitorFrame.minX, y: monitorFrame.minY)
-
-            let rightPoints = [
-                CGPoint(x: bottomRight.x + 2, y: bottomRight.y - yOff),
-                CGPoint(x: bottomRight.x - xOff, y: bottomRight.y + 2),
-                CGPoint(x: bottomRight.x + 2, y: bottomRight.y + 2)
-            ]
-
-            let leftPoints = [
-                CGPoint(x: bottomLeft.x - 2, y: bottomLeft.y - yOff),
-                CGPoint(x: bottomLeft.x + xOff, y: bottomLeft.y + 2),
-                CGPoint(x: bottomLeft.x - 2, y: bottomLeft.y + 2)
-            ]
-
-            func sideScore(_ points: [CGPoint]) -> Int {
-                monitors.reduce(0) { partial, other in
-                    let c1 = other.frame.contains(points[0]) ? 1 : 0
-                    let c2 = other.frame.contains(points[1]) ? 1 : 0
-                    let c3 = other.frame.contains(points[2]) ? 1 : 0
-                    return partial + c1 + c2 + important * c3
-                }
-            }
-
-            let leftScore = sideScore(leftPoints)
-            let rightScore = sideScore(rightPoints)
-            preferredSides[monitor.id] = leftScore < rightScore ? .left : .right
-        }
-
-        return preferredSides
+    private func preferredHideSides() -> [Monitor.ID: HideSide] {
+        guard let controller else { return [:] }
+        return projectedTopology(controller: controller).preferredHideSides()
     }
 
     func preferredHideSide(for monitor: Monitor) -> HideSide {
         guard let controller else { return .right }
-        return preferredHideSides(for: controller.workspaceManager.monitors)[monitor.id] ?? .right
+        return projectedTopology(controller: controller)
+            .preferredHideSides()[monitor.id] ?? .right
+    }
+
+    private func projectedTopology(controller: WMController) -> MonitorTopologyState {
+        MonitorTopologyState.project(
+            manager: controller.workspaceManager,
+            settings: controller.settings,
+            epoch: controller.runtime?.currentTopologyEpoch ?? .invalid,
+            insetWorkingFrame: { mon in
+                controller.insetWorkingFrame(for: mon)
+            }
+        )
+    }
+
+    private func hiddenPlacementMonitorContexts(
+        from topology: MonitorTopologyState
+    ) -> [HiddenPlacementMonitorContext] {
+        topology.order.compactMap { monitorId in
+            topology.node(monitorId).map(HiddenPlacementMonitorContext.init)
+        }
     }
 
     fileprivate func hasPendingRevealTransaction(for windowId: Int) -> Bool {
@@ -2806,7 +2877,7 @@ private let niriRemovalDiagnosticsLog = Logger(
         }
 
         if controller.workspaceManager.hiddenState(for: pendingTransaction.token) == nil {
-            controller.workspaceManager.setHiddenState(pendingTransaction.hiddenState, for: pendingTransaction.token)
+            setHiddenState(pendingTransaction.hiddenState, for: pendingTransaction.token)
         }
         if controller.workspaceManager.hiddenState(for: pendingTransaction.token) != nil {
             controller.axManager.suppressFrameWrites(frameEntry)
@@ -3038,7 +3109,11 @@ private let niriRemovalDiagnosticsLog = Logger(
         updateEngine: (WindowToken, WindowSizeConstraints) -> Void
     ) {
         guard let controller else { return }
-        let snapshots = buildWindowSnapshots(for: controller.workspaceManager.tiledEntries(in: wsId))
+        let graph = controller.workspaceManager.workspaceGraphSnapshot()
+        let entries = graph.tiledMembership(in: wsId).compactMap {
+            controller.workspaceManager.entry(for: $0.token)
+        }
+        let snapshots = buildWindowSnapshots(for: entries)
         for snapshot in snapshots {
             updateEngine(snapshot.token, snapshot.constraints)
         }
@@ -3053,6 +3128,7 @@ final class LayoutDiffExecutor {
         self.refreshController = refreshController
     }
 
+    // swiftlint:disable:next function_body_length
     func execute(_ plan: WorkspaceLayoutPlan) {
         guard let controller = refreshController.controller,
               let monitor = resolveMonitor(from: plan.monitor, controller: controller)
@@ -3085,7 +3161,10 @@ final class LayoutDiffExecutor {
             else {
                 return
             }
-            _ = controller.workspaceManager.finalizeNativeFullscreenRestore(for: token)
+            guard let runtime = controller.runtime else {
+                preconditionFailure("LayoutRefreshController.finalizeNativeFullscreenRestore (frame-confirm) requires WMRuntime to be attached")
+            }
+            _ = runtime.finalizeNativeFullscreenRestore(for: token, source: .service)
         }
 
         func resolveEntry(for token: WindowToken) -> WindowModel.Entry? {
@@ -3121,6 +3200,29 @@ final class LayoutDiffExecutor {
             }
             guard entry.layoutReason != .nativeFullscreen else { continue }
             restoreEntries.append((entry, restoreChange.hiddenState))
+        }
+
+        if !nativeFullscreenRestoreFinalizeTokens.isEmpty {
+            let shownTokens = Set(shownEntries.map(\.entry.token))
+            let stableHiddenJobs = controller.workspaceManager.entries(in: plan.workspaceId)
+                .compactMap { entry -> (pid: pid_t, windowId: Int)? in
+                    guard controller.workspaceManager.hiddenState(for: entry.token) != nil,
+                          !nativeFullscreenRestoreFinalizeTokens.contains(entry.token),
+                          !hiddenTokens.contains(entry.token),
+                          !shownTokens.contains(entry.token),
+                          !restoreTokens.contains(entry.token)
+                    else {
+                        return nil
+                    }
+                    return (entry.pid, entry.windowId)
+                }
+            if !stableHiddenJobs.isEmpty {
+                // Native fullscreen restore may apply frames to a focused
+                // sibling while unchanged Niri hidden columns stay suppressed.
+                // Refreshing suppression clears stale AX frame cache without
+                // issuing another offscreen move.
+                controller.axManager.suppressFrameWrites(stableHiddenJobs)
+            }
         }
 
         for (entry, hiddenState) in restoreEntries {
@@ -3188,7 +3290,8 @@ final class LayoutDiffExecutor {
             let restorePlans: [LayoutRefreshController.WindowPositionPlan] = restoreEntries
                 .compactMap { entry, hiddenState in
                     guard !blockedRevealTokens.contains(entry.token),
-                          !pendingRevealTokens.contains(entry.token)
+                          !pendingRevealTokens.contains(entry.token),
+                          frameChangeByToken[entry.token] == nil
                     else { return nil }
                     return refreshController.makeRestorePositionPlan(
                         for: entry,
@@ -3292,7 +3395,7 @@ final class LayoutDiffExecutor {
                 continue
             }
             if hiddenTokens.contains(token) {
-                controller.workspaceManager.setHiddenState(nil, for: token)
+                setHiddenState(nil, for: token, controller: controller)
                 controller.axManager.unsuppressFrameWrites([(entry.pid, entry.windowId)])
             }
             controller.axManager.forceApplyNextFrame(for: entry.windowId)
@@ -3345,11 +3448,27 @@ final class LayoutDiffExecutor {
         switch diff.borderMode {
         case .none:
             break
+        case .hidden:
+            controller.hideKeyboardFocusBorder(
+                source: .borderReapplyPostLayout,
+                reason: "layout requested focused border hide"
+            )
         case .direct:
             applyDirectBorderUpdate(diff.focusedFrame)
         case .coordinated:
             applyCoordinatedBorderUpdate(diff.focusedFrame)
         }
+    }
+
+    private func setHiddenState(
+        _ state: WindowModel.HiddenState?,
+        for token: WindowToken,
+        controller: WMController
+    ) {
+        guard let runtime = controller.runtime else {
+            preconditionFailure("LayoutRefreshController.setHiddenState (controller-scoped) requires WMRuntime to be attached")
+        }
+        runtime.setHiddenState(state, for: token, source: .service)
     }
 
     private func resolveMonitor(
@@ -3414,14 +3533,12 @@ final class LayoutDiffExecutor {
                 workspaceIsCurrentlyActive: workspaceIsCurrentlyActive
             ) {
             case let .movable(plan, hiddenState):
-                controller.workspaceManager.setHiddenState(
-                    refreshController.normalizedHiddenStateForCurrentWorkspace(
-                        hiddenState,
-                        workspaceIsCurrentlyActive: workspaceIsCurrentlyActive,
-                        side: request.side
-                    ),
-                    for: entry.token
+                let normalizedHiddenState = refreshController.normalizedHiddenStateForCurrentWorkspace(
+                    hiddenState,
+                    workspaceIsCurrentlyActive: workspaceIsCurrentlyActive,
+                    side: request.side
                 )
+                setHiddenState(normalizedHiddenState, for: entry.token, controller: controller)
                 hiddenJobs.append((entry.handle.pid, entry.windowId))
                 hidePlans.append(plan)
                 hideOriginsToRemember.append((token: entry.token, origin: plan.origin))
@@ -3429,14 +3546,12 @@ final class LayoutDiffExecutor {
                     finalizeTokensMovable.insert(entry.token)
                 }
             case let .alreadyHidden(hiddenState, origin):
-                controller.workspaceManager.setHiddenState(
-                    refreshController.normalizedHiddenStateForCurrentWorkspace(
-                        hiddenState,
-                        workspaceIsCurrentlyActive: workspaceIsCurrentlyActive,
-                        side: request.side
-                    ),
-                    for: entry.token
+                let normalizedHiddenState = refreshController.normalizedHiddenStateForCurrentWorkspace(
+                    hiddenState,
+                    workspaceIsCurrentlyActive: workspaceIsCurrentlyActive,
+                    side: request.side
                 )
+                setHiddenState(normalizedHiddenState, for: entry.token, controller: controller)
                 hiddenJobs.append((entry.handle.pid, entry.windowId))
                 refreshController.rememberHiddenOrigin(for: entry.token, origin: origin)
                 if nativeFullscreenRestoreFinalizeTokens.contains(entry.token) {
@@ -3462,8 +3577,11 @@ final class LayoutDiffExecutor {
             }
             finalizeTokensMovable.formIntersection(verifiedHideTokens)
         }
+        guard let runtime = controller.runtime else {
+            preconditionFailure("LayoutRefreshController.applyFinalizeMovableVisibilityTransitions requires WMRuntime to be attached")
+        }
         for token in finalizeTokensAlreadyHidden.union(finalizeTokensMovable) {
-            _ = controller.workspaceManager.finalizeNativeFullscreenRestore(for: token)
+            _ = runtime.finalizeNativeFullscreenRestore(for: token, source: .service)
         }
     }
 
@@ -3479,6 +3597,9 @@ final class LayoutDiffExecutor {
            focusedFrame == nil,
            fallbackPreferredFrame == nil
         {
+            if shouldPreserveManagedBorderDuringPendingActivation(target: target, controller: controller) {
+                return
+            }
             controller.hideKeyboardFocusBorder(
                 source: .borderReapplyPostLayout,
                 reason: "managed direct border update had no frame"
@@ -3516,6 +3637,9 @@ final class LayoutDiffExecutor {
            focusedFrame == nil,
            fallbackPreferredFrame == nil
         {
+            if shouldPreserveManagedBorderDuringPendingActivation(target: target, controller: controller) {
+                return
+            }
             controller.hideKeyboardFocusBorder(
                 source: .borderReapplyPostLayout,
                 reason: "managed coordinated border update had no frame"
@@ -3553,6 +3677,19 @@ final class LayoutDiffExecutor {
         }
 
         return focusedFrame.token != target.token
+    }
+
+    private func shouldPreserveManagedBorderDuringPendingActivation(
+        target: KeyboardFocusTarget?,
+        controller: WMController
+    ) -> Bool {
+        guard let target,
+              target.isManaged,
+              controller.workspaceManager.pendingFocusedToken != nil
+        else {
+            return false
+        }
+        return controller.workspaceManager.focusedToken == target.token
     }
 
     private func resolvedBorderRenderTarget(

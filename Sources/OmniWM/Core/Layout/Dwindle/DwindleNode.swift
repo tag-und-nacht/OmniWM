@@ -75,14 +75,17 @@ final class DwindleNode {
     var cachedFrame: CGRect?
     var insertionSeed: DwindleInsertionSeed?
 
+    var logicalId: LogicalWindowId = .invalid
+
     var moveXAnimation: MoveAnimation?
     var moveYAnimation: MoveAnimation?
     var sizeWAnimation: MoveAnimation?
     var sizeHAnimation: MoveAnimation?
 
-    init(kind: DwindleNodeKind) {
+    init(kind: DwindleNodeKind, logicalId: LogicalWindowId = .invalid) {
         id = UUID()
         self.kind = kind
+        self.logicalId = logicalId
     }
 
     var isLeaf: Bool {

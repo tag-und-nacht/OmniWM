@@ -5,7 +5,7 @@ import Foundation
 
 struct HotkeyPlannedRegistration: Equatable {
     let binding: KeyBinding
-    let command: HotkeyCommand
+    let command: InputBindingTrigger
 }
 
 enum HotkeyRegistrationFailureReason: Equatable {
@@ -15,20 +15,20 @@ enum HotkeyRegistrationFailureReason: Equatable {
 
 struct HotkeyRegistrationPlan: Equatable {
     let registrations: [HotkeyPlannedRegistration]
-    let failures: [HotkeyCommand: HotkeyRegistrationFailureReason]
+    let failures: [InputBindingTrigger: HotkeyRegistrationFailureReason]
 }
 
 final class HotkeyCenter {
-    var onCommand: ((HotkeyCommand) -> Void)?
+    var onCommand: ((InputBindingTrigger) -> Void)?
 
     private var refs: [EventHotKeyRef?] = []
     private var handler: EventHandlerRef?
     private var isRunning = false
-    private var idToCommand: [UInt32: HotkeyCommand] = [:]
+    private var idToCommand: [UInt32: InputBindingTrigger] = [:]
 
     private var bindings: [HotkeyBinding] = []
 
-    private(set) var registrationFailures: [HotkeyCommand: HotkeyRegistrationFailureReason] = [:]
+    private(set) var registrationFailures: [InputBindingTrigger: HotkeyRegistrationFailureReason] = [:]
 
     func start() {
         guard !isRunning else { return }
@@ -118,8 +118,8 @@ final class HotkeyCenter {
 
 extension HotkeyCenter {
     static func registrationPlan(for bindings: [HotkeyBinding]) -> HotkeyRegistrationPlan {
-        var ownersByBinding: [KeyBinding: Set<HotkeyCommand>] = [:]
-        var commandBindings: [(command: HotkeyCommand, binding: KeyBinding?)] = []
+        var ownersByBinding: [KeyBinding: Set<InputBindingTrigger>] = [:]
+        var commandBindings: [(command: InputBindingTrigger, binding: KeyBinding?)] = []
 
         for binding in bindings {
             let validBinding = binding.binding.isUnassigned ? nil : binding.binding
@@ -136,7 +136,7 @@ extension HotkeyCenter {
         )
 
         var registrations: [HotkeyPlannedRegistration] = []
-        var failures: [HotkeyCommand: HotkeyRegistrationFailureReason] = [:]
+        var failures: [InputBindingTrigger: HotkeyRegistrationFailureReason] = [:]
 
         for commandBinding in commandBindings {
             if let binding = commandBinding.binding, conflictedBindings.contains(binding) {

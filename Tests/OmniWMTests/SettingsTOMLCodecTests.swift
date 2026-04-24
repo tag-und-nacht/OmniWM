@@ -135,7 +135,6 @@ import Testing
                 titleRegex: "^Main.*$",
                 axRole: "AXWindow",
                 axSubrole: "AXStandardWindow",
-                manage: .auto,
                 layout: .tile,
                 assignToWorkspace: "1",
                 minWidth: 400,
@@ -267,17 +266,6 @@ import Testing
         #expect(decoded.quakeTerminalOpacity == nil)
         #expect(decoded.quakeTerminalMonitorMode == nil)
         #expect(decoded.niriDefaultColumnWidth == nil)
-    }
-
-    @Test func topLevelVersionPrecedesAllTables() throws {
-        let data = try SettingsTOMLCodec.encode(SettingsExport.defaults())
-        let output = try #require(String(data: data, encoding: .utf8))
-
-
-
-        let versionRange = try #require(output.range(of: "version"))
-        let firstTableRange = try #require(output.range(of: "[general]"))
-        #expect(versionRange.lowerBound < firstTableRange.lowerBound)
     }
 
     @Test func canonicalDefaultsMatchGoldenFixture() throws {

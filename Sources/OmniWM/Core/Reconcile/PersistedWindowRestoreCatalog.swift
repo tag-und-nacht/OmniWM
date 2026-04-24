@@ -80,12 +80,6 @@ struct PersistedWindowRestoreKey: Codable, Equatable, Hashable {
         self.title = Self.normalizeTitle(title ?? metadata.title)
     }
 
-    /// A key is "identifying" only if it carries a non-nil, non-empty
-    /// title. A nil-title key matches *any* window with the same base
-    /// key, which is too permissive for persistence: multi-window apps
-    /// (ghostty, Chrome, Finder, …) would end up with a catch-all entry
-    /// that consumes itself against whichever window happens to re-admit
-    /// without a title yet. We persist and match titled keys only.
     var isIdentifying: Bool {
         title != nil
     }

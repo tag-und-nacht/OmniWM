@@ -44,6 +44,10 @@ final class IPCEventDemandTracker: @unchecked Sendable {
 }
 
 actor IPCEventBroker {
+    // Covers the subscribe response/initial-snapshot handoff and short WM event bursts
+    // without letting a stalled IPC reader grow memory without bound.
+    static let streamBufferEventCountLimit = 64
+
     private var continuations: [IPCSubscriptionChannel: [UUID: AsyncStream<IPCEventEnvelope>.Continuation]] = [:]
     private let demandTracker: IPCEventDemandTracker
 
@@ -54,7 +58,9 @@ actor IPCEventBroker {
     func registerStream(for channel: IPCSubscriptionChannel) -> IPCEventStreamRegistration {
         let id = UUID()
         var capturedContinuation: AsyncStream<IPCEventEnvelope>.Continuation?
-        let stream = AsyncStream<IPCEventEnvelope>(bufferingPolicy: .bufferingNewest(1)) { continuation in
+        let stream = AsyncStream<IPCEventEnvelope>(
+            bufferingPolicy: .bufferingNewest(Self.streamBufferEventCountLimit)
+        ) { continuation in
             capturedContinuation = continuation
             continuation.onTermination = { [weak self] _ in
                 Task {
