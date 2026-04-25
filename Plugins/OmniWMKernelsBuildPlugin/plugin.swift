@@ -11,6 +11,7 @@ struct OmniWMKernelsBuildPlugin: BuildToolPlugin {
         let outputDirectory = context.pluginWorkDirectoryURL.appending(path: "zig-kernels")
         let path = ProcessInfo.processInfo.environment["PATH"] ?? ""
         let home = ProcessInfo.processInfo.environment["HOME"] ?? context.package.directoryURL.path
+        let kernelArchs = ProcessInfo.processInfo.environment["OMNIWM_ZIG_KERNEL_ARCHS"] ?? "universal"
         let cacheDirectory = outputDirectory.appending(path: "zig-cache")
 
         return [
@@ -27,6 +28,7 @@ struct OmniWMKernelsBuildPlugin: BuildToolPlugin {
                 environment: [
                     "PATH": path,
                     "HOME": home,
+                    "OMNIWM_ZIG_KERNEL_ARCHS": kernelArchs,
                     "XDG_CACHE_HOME": cacheDirectory.path,
                     "ZIG_GLOBAL_CACHE_DIR": cacheDirectory.path,
                     "OMNIWM_ZIG_KERNEL_OUTPUT_ROOT": outputDirectory.path

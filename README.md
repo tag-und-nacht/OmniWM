@@ -434,6 +434,15 @@ make verify        # Run lint + build + tests
 make release-check # Run release-oriented preflight and universal build checks
 ```
 
+To package an unsigned release app for the local Apple Silicon machine only:
+
+```bash
+./Scripts/package-app.sh release false arm64
+```
+
+This produces `dist/OmniWM.app` and skips the x86_64 Swift and Zig builds. Omit
+the final `arm64` argument to build the default universal app bundle.
+
 `make build` and `make test` are the supported entry points for contributors. They run the current preflight checks and Zig kernel build automatically before invoking SwiftPM, so you should not rely on calling `swift build` or `swift test` directly on a fresh checkout.
 
 ## Support

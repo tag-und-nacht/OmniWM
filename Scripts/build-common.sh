@@ -106,7 +106,7 @@ omniwm_verify_ghostty_archive() {
   if ! lipo "$OMNIWM_GHOSTTY_ARCHIVE_PATH" -verify_arch arm64 x86_64 >/dev/null 2>&1; then
     printf '%s\n' "Ghostty archive is not universal: $OMNIWM_GHOSTTY_ARCHIVE_PATH" >&2
     lipo -info "$OMNIWM_GHOSTTY_ARCHIVE_PATH" >&2 || true
-    omniwm_fail "rebuild or recopy Ghostty so libghostty.a includes both arm64 and x86_64 before building OmniWM"
+    omniwm_fail "rebuild or recopy Ghostty so the pinned macOS archive includes both arm64 and x86_64 before building OmniWM"
   fi
 
   OMNIWM_ACTUAL_GHOSTTY_ARCHIVE_SHA256=$(omniwm_actual_ghostty_archive_sha256)

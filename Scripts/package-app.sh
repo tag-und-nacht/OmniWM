@@ -9,10 +9,23 @@ omniwm_load_build_metadata "$ROOT_DIR"
 
 CONFIG="${1:-release}"
 SIGN_AND_NOTARIZE="${2:-true}"
+ARCHS="${3:-universal}"
 "$ROOT_DIR/Scripts/build-preflight.sh" package "$CONFIG"
+case "$ARCHS" in
+  universal|arm64|x86_64)
+    ;;
+  *)
+    echo "error: unsupported architecture set: $ARCHS (use universal, arm64, or x86_64)" >&2
+    exit 1
+    ;;
+esac
 
 CONFIG_CAPITALIZED="$(tr '[:lower:]' '[:upper:]' <<< "${CONFIG:0:1}")${CONFIG:1}"
-BUILD_DIR="$ROOT_DIR/.build/apple/Products/$CONFIG_CAPITALIZED"
+if [ "$ARCHS" = "universal" ]; then
+  BUILD_DIR="$ROOT_DIR/.build/apple/Products/$CONFIG_CAPITALIZED"
+else
+  BUILD_DIR="$ROOT_DIR/.build/apple/Products/$CONFIG_CAPITALIZED-$ARCHS"
+fi
 EXECUTABLE="$BUILD_DIR/OmniWM"
 CLI_EXECUTABLE="$BUILD_DIR/omniwmctl"
 APP_DIR="$ROOT_DIR/dist/OmniWM.app"
@@ -22,10 +35,10 @@ SIGNING_IDENTITY="Developer ID Application: Oliver Nikolic (VF8LDJRGFM)"
 NOTARIZE_PROFILE="OmniWM-Notarize"
 ENTITLEMENTS="$ROOT_DIR/OmniWM.entitlements"
 
-echo "Building OmniWM universal binary ($CONFIG)..."
-"$ROOT_DIR/Scripts/build-universal-products.sh" "$CONFIG"
+echo "Building OmniWM products ($CONFIG, $ARCHS)..."
+"$ROOT_DIR/Scripts/build-universal-products.sh" "$CONFIG" "$ARCHS"
 
-echo "Verifying universal binary..."
+echo "Verifying binaries..."
 lipo -info "$EXECUTABLE"
 lipo -info "$CLI_EXECUTABLE"
 
