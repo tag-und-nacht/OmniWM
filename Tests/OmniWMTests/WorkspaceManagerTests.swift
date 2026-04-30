@@ -16,7 +16,8 @@ private func makeWorkspaceManagerTestMonitor(
     x: CGFloat,
     y: CGFloat,
     width: CGFloat = 1920,
-    height: CGFloat = 1080
+    height: CGFloat = 1080,
+    displayUUID: String? = nil
 ) -> Monitor {
     let frame = CGRect(x: x, y: y, width: width, height: height)
     return Monitor(
@@ -25,7 +26,8 @@ private func makeWorkspaceManagerTestMonitor(
         frame: frame,
         visibleFrame: frame,
         hasNotch: false,
-        name: name
+        name: name,
+        displayUUID: displayUUID
     )
 }
 
@@ -932,17 +934,25 @@ struct WorkspaceManagerTests {
         #expect(manager.monitorId(for: ws2) == restoredDetached.id)
     }
 
-    @Test @MainActor func `specific display assignments are rebound before live projection`() {
+    @Test @MainActor func `specific display assignments resolve at runtime without mutating settings`() {
         let defaults = makeWorkspaceManagerTestDefaults()
         let settings = SettingsStore(defaults: defaults)
+        let stableUUID = "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
+        let originalAssignment = OutputId(displayUUID: stableUUID, displayId: 300, name: "")
         settings.workspaceConfigurations = workspaceConfigurations([
             ("1", .main),
-            ("2", .specificDisplay(OutputId(displayId: 300, name: "Detached")))
+            ("2", .specificDisplay(originalAssignment))
         ])
 
         let manager = WorkspaceManager(settings: settings)
         let main = makeWorkspaceManagerTestMonitor(displayId: 10, name: "Main", x: 0, y: 0)
-        let reboundDetached = makeWorkspaceManagerTestMonitor(displayId: 400, name: "Detached", x: 1920, y: 0)
+        let reboundDetached = makeWorkspaceManagerTestMonitor(
+            displayId: 400,
+            name: "",
+            x: 1920,
+            y: 0,
+            displayUUID: stableUUID
+        )
 
         manager.applyMonitorConfigurationChange([main, reboundDetached])
 
@@ -953,7 +963,7 @@ struct WorkspaceManagerTests {
 
         #expect(
             settings.workspaceConfigurations[1].monitorAssignment
-                == .specificDisplay(OutputId(displayId: reboundDetached.displayId, name: reboundDetached.name))
+                == .specificDisplay(originalAssignment)
         )
         #expect(manager.monitorId(for: ws2) == reboundDetached.id)
     }

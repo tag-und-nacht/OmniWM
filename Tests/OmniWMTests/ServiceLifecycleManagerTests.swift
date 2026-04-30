@@ -603,7 +603,7 @@ private func waitUntilServiceLifecycleTest(
         )
 
         #expect(controller.isMouseWarpPolicyEnabled)
-        #expect(settings.mouseWarpMonitorOrder == [OutputId(from: left), OutputId(from: right)])
+        #expect(settings.mouseWarpMonitorOrder == [])
         #expect(settings.effectiveMouseWarpMonitorOrder(for: [left, right]) == [left.id, right.id])
 
         lifecycleManager.applyMonitorConfigurationChanged(
@@ -612,7 +612,7 @@ private func waitUntilServiceLifecycleTest(
         )
 
         #expect(!controller.isMouseWarpPolicyEnabled)
-        #expect(settings.mouseWarpMonitorOrder == [OutputId(from: left), OutputId(from: right)])
+        #expect(settings.mouseWarpMonitorOrder == [])
         #expect(settings.effectiveMouseWarpMonitorOrder(for: [left]) == [left.id])
 
         lifecycleManager.applyMonitorConfigurationChanged(
@@ -621,7 +621,7 @@ private func waitUntilServiceLifecycleTest(
         )
 
         #expect(controller.isMouseWarpPolicyEnabled)
-        #expect(settings.mouseWarpMonitorOrder == [OutputId(from: left), OutputId(from: right)])
+        #expect(settings.mouseWarpMonitorOrder == [])
         #expect(settings.effectiveMouseWarpMonitorOrder(for: [left, right]) == [left.id, right.id])
     }
 }

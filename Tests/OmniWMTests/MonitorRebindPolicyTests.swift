@@ -12,7 +12,8 @@ import Testing
         name: String,
         x: CGFloat = 0,
         width: CGFloat = 1920,
-        height: CGFloat = 1080
+        height: CGFloat = 1080,
+        displayUUID: String? = nil
     ) -> Monitor {
         let frame = CGRect(x: x, y: 0, width: width, height: height)
         return Monitor(
@@ -21,7 +22,8 @@ import Testing
             frame: frame,
             visibleFrame: frame,
             hasNotch: false,
-            name: name
+            name: name,
+            displayUUID: displayUUID
         )
     }
 
@@ -87,6 +89,22 @@ import Testing
             newMonitors: monitors,
             workspaces: workspaces,
             snapshots: snapshots
+        )
+
+        #expect(decision.reboundOutputs == [OutputId(from: monitors[0])])
+        #expect(decision.unresolvedOutputs.isEmpty)
+        #expect(decision.claimedMonitorIds == [monitors[0].id])
+    }
+
+    @Test func decideHandlesDisplayUUIDAfterDisplayIdAndNameChange() {
+        let uuid = "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
+        let prev = [OutputId(displayUUID: uuid, displayId: 1, name: "")]
+        let monitors = [Self.makeMonitor(displayId: 42, name: "DELL U2723QE", displayUUID: uuid)]
+        let decision = MonitorRebindPolicy.decide(
+            previousOutputs: prev,
+            newMonitors: monitors,
+            workspaces: [],
+            snapshots: []
         )
 
         #expect(decision.reboundOutputs == [OutputId(from: monitors[0])])

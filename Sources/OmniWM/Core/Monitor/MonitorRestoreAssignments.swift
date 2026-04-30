@@ -10,12 +10,14 @@ private let restoreAssignmentsLog = Logger(
 )
 
 struct MonitorRestoreKey: Hashable {
+    let displayUUID: String?
     let displayId: CGDirectDisplayID
     let name: String
     let anchorPoint: CGPoint
     let frameSize: CGSize
 
     init(monitor: Monitor) {
+        displayUUID = monitor.displayUUID
         displayId = monitor.displayId
         name = monitor.name
         anchorPoint = monitor.workspaceAnchorPoint

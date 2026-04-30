@@ -1199,13 +1199,7 @@ final class SettingsStore {
             storedOrder,
             in: sortedMonitors
         )
-        var reboundOrder = resolution.reboundOutputs
-
-        for monitor in sortedMonitors where !resolution.claimedMonitorIds.contains(monitor.id) {
-            reboundOrder.append(OutputId(from: monitor))
-        }
-
-        return reboundOrder
+        return resolution.reboundOutputs
     }
 
 }

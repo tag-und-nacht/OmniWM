@@ -480,6 +480,7 @@ private struct MonitorNiriSettingsSection: View {
     private var monitorSettings: MonitorNiriSettings {
         settings.niriSettings(for: monitor) ?? MonitorNiriSettings(
             monitorName: monitor.name,
+            monitorDisplayUUID: monitor.displayUUID,
             monitorDisplayId: monitor.displayId
         )
     }
@@ -487,6 +488,7 @@ private struct MonitorNiriSettingsSection: View {
     private func updateSetting(_ update: (inout MonitorNiriSettings) -> Void) {
         var ms = monitorSettings
         ms.monitorName = monitor.name
+        ms.monitorDisplayUUID = monitor.displayUUID
         ms.monitorDisplayId = monitor.displayId
         update(&ms)
         settings.updateNiriSettings(ms)

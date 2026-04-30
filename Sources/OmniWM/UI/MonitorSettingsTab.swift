@@ -398,6 +398,7 @@ private struct SelectedMonitorDetails: View {
     private func updateOrientation(_ orientation: Monitor.Orientation?) {
         let newSettings = MonitorOrientationSettings(
             monitorName: monitor.name,
+            monitorDisplayUUID: monitor.displayUUID,
             monitorDisplayId: monitor.displayId,
             orientation: orientation
         )

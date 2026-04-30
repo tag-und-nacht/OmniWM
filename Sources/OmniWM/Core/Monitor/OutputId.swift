@@ -3,6 +3,8 @@ import CoreGraphics
 import Foundation
 
 struct OutputId: Hashable, Codable {
+    private static let noRuntimeDisplayId: CGDirectDisplayID = 0
+
     struct OrderedResolution {
         let reboundOutputs: [OutputId]
         let resolvedMonitorIds: [Monitor.ID]
@@ -10,39 +12,74 @@ struct OutputId: Hashable, Codable {
         let resolvedSlotIndices: Set<Int>
     }
 
-    let displayId: CGDirectDisplayID
+    let displayUUID: String?
 
+    let displayId: CGDirectDisplayID
     let name: String
 
-    init(displayId: CGDirectDisplayID, name: String) {
+    var runtimeDisplayId: CGDirectDisplayID? {
+        displayId == Self.noRuntimeDisplayId ? nil : displayId
+    }
+
+    init(displayUUID: String? = nil, displayId: CGDirectDisplayID = noRuntimeDisplayId, name: String) {
+        self.displayUUID = Self.canonicalDisplayUUID(displayUUID)
         self.displayId = displayId
         self.name = name
     }
 
     init(from monitor: Monitor) {
+        displayUUID = Self.canonicalDisplayUUID(monitor.displayUUID)
         displayId = monitor.displayId
         name = monitor.name
     }
 
     func resolveMonitor(in monitors: [Monitor]) -> Monitor? {
-        monitors.first(where: { $0.displayId == displayId })
+        resolvedMonitor(in: monitors, claimedMonitorIds: [])
     }
 
     func rebound(in monitors: [Monitor]) -> OutputId? {
-        if let exact = resolveMonitor(in: monitors) {
-            return OutputId(from: exact)
-        }
+        resolveMonitor(in: monitors).map(OutputId.init(from:))
+    }
 
-        let nameMatches = monitors.filter { $0.name.caseInsensitiveCompare(name) == .orderedSame }
-        guard nameMatches.count == 1 else { return nil }
-        return OutputId(from: nameMatches[0])
+    static func == (lhs: OutputId, rhs: OutputId) -> Bool {
+        let lhsUUID = canonicalDisplayUUID(lhs.displayUUID)
+        let rhsUUID = canonicalDisplayUUID(rhs.displayUUID)
+        if lhsUUID != nil || rhsUUID != nil {
+            return lhsUUID == rhsUUID
+        }
+        return lhs.displayId == rhs.displayId && lhs.name == rhs.name
+    }
+
+    func hash(into hasher: inout Hasher) {
+        if let uuid = Self.canonicalDisplayUUID(displayUUID) {
+            hasher.combine(uuid)
+            return
+        }
+        hasher.combine(displayId)
+        hasher.combine(name)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case displayUUID, displayId, name
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        displayUUID = Self.canonicalDisplayUUID(try container.decodeIfPresent(String.self, forKey: .displayUUID))
+        displayId = try container.decodeIfPresent(CGDirectDisplayID.self, forKey: .displayId) ?? Self.noRuntimeDisplayId
+        name = try container.decode(String.self, forKey: .name)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(Self.canonicalDisplayUUID(displayUUID), forKey: .displayUUID)
+        try container.encode(name, forKey: .name)
     }
 
     static func resolveOrderedPreservingUnresolved(
         _ outputs: [OutputId],
         in monitors: [Monitor]
     ) -> OrderedResolution {
-        let monitorsByDisplayId = Dictionary(uniqueKeysWithValues: monitors.map { ($0.displayId, $0) })
         var claimedMonitorIds: Set<Monitor.ID> = []
         var resolvedMonitorIds: [Monitor.ID] = []
         var reboundOutputs: [OutputId] = []
@@ -52,25 +89,11 @@ struct OutputId: Hashable, Codable {
         resolvedMonitorIds.reserveCapacity(outputs.count)
 
         for (index, output) in outputs.enumerated() {
-            if let exact = monitorsByDisplayId[output.displayId],
+            if let exact = output.resolvedMonitor(in: monitors, claimedMonitorIds: claimedMonitorIds),
                claimedMonitorIds.insert(exact.id).inserted
             {
                 reboundOutputs.append(OutputId(from: exact))
                 resolvedMonitorIds.append(exact.id)
-                resolvedSlotIndices.insert(index)
-                continue
-            }
-
-            let nameMatches = monitors.filter {
-                !claimedMonitorIds.contains($0.id) &&
-                    $0.name.caseInsensitiveCompare(output.name) == .orderedSame
-            }
-            if nameMatches.count == 1,
-               let fallback = nameMatches.first,
-               claimedMonitorIds.insert(fallback.id).inserted
-            {
-                reboundOutputs.append(OutputId(from: fallback))
-                resolvedMonitorIds.append(fallback.id)
                 resolvedSlotIndices.insert(index)
                 continue
             }
@@ -84,5 +107,32 @@ struct OutputId: Hashable, Codable {
             claimedMonitorIds: claimedMonitorIds,
             resolvedSlotIndices: resolvedSlotIndices
         )
+    }
+
+    private func resolvedMonitor(
+        in monitors: [Monitor],
+        claimedMonitorIds: Set<Monitor.ID>
+    ) -> Monitor? {
+        let candidates = monitors.filter { !claimedMonitorIds.contains($0.id) }
+        if let uuid = Self.canonicalDisplayUUID(displayUUID),
+           let exact = candidates.first(where: { Self.canonicalDisplayUUID($0.displayUUID) == uuid }) {
+            return exact
+        }
+        if displayId != Self.noRuntimeDisplayId, let exact = candidates.first(where: { $0.displayId == displayId }) {
+            return exact
+        }
+        guard !name.isEmpty else { return nil }
+        let nameMatches = candidates.filter {
+            $0.name.caseInsensitiveCompare(name) == .orderedSame
+        }
+        guard nameMatches.count == 1 else { return nil }
+        return nameMatches[0]
+    }
+
+    private static func canonicalDisplayUUID(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty
+        else { return nil }
+        return trimmed.uppercased()
     }
 }

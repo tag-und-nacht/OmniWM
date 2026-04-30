@@ -280,7 +280,6 @@ final class WorkspaceManager {
         )
         cachedTopologyProfile = TopologyProfile(monitors: initialMonitors)
         restoreState = RestoreState(settings: settings)
-        settings.rebindMonitorReferences(to: monitors)
         rebuildMonitorIndexes()
         synchronizeConfiguredWorkspaces()
         reconcileInteractionMonitorState(notify: false)
@@ -468,7 +467,6 @@ final class WorkspaceManager {
             "monitor_rebind_decision workspaces=\(workspaceList.count) topology_nodes=\(topologyTransition.topology.order.count) monitors_prev=\(previousOutputs.count) claimed=\(rebindDecision.claimedMonitorIds.count) unresolved=\(rebindDecision.unresolvedOutputs.count) assigned=\(rebindDecision.workspaceMonitorAssignments.count)"
         )
 
-        settings.rebindMonitorReferences(to: normalizedMonitors)
         let topologyPlan: TopologyTransitionPlan? = if Self.forceTopologyReconcileFailureForTests {
             nil
         } else {
@@ -5196,7 +5194,11 @@ private extension WorkspaceManager {
             var rawWorkspaces = ContiguousArray<omniwm_workspace_session_workspace>()
             rawWorkspaces.reserveCapacity(sortedWorkspaces.count)
             for workspace in sortedWorkspaces {
-                let assignment = assignmentSnapshot(manager: manager, workspace: workspace)
+                let assignment = assignmentSnapshot(
+                    manager: manager,
+                    workspace: workspace,
+                    monitors: monitors
+                )
                 let assignmentName = stringTable.append(assignment.specificDisplayName)
                 let assignedAnchorPoint = workspace.assignedMonitorPoint
                     ?? manager.monitorIdShowingWorkspace(workspace.id)
@@ -5612,7 +5614,8 @@ private extension WorkspaceManager {
 
         private static func assignmentSnapshot(
             manager: WorkspaceManager,
-            workspace: WorkspaceDescriptor
+            workspace: WorkspaceDescriptor,
+            monitors: [Monitor]
         ) -> AssignmentSnapshot {
             guard let config = manager.settings.workspaceConfigurations.first(where: { $0.name == workspace.name })
             else {
@@ -5625,10 +5628,11 @@ private extension WorkspaceManager {
             case .secondary:
                 return AssignmentSnapshot(rawAssignmentKind: UInt32(OMNIWM_WORKSPACE_SESSION_ASSIGNMENT_SECONDARY))
             case let .specificDisplay(output):
+                let liveOutput = output.rebound(in: Monitor.sortedByPosition(monitors)) ?? output
                 return AssignmentSnapshot(
                     rawAssignmentKind: UInt32(OMNIWM_WORKSPACE_SESSION_ASSIGNMENT_SPECIFIC_DISPLAY),
-                    specificDisplayId: output.displayId,
-                    specificDisplayName: output.name
+                    specificDisplayId: liveOutput.runtimeDisplayId,
+                    specificDisplayName: liveOutput.name
                 )
             }
         }

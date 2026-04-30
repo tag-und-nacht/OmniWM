@@ -19,7 +19,8 @@ private func makeSettingsTestMonitor(
     x: CGFloat = 0,
     y: CGFloat = 0,
     width: CGFloat = 1920,
-    height: CGFloat = 1080
+    height: CGFloat = 1080,
+    displayUUID: String? = nil
 ) -> Monitor {
     let frame = CGRect(x: x, y: y, width: width, height: height)
     return Monitor(
@@ -28,7 +29,8 @@ private func makeSettingsTestMonitor(
         frame: frame,
         visibleFrame: frame,
         hasNotch: false,
-        name: name
+        name: name,
+        displayUUID: displayUUID
     )
 }
 
@@ -143,6 +145,29 @@ private func atomicallyReplaceSettingsDataForTests(
         #expect(settings[1].maxVisibleColumns == 4)
     }
 
+    @Test func updateDoesNotReplaceDifferentDisplayUUIDWithSameName() {
+        var settings = [
+            MonitorNiriSettings(
+                monitorName: "Studio Display",
+                monitorDisplayUUID: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
+                maxVisibleColumns: 2
+            )
+        ]
+        let updated = MonitorNiriSettings(
+            monitorName: "Studio Display",
+            monitorDisplayUUID: "11111111-2222-3333-4444-555555555555",
+            maxVisibleColumns: 5
+        )
+
+        MonitorSettingsStore.update(updated, in: &settings)
+
+        #expect(settings.count == 2)
+        #expect(settings[0].monitorDisplayUUID == "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")
+        #expect(settings[0].maxVisibleColumns == 2)
+        #expect(settings[1].monitorDisplayUUID == "11111111-2222-3333-4444-555555555555")
+        #expect(settings[1].maxVisibleColumns == 5)
+    }
+
     @Test func removeDeletesAllMatches() {
         var settings = [
             MonitorNiriSettings(monitorName: "A"),
@@ -154,6 +179,26 @@ private func atomicallyReplaceSettingsDataForTests(
         #expect(settings[0].monitorName == "B")
     }
 
+    @Test func removeDoesNotDeleteDifferentDisplayUUIDWithSameName() {
+        var settings = [
+            MonitorNiriSettings(
+                monitorName: "Studio Display",
+                monitorDisplayUUID: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
+                maxVisibleColumns: 2
+            )
+        ]
+        let monitor = makeSettingsTestMonitor(
+            displayId: 42,
+            name: "Studio Display",
+            displayUUID: "11111111-2222-3333-4444-555555555555"
+        )
+
+        MonitorSettingsStore.remove(for: monitor, from: &settings)
+
+        #expect(settings.count == 1)
+        #expect(settings[0].monitorDisplayUUID == "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")
+    }
+
     @Test func monitorLookupPrefersDisplayIdOverNameFallback() {
         let monitor = makeSettingsTestMonitor(displayId: 42, name: "Studio Display")
         let settings = [
@@ -163,6 +208,42 @@ private func atomicallyReplaceSettingsDataForTests(
 
         let result = MonitorSettingsStore.get(for: monitor, in: settings)
         #expect(result?.maxVisibleColumns == 3)
+    }
+
+    @Test func monitorLookupDoesNotFallbackToDifferentDisplayUUIDWithSameName() {
+        let monitor = makeSettingsTestMonitor(
+            displayId: 99,
+            name: "Studio Display",
+            displayUUID: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
+        )
+        let settings = [
+            MonitorNiriSettings(
+                monitorName: "Studio Display",
+                monitorDisplayUUID: "11111111-2222-3333-4444-555555555555",
+                maxVisibleColumns: 2
+            )
+        ]
+
+        let result = MonitorSettingsStore.get(for: monitor, in: settings)
+        #expect(result == nil)
+    }
+
+    @Test func monitorLookupPrefersDisplayUUIDAcrossReconnect() {
+        let monitor = makeSettingsTestMonitor(
+            displayId: 99,
+            name: "",
+            displayUUID: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
+        )
+        let settings = [
+            MonitorBarSettings(
+                monitorName: "",
+                monitorDisplayUUID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                enabled: false
+            )
+        ]
+
+        let result = MonitorSettingsStore.get(for: monitor, in: settings)
+        #expect(result?.enabled == false)
     }
 
 }
@@ -223,7 +304,11 @@ private func atomicallyReplaceSettingsDataForTests(
     @Test func settingsChangesRoundTripThroughCanonicalSettingsFile() {
         let defaults = makeTestDefaults()
         let settings = SettingsStore(defaults: defaults)
-        let output = OutputId(displayId: 777, name: "Studio Display")
+        let output = OutputId(
+            displayUUID: "77777777-7777-7777-7777-777777777777",
+            displayId: 777,
+            name: "Studio Display"
+        )
 
         settings.focusFollowsWindowToMonitor = true
         settings.mouseWarpAxis = .vertical
@@ -367,16 +452,51 @@ private func atomicallyReplaceSettingsDataForTests(
         #expect(settings.effectiveMouseWarpMonitorOrder(for: [left, right]) == [right.id, left.id])
     }
 
-    @Test func rebindMonitorReferencesUpdatesMouseWarpMonitorOrderToReplacementOutputIdentity() {
+    @Test func rebindMonitorReferencesPreservesPersistedMouseWarpIdentityAcrossReconnect() {
         let defaults = makeTestDefaults()
         let settings = SettingsStore(defaults: defaults)
-        let original = OutputId(displayId: 10, name: "Studio Display")
-        let replacement = makeSettingsTestMonitor(displayId: 20, name: "Studio Display", x: 0)
+        let stableUUID = "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
+        let original = OutputId(displayUUID: stableUUID, displayId: 10, name: "Studio Display")
+        let replacement = makeSettingsTestMonitor(
+            displayId: 20,
+            name: "Studio Display",
+            x: 0,
+            displayUUID: stableUUID
+        )
 
         settings.mouseWarpMonitorOrder = [original]
         settings.rebindMonitorReferences(to: [replacement])
 
-        #expect(settings.mouseWarpMonitorOrder == [OutputId(from: replacement)])
+        #expect(settings.mouseWarpMonitorOrder == [original])
+        #expect(settings.effectiveMouseWarpMonitorOrder(for: [replacement]) == [replacement.id])
+    }
+
+    @Test func outputIdEqualityIgnoresRuntimeDisplayIdWhenDisplayUUIDIsStable() {
+        let first = OutputId(displayUUID: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE", displayId: 13, name: "")
+        let second = OutputId(displayUUID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", displayId: 14, name: "DELL U2723QE")
+
+        #expect(first == second)
+        #expect(Set([first, second]).count == 1)
+    }
+
+    @Test func topologyReconnectDoesNotMutateMouseWarpMonitorOrderOrSettingsFile() throws {
+        let defaults = makeTestDefaults()
+        let settings = SettingsStore(defaults: defaults)
+        let stableUUID = "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
+        let original = OutputId(displayUUID: stableUUID, displayId: 13, name: "")
+        settings.mouseWarpMonitorOrder = [original]
+        settings.flushNow()
+        let before = try String(contentsOf: settings.settingsFileURL, encoding: .utf8)
+
+        let manager = WorkspaceManager(settings: settings)
+        let reconnected = makeSettingsTestMonitor(displayId: 14, name: "", displayUUID: stableUUID)
+        manager.applyMonitorConfigurationChange([reconnected])
+        settings.flushNow()
+        let after = try String(contentsOf: settings.settingsFileURL, encoding: .utf8)
+
+        #expect(settings.mouseWarpMonitorOrder == [original])
+        #expect(settings.effectiveMouseWarpMonitorOrder(for: [reconnected]) == [reconnected.id])
+        #expect(after == before)
     }
 
     @Test func rebindMonitorReferencesDoesNotCollapseDuplicateNamedOutputsOntoOneMonitor() {

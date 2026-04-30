@@ -11,7 +11,8 @@ private func makeMonitorDescriptionTestMonitor(
     x: CGFloat,
     y: CGFloat,
     width: CGFloat = 1920,
-    height: CGFloat = 1080
+    height: CGFloat = 1080,
+    displayUUID: String? = nil
 ) -> Monitor {
     let frame = CGRect(x: x, y: y, width: width, height: height)
     return Monitor(
@@ -20,7 +21,8 @@ private func makeMonitorDescriptionTestMonitor(
         frame: frame,
         visibleFrame: frame,
         hasNotch: false,
-        name: name
+        name: name,
+        displayUUID: displayUUID
     )
 }
 
@@ -60,13 +62,34 @@ private func makeMonitorDescriptionTestMonitor(
         #expect(resolved?.id == second.id)
     }
 
-    @Test func outputRequiresExactDisplayId() {
+    @Test func outputFallsBackToUniqueNonEmptyDisplayName() {
         let mainMonitor = makeMonitorDescriptionTestMonitor(displayId: 100, name: "Studio Display", x: 0, y: 0)
         let sorted = Monitor.sortedByPosition([mainMonitor])
 
         let resolved = MonitorDescription.output(OutputId(displayId: 999, name: "Studio Display"))
             .resolveMonitor(sortedMonitors: sorted)
 
-        #expect(resolved == nil)
+        #expect(resolved == mainMonitor)
+    }
+
+    @Test func outputResolvesByStableDisplayUUIDAcrossDisplayIdChange() {
+        let monitor = makeMonitorDescriptionTestMonitor(
+            displayId: 101,
+            name: "",
+            x: 0,
+            y: 0,
+            displayUUID: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
+        )
+        let sorted = Monitor.sortedByPosition([monitor])
+
+        let resolved = MonitorDescription.output(
+            OutputId(
+                displayUUID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                displayId: 999,
+                name: ""
+            )
+        ).resolveMonitor(sortedMonitors: sorted)
+
+        #expect(resolved == monitor)
     }
 }

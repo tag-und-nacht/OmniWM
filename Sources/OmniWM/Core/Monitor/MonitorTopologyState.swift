@@ -649,7 +649,7 @@ extension MonitorTopologyState {
         var cache: [MonitorRestoreKey: WorkspaceDescriptor.ID] = [:]
 
         for (key, workspaceId) in existingCache {
-            let output = OutputId(displayId: key.displayId, name: key.name)
+            let output = OutputId(displayUUID: key.displayUUID, displayId: key.displayId, name: key.name)
             if unresolved.contains(output) {
                 cache[key] = workspaceId
             }
