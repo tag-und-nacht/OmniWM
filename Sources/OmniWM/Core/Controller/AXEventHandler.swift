@@ -2116,7 +2116,7 @@ final class AXEventHandler: CGSEventDelegate {
     }
 
     private func shouldDelayManagedReplacementCreate(_ candidate: PreparedCreate) -> Bool {
-        guard let _ = managedReplacementCorrelationPolicy(for: candidate.replacementMetadata) else {
+        guard managedReplacementCorrelationPolicy(for: candidate.replacementMetadata) != nil else {
             return false
         }
 
