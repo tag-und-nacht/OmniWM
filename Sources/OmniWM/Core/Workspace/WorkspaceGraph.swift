@@ -656,7 +656,9 @@ struct WorkspaceGraphStateSnapshot: Equatable {
 }
 
 extension WorkspaceGraph {
-    func preservedShape(equals other: WorkspaceGraph) -> Bool {
+    /// Checks the graph fields that must survive a workspace layout switch.
+    /// Layout type, workspace order, and member ordering are intentionally ignored.
+    func preservesLayoutSwitchInvariants(equals other: WorkspaceGraph) -> Bool {
         guard Set(workspaceOrder) == Set(other.workspaceOrder) else {
             return false
         }

@@ -48,7 +48,7 @@ import Testing
     }
 
     @MainActor
-    private func toggle(
+    private func setLayout(
         _ fixture: Fixture,
         workspaceName: String,
         to layout: LayoutType
@@ -68,7 +68,7 @@ import Testing
         fixture.settings.layoutType(for: name)
     }
 
-    @Test @MainActor func togglingLayoutPreservesTiledLogicalIdSet() {
+    @Test @MainActor func settingLayoutPreservesTiledLogicalIdSet() {
         let f = makeFixture()
         let token1 = addLayoutPlanTestWindow(on: f.controller, workspaceId: f.workspaceA, windowId: 9001)
         let token2 = addLayoutPlanTestWindow(on: f.controller, workspaceId: f.workspaceA, windowId: 9002)
@@ -78,7 +78,7 @@ import Testing
         #expect(!preTiled.isEmpty)
 
         let target: LayoutType = currentLayout(f, named: f.workspaceAName) == .dwindle ? .niri : .dwindle
-        toggle(f, workspaceName: f.workspaceAName, to: target)
+        setLayout(f, workspaceName: f.workspaceAName, to: target)
 
         let post = f.workspaceManager.workspaceGraphSnapshot()
         let postTiled = Set(post.node(for: f.workspaceA)?.tiledOrder ?? [])
@@ -89,7 +89,7 @@ import Testing
         }
     }
 
-    @Test @MainActor func togglingLayoutPreservesFloatingLogicalIdSet() {
+    @Test @MainActor func settingLayoutPreservesFloatingLogicalIdSet() {
         let f = makeFixture()
         _ = f.workspaceManager.addWindow(
             AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: 9010),
@@ -107,14 +107,14 @@ import Testing
         #expect(preTiled.count == 1)
 
         let target: LayoutType = currentLayout(f, named: f.workspaceAName) == .dwindle ? .niri : .dwindle
-        toggle(f, workspaceName: f.workspaceAName, to: target)
+        setLayout(f, workspaceName: f.workspaceAName, to: target)
 
         let post = f.workspaceManager.workspaceGraphSnapshot()
         #expect(Set(post.node(for: f.workspaceA)?.floating ?? []) == preFloating)
         #expect(Set(post.node(for: f.workspaceA)?.tiledOrder ?? []) == preTiled)
     }
 
-    @Test @MainActor func togglingLayoutPreservesFocusProjection() {
+    @Test @MainActor func settingLayoutPreservesFocusProjection() {
         let f = makeFixture()
         let focused = addLayoutPlanTestWindow(on: f.controller, workspaceId: f.workspaceA, windowId: 9020)
         _ = f.workspaceManager.setManagedFocus(
@@ -129,14 +129,14 @@ import Testing
         #expect(preFocused != nil)
 
         let target: LayoutType = currentLayout(f, named: f.workspaceAName) == .dwindle ? .niri : .dwindle
-        toggle(f, workspaceName: f.workspaceAName, to: target)
+        setLayout(f, workspaceName: f.workspaceAName, to: target)
 
         let post = f.workspaceManager.workspaceGraphSnapshot()
         #expect(post.node(for: f.workspaceA)?.focusedLogicalId == preFocused)
         #expect(post.node(for: f.workspaceA)?.lastTiledFocusedLogicalId == preLastTiled)
     }
 
-    @Test @MainActor func togglingLayoutPreservesMonitorAssignment() {
+    @Test @MainActor func settingLayoutPreservesMonitorAssignment() {
         let f = makeFixture()
         _ = addLayoutPlanTestWindow(on: f.controller, workspaceId: f.workspaceA, windowId: 9030)
 
@@ -147,14 +147,14 @@ import Testing
         #expect(preAssignmentB == f.secondary.id)
 
         let target: LayoutType = currentLayout(f, named: f.workspaceAName) == .dwindle ? .niri : .dwindle
-        toggle(f, workspaceName: f.workspaceAName, to: target)
+        setLayout(f, workspaceName: f.workspaceAName, to: target)
 
         let post = f.workspaceManager.workspaceGraphSnapshot()
         #expect(post.node(for: f.workspaceA)?.monitorId == preAssignmentA)
         #expect(post.node(for: f.workspaceB)?.monitorId == preAssignmentB)
     }
 
-    @Test @MainActor func togglingLayoutPreservesNiriViewportStateOnRoundTrip() {
+    @Test @MainActor func settingLayoutPreservesNiriViewportStateOnRoundTrip() {
         let f = makeFixture()
         _ = addLayoutPlanTestWindow(on: f.controller, workspaceId: f.workspaceA, windowId: 9040)
         let mutatedNodeId = NodeId()
@@ -164,11 +164,54 @@ import Testing
         let preState = f.workspaceManager.niriViewportState(for: f.workspaceA)
         #expect(preState.selectedNodeId == mutatedNodeId)
 
-        toggle(f, workspaceName: f.workspaceAName, to: .dwindle)
-        toggle(f, workspaceName: f.workspaceAName, to: .niri)
+        setLayout(f, workspaceName: f.workspaceAName, to: .dwindle)
+        setLayout(f, workspaceName: f.workspaceAName, to: .niri)
 
         let postState = f.workspaceManager.niriViewportState(for: f.workspaceA)
         #expect(postState.selectedNodeId == mutatedNodeId)
+    }
+
+    @Test @MainActor func runtimeToggleLayoutPreservesGraphStateAcrossRoundTrip() {
+        let f = makeFixture()
+        guard let runtime = f.controller.runtime else {
+            Issue.record("Expected runtime for layout switch fixture")
+            return
+        }
+        setLayout(f, workspaceName: f.workspaceAName, to: .niri)
+        let focused = addLayoutPlanTestWindow(on: f.controller, workspaceId: f.workspaceA, windowId: 9050)
+        _ = addLayoutPlanTestWindow(on: f.controller, workspaceId: f.workspaceA, windowId: 9051)
+        _ = f.workspaceManager.addWindow(
+            AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: 9052),
+            pid: getpid(),
+            windowId: 9052,
+            to: f.workspaceA,
+            mode: .floating
+        )
+        _ = f.workspaceManager.setManagedFocus(
+            focused,
+            in: f.workspaceA,
+            onMonitor: f.primary.id
+        )
+        let selectedNodeId = NodeId()
+        f.workspaceManager.withNiriViewportState(for: f.workspaceA) { state in
+            state.selectedNodeId = selectedNodeId
+        }
+
+        let preGraph = f.workspaceManager.workspaceGraphSnapshot()
+        let preViewportState = f.workspaceManager.niriViewportState(for: f.workspaceA)
+        #expect(currentLayout(f, named: f.workspaceAName) == .niri)
+
+        #expect(runtime.dispatchHotkey(.toggleWorkspaceLayout) == .executed)
+        let dwindleGraph = f.workspaceManager.workspaceGraphSnapshot()
+        #expect(currentLayout(f, named: f.workspaceAName) == .dwindle)
+        #expect(preGraph.preservesLayoutSwitchInvariants(equals: dwindleGraph))
+
+        #expect(runtime.dispatchHotkey(.toggleWorkspaceLayout) == .executed)
+        let postGraph = f.workspaceManager.workspaceGraphSnapshot()
+        let postViewportState = f.workspaceManager.niriViewportState(for: f.workspaceA)
+        #expect(currentLayout(f, named: f.workspaceAName) == .niri)
+        #expect(preGraph.preservesLayoutSwitchInvariants(equals: postGraph))
+        #expect(postViewportState.selectedNodeId == preViewportState.selectedNodeId)
     }
 }
 

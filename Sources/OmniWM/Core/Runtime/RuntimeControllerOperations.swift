@@ -656,7 +656,7 @@ final class RuntimeControllerOperations {
         _ = runtime.applyWorkspaceSettings(source: source)
 
         let postGraph = controller.workspaceManager.workspaceGraphSnapshot()
-        if !preGraph.preservedShape(equals: postGraph) {
+        if !preGraph.preservesLayoutSwitchInvariants(equals: postGraph) {
             runtimeLayoutSwitchAuditLog.warning(
                 "layout_switch_graph_drift workspace=\(resolvedWorkspaceName, privacy: .public) old=\(oldLayout.rawValue, privacy: .public) new=\(newLayout.rawValue, privacy: .public)"
             )
