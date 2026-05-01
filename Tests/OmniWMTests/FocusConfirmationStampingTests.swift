@@ -92,23 +92,31 @@ import Testing
         )
     }
 
-    @Test @MainActor func stampedConfirmationPastRunnerWatermarkIsRejected() {
+    @Test @MainActor func stampedConfirmationPastRunnerWatermarkIsAcceptedWhenRequestStillMatches() {
         let platform = RecordingEffectPlatform()
         let runtime = makeTransactionTestRuntime(platform: platform)
         let workspaceId = runtime.controller.workspaceManager.workspaceId(
             for: "1",
             createIfMissing: false
         )!
-        let token = WindowToken(pid: 4242, windowId: 9001)
-        let stampEpoch = runtime.submit(
-            command: .workspaceSwitch(.explicit(rawWorkspaceID: "1"))
-        ).transactionEpoch
-        _ = runtime.submit(
-            command: .workspaceSwitch(.explicit(rawWorkspaceID: "2"))
+        let token = runtime.admitWindow(
+            makeLayoutPlanTestWindow(windowId: 90_010),
+            pid: getpid(),
+            windowId: 90_010,
+            to: workspaceId,
+            source: .ax
         )
+        _ = runtime.requestManagedFocus(token: token, workspaceId: workspaceId, source: .command)
+        guard let stampEpoch = runtime.controller.focusBridge.originTransactionEpoch(
+            forToken: token
+        ) else {
+            Issue.record("expected runtime-routed focus request to stamp origin epoch")
+            return
+        }
+        _ = runtime.submit(.activeSpaceChanged(source: .workspaceManager))
+        #expect(runtime.currentEffectRunnerWatermark > stampEpoch)
 
-        let beforeSnapshot = runtime.controller.workspaceManager.reconcileSnapshot()
-        _ = runtime.submit(
+        let txn = runtime.submit(
             .managedFocusConfirmed(
                 token: token,
                 workspaceId: workspaceId,
@@ -118,8 +126,9 @@ import Testing
                 originatingTransactionEpoch: stampEpoch
             )
         )
-        let afterSnapshot = runtime.controller.workspaceManager.reconcileSnapshot()
-        #expect(beforeSnapshot == afterSnapshot)
+        #expect(runtime.currentEffectRunnerWatermark == txn.transactionEpoch)
+        #expect(txn.plan.focusSession?.focusedToken == token)
+        #expect(txn.plan.focusSession?.pendingManagedFocus.token == nil)
     }
 
     @Test @MainActor func cancellingRequestAlsoCleansUpOriginEpoch() {

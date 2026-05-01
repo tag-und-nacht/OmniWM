@@ -2207,13 +2207,17 @@ private let layoutShutdownRaceLog = Logger(
                 continue
             }
 
-            let outcomeOrigin = runtime.frameWriteOutcomeOriginEpoch(source: .ax)
-            _ = runtime.recordPendingFrameWrite(
+            let pendingWrite = runtime.recordPendingFrameWrite(
                 frame: .init(rect: targetFrame, space: .appKit, isVisibleFrame: true),
-                requestId: outcomeOrigin.value,
                 for: plan.entry.token
             )
             let result = AXWindowService.setFrame(plan.entry.axRef, frame: targetFrame)
+            runtime.submitAXFrameWriteOutcome(
+                for: plan.entry.token,
+                requestId: pendingWrite.requestId,
+                axFailure: result.failureReason,
+                source: .ax
+            )
             if result.isVerifiedSuccess {
                 controller.axManager.confirmFrameWrite(
                     for: plan.entry.windowId,
@@ -2221,12 +2225,6 @@ private let layoutShutdownRaceLog = Logger(
                     frame: result.observedFrame ?? targetFrame
                 )
             }
-            runtime.submitAXFrameWriteOutcome(
-                for: plan.entry.token,
-                axFailure: result.failureReason,
-                originatingTransactionEpoch: outcomeOrigin,
-                source: .ax
-            )
         }
     }
 

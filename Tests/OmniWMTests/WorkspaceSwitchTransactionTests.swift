@@ -190,14 +190,10 @@ import Testing
         #expect(runtime.snapshot.reconcile == runtime.controller.workspaceManager.reconcileSnapshot())
     }
 
-    @Test @MainActor func staleEffectConfirmationDoesNotMutateWorkspaceActivation() {
+    @Test @MainActor func workspaceConfirmationSurvivesUnrelatedWatermarkMovement() {
         let platform = RecordingEffectPlatform()
         let runtime = makeTransactionTestRuntime(platform: platform)
         let monitorId = runtime.controller.workspaceManager.monitors.first!.id
-        let workspaceOne = runtime.controller.workspaceManager.workspaceId(
-            for: "1",
-            createIfMissing: false
-        )!
         let workspaceTwo = runtime.controller.workspaceManager.workspaceId(
             for: "2",
             createIfMissing: false
@@ -215,8 +211,73 @@ import Testing
             )
         )
 
+        #expect(changed)
+        #expect(runtime.controller.workspaceManager.activeWorkspace(on: monitorId)?.id == workspaceTwo)
+    }
+
+    @Test @MainActor func saveWorkspaceViewportSurvivesUnrelatedWatermarkMovement() {
+        let platform = RecordingEffectPlatform()
+        let runtime = makeTransactionTestRuntime(platform: platform)
+        let workspaceOne = runtime.controller.workspaceManager.workspaceId(
+            for: "1",
+            createIfMissing: false
+        )!
+
+        let transition = runtime.submit(
+            command: .workspaceSwitch(.explicit(rawWorkspaceID: "2"))
+        )
+        _ = runtime.submit(.activeSpaceChanged(source: .workspaceManager))
+        #expect(runtime.currentEffectRunnerWatermark > transition.transactionEpoch)
+
+        _ = runtime.saveWorkspaceViewport(
+            for: workspaceOne,
+            originatingTransactionEpoch: transition.transactionEpoch,
+            source: .command
+        )
+
+        #expect(
+            runtime.controller.workspaceManager.lastRecordedTransaction?.event
+                == .commandIntent(
+                    kindForLog: RuntimeMutationKind.commitWorkspaceSelection.rawValue,
+                    source: .command
+                )
+        )
+        #expect(
+            runtime.controller.workspaceManager.lastRecordedTransaction?.transactionEpoch
+                == transition.transactionEpoch
+        )
+    }
+
+    @Test @MainActor func saveWorkspaceViewportRejectsOlderSameWorkspaceTransition() {
+        let platform = RecordingEffectPlatform()
+        let runtime = makeTransactionTestRuntime(platform: platform)
+        let workspaceOne = runtime.controller.workspaceManager.workspaceId(
+            for: "1",
+            createIfMissing: false
+        )!
+
+        let olderTransition = runtime.commitWorkspaceTransition(
+            affectedWorkspaceIds: [workspaceOne],
+            postAction: .none,
+            source: .command
+        )
+        let newerTransition = runtime.commitWorkspaceTransition(
+            affectedWorkspaceIds: [workspaceOne],
+            postAction: .none,
+            source: .command
+        )
+
+        let changed = runtime.saveWorkspaceViewport(
+            for: workspaceOne,
+            originatingTransactionEpoch: olderTransition.transactionEpoch,
+            source: .command
+        )
+
         #expect(!changed)
-        #expect(runtime.controller.workspaceManager.activeWorkspace(on: monitorId)?.id == workspaceOne)
+        #expect(
+            runtime.controller.workspaceManager.lastRecordedTransaction?.transactionEpoch
+                == newerTransition.transactionEpoch
+        )
     }
 
     @Test @MainActor func invalidEffectConfirmationDoesNotMutateWorkspaceActivation() {

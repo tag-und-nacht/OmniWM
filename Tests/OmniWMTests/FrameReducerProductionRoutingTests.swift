@@ -222,4 +222,41 @@ import Testing
             ) == false
         )
     }
+
+    @Test @MainActor func runtimePendingFrameWriteRecordsTransactionAndWatermark() {
+        let platform = RecordingEffectPlatform()
+        let runtime = makeTransactionTestRuntime(platform: platform)
+        let workspaceId = runtime.controller.workspaceManager.workspaceId(
+            for: "1",
+            createIfMissing: false
+        )!
+        let token = runtime.admitWindow(
+            AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: 8108),
+            pid: getpid(),
+            windowId: 8108,
+            to: workspaceId
+        )
+
+        let baseline = runtime.currentEffectRunnerWatermark
+        let result = runtime.recordPendingFrameWrite(
+            frame: desired,
+            requestId: 8108,
+            for: token
+        )
+
+        #expect(result.changed)
+        #expect(result.requestId == 8108)
+        #expect(result.transactionEpoch > baseline)
+        #expect(runtime.currentEffectRunnerWatermark == result.transactionEpoch)
+        guard let logicalId = runtime.workspaceManager.logicalWindowRegistry
+            .lookup(token: token).liveLogicalId
+        else {
+            Issue.record("Expected logical id")
+            return
+        }
+        #expect(
+            runtime.workspaceManager.frameState(for: logicalId)?.write
+                == .pending(requestId: 8108, since: result.transactionEpoch)
+        )
+    }
 }

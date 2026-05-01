@@ -3,6 +3,12 @@ import CoreGraphics
 import Foundation
 import OSLog
 
+struct PendingFrameWriteRecordResult: Equatable {
+    let changed: Bool
+    let requestId: AXFrameRequestId
+    let transactionEpoch: TransactionEpoch
+}
+
 /// Per-domain runtime for frame state — desired / pending / observed /
 /// confirmed / restorable rectangles, plus AX write outcomes. Mirrors
 /// `FrameStateLedger` (which owns the storage on the manager side, per
@@ -42,11 +48,9 @@ final class FrameRuntime {
         workspaceManager.frameState(for: token)
     }
 
-    /// The cold-start / post-reset origin epoch used when the runner has
-    /// not yet ratcheted; mirrors `WMRuntime.frameWriteOutcomeOriginEpoch`
-    /// (which the migration pass made allocate-and-ratchet, so the value is
-    /// stable across calls until a real commit lands).
-    func outcomeOriginEpoch() -> TransactionEpoch {
+    /// The cold-start / post-reset origin epoch used for standalone observed
+    /// frame samples when no pending write exists.
+    func observedFrameOriginEpoch(source: WMEventSource = .ax) -> TransactionEpoch {
         let current = effectRunner.highestAcceptedTransactionEpoch
         guard current.isValid else {
             let allocated = kernel.allocateTransactionEpoch()
@@ -58,22 +62,42 @@ final class FrameRuntime {
 
     // MARK: Mutations (migrated from WMRuntime — ExecPlan 02 surface migration)
 
-    func frameWriteOutcomeOriginEpoch(source: WMEventSource = .ax) -> TransactionEpoch {
-        let current = effectRunner.highestAcceptedTransactionEpoch
-        guard current.isValid else {
-            // Cold start / post-reset: there is no committed epoch yet, so
-            // allocate one AND ratchet the runner immediately. Without the
-            // ratchet, a second call to this function would allocate yet
-            // another, higher epoch — leaving the first allocation behind
-            // the watermark and silently rejecting the eventual frame-write
-            // outcome confirmation (so quarantine never advances). The
-            // allocate+ratchet pair makes the function idempotent for as
-            // long as no other commit lands.
-            let allocated = kernel.allocateTransactionEpoch()
-            effectRunner.noteTransactionCommitted(allocated)
-            return allocated
+    func frameWriteOutcomeOriginEpoch(
+        for token: WindowToken,
+        requestId: AXFrameRequestId,
+        source: WMEventSource = .ax
+    ) -> TransactionEpoch {
+        if case let .pending(pendingRequestId, since) = workspaceManager.frameState(for: token)?.write,
+           pendingRequestId == requestId
+        {
+            return since
         }
-        return current
+        return .invalid
+    }
+
+    func observedFrameOriginEpoch(
+        for token: WindowToken,
+        source: WMEventSource = .ax
+    ) -> TransactionEpoch {
+        if case let .pending(_, since) = workspaceManager.frameState(for: token)?.write {
+            return since
+        }
+        return observedFrameOriginEpoch(source: source)
+    }
+
+    func observedFrameOriginEpoch(
+        for token: WindowToken,
+        requestId: AXFrameRequestId?,
+        source: WMEventSource = .ax
+    ) -> TransactionEpoch {
+        if let requestId {
+            return frameWriteOutcomeOriginEpoch(
+                for: token,
+                requestId: requestId,
+                source: source
+            )
+        }
+        return observedFrameOriginEpoch(for: token, source: source)
     }
 
     @discardableResult
@@ -92,17 +116,52 @@ final class FrameRuntime {
     }
 
     @discardableResult
+    func submitAXFrameWriteOutcome(
+        for token: WindowToken,
+        requestId: AXFrameRequestId,
+        axFailure: AXFrameWriteFailureReason?,
+        source: WMEventSource = .ax
+    ) -> Bool {
+        let originatingTransactionEpoch = frameWriteOutcomeOriginEpoch(
+            for: token,
+            requestId: requestId,
+            source: source
+        )
+        return submitAXFrameWriteOutcome(
+            for: token,
+            axFailure: axFailure,
+            originatingTransactionEpoch: originatingTransactionEpoch,
+            source: source
+        )
+    }
+
+    @discardableResult
     func recordPendingFrameWrite(
         frame: FrameState.Frame,
-        requestId: AXFrameRequestId,
-        for token: WindowToken
-    ) -> Bool {
+        requestId: AXFrameRequestId? = nil,
+        for token: WindowToken,
+        source: WMEventSource = .ax
+    ) -> PendingFrameWriteRecordResult {
         let epoch = kernel.allocateTransactionEpoch()
-        return workspaceManager.recordPendingFrameWrite(
-            frame,
-            requestId: requestId,
-            since: epoch,
-            for: token
+        let resolvedRequestId = requestId ?? epoch.value
+        let changed = mutationCoordinator.perform(
+            .pendingFrameWrite,
+            source: source,
+            recordTransaction: true,
+            transactionEpoch: epoch,
+            resultNotes: { _ in ["request_id=\(resolvedRequestId)"] }
+        ) { txn in
+            workspaceManager.recordPendingFrameWrite(
+                frame,
+                requestId: resolvedRequestId,
+                since: txn,
+                for: token
+            )
+        }
+        return .init(
+            changed: changed,
+            requestId: resolvedRequestId,
+            transactionEpoch: epoch
         )
     }
 
@@ -127,9 +186,11 @@ final class FrameRuntime {
         originatingTransactionEpoch: TransactionEpoch,
         source: WMEventSource = .ax
     ) -> Bool {
-        guard confirmationEpochIsCurrent(
+        guard frameConfirmationEpochIsCurrent(
             originatingTransactionEpoch,
             kindForLog: RuntimeMutationKind.axFrameWriteOutcomeQuarantine.rawValue,
+            token: token,
+            requiresPendingWrite: true,
             source: source
         ) else {
             return false
@@ -165,9 +226,12 @@ final class FrameRuntime {
         originatingTransactionEpoch: TransactionEpoch,
         source: WMEventSource = .ax
     ) -> Bool {
-        guard confirmationEpochIsCurrent(
+        guard frameConfirmationEpochIsCurrent(
             originatingTransactionEpoch,
             kindForLog: RuntimeMutationKind.observedFrame.rawValue,
+            token: token,
+            observedFrame: frame,
+            requiresPendingWrite: false,
             source: source
         ) else {
             return false
@@ -219,9 +283,12 @@ final class FrameRuntime {
         }
     }
 
-    private func confirmationEpochIsCurrent(
+    private func frameConfirmationEpochIsCurrent(
         _ originatingEpoch: TransactionEpoch,
         kindForLog: String,
+        token: WindowToken,
+        observedFrame: FrameState.Frame? = nil,
+        requiresPendingWrite: Bool,
         source: WMEventSource
     ) -> Bool {
         guard originatingEpoch.isValid else {
@@ -231,11 +298,46 @@ final class FrameRuntime {
             )
             return false
         }
-        guard originatingEpoch >= effectRunner.highestAcceptedTransactionEpoch else {
+        guard let state = workspaceManager.frameState(for: token) else {
+            if requiresPendingWrite {
+                mutationCoordinator.refreshSnapshotState()
+                kernel.intakeLog.debug(
+                    "frame_confirmation_rejected_no_frame_state kind=\(kindForLog, privacy: .public) source=\(source.rawValue, privacy: .public) origin_txn=\(originatingEpoch.value)"
+                )
+                return false
+            }
+            return true
+        }
+        if case let .pending(_, since) = state.write {
+            guard since == originatingEpoch else {
+                mutationCoordinator.refreshSnapshotState()
+                kernel.intakeLog.debug(
+                    "frame_confirmation_rejected_superseded_pending_write kind=\(kindForLog, privacy: .public) source=\(source.rawValue, privacy: .public) origin_txn=\(originatingEpoch.value) pending_txn=\(since.value)"
+                )
+                return false
+            }
+            if let observedFrame {
+                guard let pendingFrame = state.pending else {
+                    mutationCoordinator.refreshSnapshotState()
+                    kernel.intakeLog.debug(
+                        "frame_confirmation_rejected_missing_pending_frame kind=\(kindForLog, privacy: .public) source=\(source.rawValue, privacy: .public) origin_txn=\(originatingEpoch.value)"
+                    )
+                    return false
+                }
+                guard observedFrame.isWithinTolerance(of: pendingFrame) else {
+                    mutationCoordinator.refreshSnapshotState()
+                    kernel.intakeLog.debug(
+                        "frame_confirmation_rejected_pending_frame_mismatch kind=\(kindForLog, privacy: .public) source=\(source.rawValue, privacy: .public) origin_txn=\(originatingEpoch.value)"
+                    )
+                    return false
+                }
+            }
+            return true
+        }
+        if requiresPendingWrite {
             mutationCoordinator.refreshSnapshotState()
-            let highValue = effectRunner.highestAcceptedTransactionEpoch.value
             kernel.intakeLog.debug(
-                "frame_confirmation_rejected_superseded kind=\(kindForLog, privacy: .public) source=\(source.rawValue, privacy: .public) origin_txn=\(originatingEpoch.value) high=\(highValue)"
+                "frame_confirmation_rejected_no_pending_write kind=\(kindForLog, privacy: .public) source=\(source.rawValue, privacy: .public) origin_txn=\(originatingEpoch.value)"
             )
             return false
         }

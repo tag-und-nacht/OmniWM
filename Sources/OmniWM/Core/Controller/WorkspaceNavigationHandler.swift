@@ -97,18 +97,6 @@ final class WorkspaceNavigationHandler {
         )
     }
 
-    func clearManagedFocusAfterEmptyWorkspaceTransition(
-        source: WMEventSource = .command
-    ) {
-        guard let controller else { return }
-        guard let runtime = controller.runtime else {
-            preconditionFailure("WorkspaceNavigationHandler.clearManagedFocusAfterEmptyWorkspaceTransition requires WMRuntime to be attached")
-        }
-        _ = runtime.clearManagedFocusAfterEmptyWorkspaceTransition(
-            source: source
-        )
-    }
-
     private func commitWorkspaceTransition(
         _ plan: WorkspaceNavigationKernel.Plan,
         stopScrollAnimationOnTargetMonitor: Bool,
@@ -130,17 +118,22 @@ final class WorkspaceNavigationHandler {
                 source: source
             )
         }
-        controller.layoutRefreshController.commitWorkspaceTransition(
-            affectedWorkspaces: plan.affectedWorkspaceIds,
-            reason: .workspaceTransition
-        ) { [weak self, weak controller] in
-            guard let controller else { return }
-            if let resolvedFocusToken = plan.resolvedFocusToken {
-                controller.focusWindow(resolvedFocusToken, source: source)
-            } else if plan.focusAction == .clearManagedFocus {
-                self?.clearManagedFocusAfterEmptyWorkspaceTransition(source: source)
-            }
+        guard let runtime = controller.runtime else {
+            preconditionFailure("WorkspaceNavigationHandler.commitWorkspaceTransition requires WMRuntime to be attached")
         }
+        let postAction: WMEffect.PostWorkspaceTransitionAction
+        if let resolvedFocusToken = plan.resolvedFocusToken {
+            postAction = .focusWindow(resolvedFocusToken)
+        } else if plan.focusAction == .clearManagedFocus {
+            postAction = .clearManagedFocusAfterEmptyWorkspaceTransition
+        } else {
+            postAction = .none
+        }
+        _ = runtime.commitWorkspaceTransition(
+            affectedWorkspaceIds: plan.affectedWorkspaceIds,
+            postAction: postAction,
+            source: source
+        )
     }
 
     private func saveWorkspaces(_ workspaceIds: [WorkspaceDescriptor.ID]) {
@@ -470,12 +463,14 @@ final class WorkspaceNavigationHandler {
             )
 
             if plan.shouldCommitWorkspaceTransition {
-                controller.layoutRefreshController.commitWorkspaceTransition(
-                    affectedWorkspaces: plan.affectedWorkspaceIds,
-                    reason: .workspaceTransition
-                ) { [weak controller] in
-                    controller?.focusWindow(targetFocusToken, source: source)
+                guard let runtime = controller.runtime else {
+                    preconditionFailure("WorkspaceNavigationHandler.moveColumnToWorkspace requires WMRuntime to be attached")
                 }
+                _ = runtime.commitWorkspaceTransition(
+                    affectedWorkspaceIds: plan.affectedWorkspaceIds,
+                    postAction: .focusWindow(targetFocusToken),
+                    source: source
+                )
             }
 
         case .recoverSource:
@@ -490,14 +485,20 @@ final class WorkspaceNavigationHandler {
             }
 
             if plan.shouldCommitWorkspaceTransition {
-                controller.layoutRefreshController.commitWorkspaceTransition(
-                    affectedWorkspaces: plan.affectedWorkspaceIds,
-                    reason: .workspaceTransition
-                ) { [weak controller] in
-                    if let focusToken {
-                        controller?.focusWindow(focusToken, source: source)
-                    }
+                guard let runtime = controller.runtime else {
+                    preconditionFailure("WorkspaceNavigationHandler.moveColumnToWorkspace requires WMRuntime to be attached")
                 }
+                let postAction: WMEffect.PostWorkspaceTransitionAction
+                if let focusToken {
+                    postAction = .focusWindow(focusToken)
+                } else {
+                    postAction = .none
+                }
+                _ = runtime.commitWorkspaceTransition(
+                    affectedWorkspaceIds: plan.affectedWorkspaceIds,
+                    postAction: postAction,
+                    source: source
+                )
             }
 
         case .workspaceHandoff, .resolveTargetIfPresent, .clearManagedFocus, .none:

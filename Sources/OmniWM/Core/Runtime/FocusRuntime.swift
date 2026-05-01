@@ -9,7 +9,7 @@ import OSLog
 ///
 /// Design contract (kept narrow on purpose to avoid drift):
 ///   - The kernel is the single source of transaction epochs.
-///   - The effect runner is the single ratchet for supersession.
+///   - The effect runner is the single ratchet for transaction ordering.
 ///   - WorkspaceManager remains the storage (via `FocusStateLedger`) until
 ///     [ExecPlan 04](../../docs/exec-plans/04-workspace-graph-ownership-inversion.md)
 ///     inverts ownership; this type is its read surface today.
@@ -150,7 +150,7 @@ final class FocusRuntime {
             "source=\(source.rawValue) txn=\(epoch.value)"
         )
         let startTime = ContinuousClock.now
-        if let rejected = mutationCoordinator.rejectStaleOriginIfNeeded(
+        if let rejected = mutationCoordinator.rejectInvalidOriginIfNeeded(
             originatingTransactionEpoch,
             kind: "confirm_managed_focus",
             txn: epoch,
@@ -160,6 +160,23 @@ final class FocusRuntime {
             startTime: startTime
         ) {
             return rejected
+        }
+        if let reason = managedFocusConfirmationRejectionReason(
+            token: token,
+            workspaceId: workspaceId,
+            monitorId: monitorId,
+            originatingTransactionEpoch: originatingTransactionEpoch
+        ) {
+            return rejectScopedFocusMutation(
+                kind: "confirm_managed_focus",
+                reason: reason,
+                txn: epoch,
+                originatingTransactionEpoch: originatingTransactionEpoch,
+                source: source,
+                signpostName: "confirm_managed_focus",
+                signpostState: signpostState,
+                startTime: startTime
+            )
         }
         let changed = workspaceManager.confirmManagedFocus(
             token,
@@ -196,7 +213,7 @@ final class FocusRuntime {
             "source=\(source.rawValue) txn=\(epoch.value)"
         )
         let startTime = ContinuousClock.now
-        if let rejected = mutationCoordinator.rejectStaleOriginIfNeeded(
+        if let rejected = mutationCoordinator.rejectInvalidOriginIfNeeded(
             originatingTransactionEpoch,
             kind: "set_managed_focus",
             txn: epoch,
@@ -206,6 +223,23 @@ final class FocusRuntime {
             startTime: startTime
         ) {
             return rejected
+        }
+        if let reason = managedFocusConfirmationRejectionReason(
+            token: token,
+            workspaceId: workspaceId,
+            monitorId: monitorId,
+            originatingTransactionEpoch: originatingTransactionEpoch
+        ) {
+            return rejectScopedFocusMutation(
+                kind: "set_managed_focus",
+                reason: reason,
+                txn: epoch,
+                originatingTransactionEpoch: originatingTransactionEpoch,
+                source: source,
+                signpostName: "set_managed_focus",
+                signpostState: signpostState,
+                startTime: startTime
+            )
         }
         let changed = workspaceManager.setManagedFocus(
             token,
@@ -272,8 +306,8 @@ final class FocusRuntime {
 
     @discardableResult
     func cancelManagedFocusRequest(
-        matching token: WindowToken? = nil,
-        workspaceId: WorkspaceDescriptor.ID? = nil,
+        matching token: WindowToken,
+        workspaceId: WorkspaceDescriptor.ID,
         originatingTransactionEpoch: TransactionEpoch,
         source: WMEventSource = .ax
     ) -> Bool {
@@ -284,7 +318,7 @@ final class FocusRuntime {
             "source=\(source.rawValue) txn=\(epoch.value)"
         )
         let startTime = ContinuousClock.now
-        if let rejected = mutationCoordinator.rejectStaleOriginIfNeeded(
+        if let rejected = mutationCoordinator.rejectInvalidOriginIfNeeded(
             originatingTransactionEpoch,
             kind: "cancel_managed_focus_request",
             txn: epoch,
@@ -294,6 +328,22 @@ final class FocusRuntime {
             startTime: startTime
         ) {
             return rejected
+        }
+        if let reason = managedFocusCancellationRejectionReason(
+            matching: token,
+            workspaceId: workspaceId,
+            originatingTransactionEpoch: originatingTransactionEpoch
+        ) {
+            return rejectScopedFocusMutation(
+                kind: "cancel_managed_focus_request",
+                reason: reason,
+                txn: epoch,
+                originatingTransactionEpoch: originatingTransactionEpoch,
+                source: source,
+                signpostName: "cancel_managed_focus_request",
+                signpostState: signpostState,
+                startTime: startTime
+            )
         }
         let changed = workspaceManager.cancelManagedFocusRequest(
             matching: token,
@@ -411,7 +461,7 @@ final class FocusRuntime {
     }
 
     @discardableResult
-    func clearManagedFocusAfterEmptyWorkspaceTransition(
+    private func clearManagedFocusAfterEmptyWorkspaceTransition(
         source: WMEventSource = .command
     ) -> Bool {
         mutationCoordinator.perform(
@@ -445,15 +495,13 @@ final class FocusRuntime {
             "source=\(source.rawValue) origin_txn=\(originatingTransactionEpoch.value)"
         )
         let startTime = ContinuousClock.now
-        guard originatingTransactionEpoch.isValid,
-              originatingTransactionEpoch >= effectRunner.highestAcceptedTransactionEpoch
-        else {
+        guard originatingTransactionEpoch.isValid else {
             kernel.intakeSignpost.endInterval(
                 "clear_managed_focus_after_empty_workspace_transition",
                 signpostState
             )
             kernel.intakeLog.debug(
-                "clear_managed_focus_after_empty_workspace_transition_rejected source=\(source.rawValue, privacy: .public) origin_txn=\(originatingTransactionEpoch.value) high=\(self.effectRunner.highestAcceptedTransactionEpoch.value)"
+                "clear_managed_focus_after_empty_workspace_transition_rejected_invalid_epoch source=\(source.rawValue, privacy: .public) origin_txn=\(originatingTransactionEpoch.value)"
             )
             return false
         }
@@ -521,8 +569,11 @@ final class FocusRuntime {
             .applyOrchestrationFocusState,
             source: source,
             recordTransaction: true
-        ) { _ in
-            workspaceManager.applyOrchestrationFocusState(focusSnapshot)
+        ) { epoch in
+            workspaceManager.applyOrchestrationFocusState(
+                focusSnapshot,
+                transactionEpoch: epoch
+            )
         }
     }
 
@@ -569,6 +620,154 @@ final class FocusRuntime {
         ) { txn in
             .observationSettled(observedToken: observedToken, txn: txn)
         }
+    }
+
+    func scopedFocusEventRejectionReason(for event: WMEvent) -> String? {
+        switch event {
+        case let .managedFocusConfirmed(
+            token,
+            workspaceId,
+            monitorId,
+            _,
+            _,
+            originatingTransactionEpoch
+        ):
+            managedFocusConfirmationRejectionReason(
+                token: token,
+                workspaceId: workspaceId,
+                monitorId: monitorId,
+                originatingTransactionEpoch: originatingTransactionEpoch
+            )
+
+        case let .managedFocusCancelled(token, workspaceId, _, originatingTransactionEpoch):
+            managedFocusCancellationRejectionReason(
+                matching: token,
+                workspaceId: workspaceId,
+                originatingTransactionEpoch: originatingTransactionEpoch
+            )
+
+        case .windowAdmitted,
+             .windowRekeyed,
+             .windowRemoved,
+             .workspaceAssigned,
+             .windowModeChanged,
+             .floatingGeometryUpdated,
+             .hiddenStateChanged,
+             .nativeFullscreenTransition,
+             .managedReplacementMetadataChanged,
+             .topologyChanged,
+             .activeSpaceChanged,
+             .focusLeaseChanged,
+             .managedFocusRequested,
+             .nonManagedFocusChanged,
+             .systemSleep,
+             .systemWake,
+             .commandIntent:
+            nil
+        }
+    }
+
+    private func managedFocusConfirmationRejectionReason(
+        token: WindowToken,
+        workspaceId: WorkspaceDescriptor.ID,
+        monitorId: Monitor.ID?,
+        originatingTransactionEpoch: TransactionEpoch
+    ) -> String? {
+        guard let pendingOrigin = pendingActivationOriginEpoch() else {
+            return "no_pending_activation"
+        }
+        guard pendingOrigin == originatingTransactionEpoch else {
+            return "superseded_focus_request"
+        }
+        guard workspaceManager.pendingFocusedToken == token else {
+            return "unmatched_focus_token"
+        }
+        guard workspaceManager.pendingFocusedWorkspaceId == workspaceId else {
+            return "unmatched_focus_workspace"
+        }
+        if let pendingMonitorId = workspaceManager.pendingFocusedMonitorId,
+           let monitorId,
+           pendingMonitorId != monitorId
+        {
+            return "unmatched_focus_monitor"
+        }
+        guard let logicalId = workspaceManager.logicalWindowRegistry
+            .lookup(token: token).liveLogicalId
+        else {
+            return "unmatched_focus_logical_id"
+        }
+        guard case let .logical(desiredLogicalId, desiredWorkspaceId) =
+                workspaceManager.storedFocusStateSnapshot.desired,
+              desiredLogicalId == logicalId,
+              desiredWorkspaceId == workspaceId
+        else {
+            return "unmatched_focus_desired_target"
+        }
+        return nil
+    }
+
+    private func managedFocusCancellationRejectionReason(
+        matching token: WindowToken?,
+        workspaceId: WorkspaceDescriptor.ID?,
+        originatingTransactionEpoch: TransactionEpoch
+    ) -> String? {
+        guard let pendingOrigin = pendingActivationOriginEpoch() else {
+            return "no_pending_activation"
+        }
+        guard pendingOrigin == originatingTransactionEpoch else {
+            return "superseded_focus_request"
+        }
+        guard let token else {
+            return "missing_focus_token"
+        }
+        guard let workspaceId else {
+            return "missing_focus_workspace"
+        }
+        if workspaceManager.pendingFocusedToken != token {
+            return "unmatched_focus_token"
+        }
+        if workspaceManager.pendingFocusedWorkspaceId != workspaceId {
+            return "unmatched_focus_workspace"
+        }
+        if let logicalId = workspaceManager.logicalWindowRegistry.lookup(token: token).liveLogicalId,
+           case let .logical(desiredLogicalId, desiredWorkspaceId) =
+                workspaceManager.storedFocusStateSnapshot.desired
+        {
+            if desiredLogicalId != logicalId {
+                return "unmatched_focus_logical_id"
+            }
+            if desiredWorkspaceId != workspaceId {
+                return "unmatched_focus_desired_target"
+            }
+        }
+        return nil
+    }
+
+    private func pendingActivationOriginEpoch() -> TransactionEpoch? {
+        guard case let .pending(_, origin) = workspaceManager.storedFocusStateSnapshot.activation
+        else {
+            return nil
+        }
+        return origin
+    }
+
+    private func rejectScopedFocusMutation(
+        kind: String,
+        reason: String,
+        txn: TransactionEpoch,
+        originatingTransactionEpoch: TransactionEpoch,
+        source: WMEventSource,
+        signpostName: StaticString,
+        signpostState: OSSignpostIntervalState,
+        startTime: ContinuousClock.Instant
+    ) -> Bool {
+        mutationCoordinator.refreshSnapshotState()
+        let durationMicros = RuntimeKernel.elapsedMicros(since: startTime)
+        kernel.intakeSignpost.endInterval(signpostName, signpostState)
+        kernel.intakeLog.debug(
+            "focus_mutation_rejected kind=\(kind, privacy: .public) reason=\(reason, privacy: .public) source=\(source.rawValue, privacy: .public) txn=\(txn.value) origin_txn=\(originatingTransactionEpoch.value) us=\(durationMicros)"
+        )
+        return false
     }
 
     @discardableResult

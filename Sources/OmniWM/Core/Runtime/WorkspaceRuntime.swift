@@ -140,13 +140,17 @@ final class WorkspaceRuntime {
     @discardableResult
     func submit(_ confirmation: WMEffectConfirmation) -> Bool {
         let originatingEpoch = confirmation.originatingTransactionEpoch
-        guard confirmationEpochIsCurrent(
+        guard confirmationOriginIsValid(
             originatingEpoch,
             kindForLog: confirmation.kindForLog,
             source: confirmation.source
         ) else {
             return false
         }
+        // These confirmations are emitted synchronously by `WMLiveEffectPlatform`
+        // while `WMEffectRunner.apply` is already enforcing transaction order.
+        // Delayed workspace-transition callbacks use `workspaceTransitionIsCurrent`
+        // instead of the runner's global watermark.
 
         let reducerEvent = WorkspaceSessionReducer.Event(confirmation: confirmation)
         let preReduction = reducerEvent.map { _ in workspaceManager.sessionStateSnapshot() }
@@ -626,12 +630,13 @@ final class WorkspaceRuntime {
             "source=\(source.rawValue) origin_txn=\(originatingTransactionEpoch.value)"
         )
         let startTime = ContinuousClock.now
-        guard originatingTransactionEpoch.isValid,
-              originatingTransactionEpoch >= effectRunner.highestAcceptedTransactionEpoch
-        else {
+        guard effectRunner.workspaceTransitionIsCurrent(
+            originatingTransactionEpoch,
+            workspaceId: workspaceId
+        ) else {
             kernel.intakeSignpost.endInterval("save_workspace_viewport", signpostState)
             kernel.intakeLog.debug(
-                "save_workspace_viewport_rejected source=\(source.rawValue, privacy: .public) origin_txn=\(originatingTransactionEpoch.value) high=\(self.effectRunner.highestAcceptedTransactionEpoch.value)"
+                "save_workspace_viewport_rejected_workspace_scope source=\(source.rawValue, privacy: .public) origin_txn=\(originatingTransactionEpoch.value) workspace=\(workspaceId.uuidString, privacy: .public)"
             )
             return false
         }
@@ -689,7 +694,7 @@ final class WorkspaceRuntime {
         }
     }
 
-    private func confirmationEpochIsCurrent(
+    private func confirmationOriginIsValid(
         _ originatingEpoch: TransactionEpoch,
         kindForLog: String,
         source: WMEventSource
@@ -698,14 +703,6 @@ final class WorkspaceRuntime {
             mutationCoordinator.refreshSnapshotState()
             kernel.intakeLog.debug(
                 "workspace_confirmation_rejected_invalid_epoch kind=\(kindForLog, privacy: .public) source=\(source.rawValue, privacy: .public) origin_txn=\(originatingEpoch.value)"
-            )
-            return false
-        }
-        guard originatingEpoch >= effectRunner.highestAcceptedTransactionEpoch else {
-            mutationCoordinator.refreshSnapshotState()
-            let highValue = effectRunner.highestAcceptedTransactionEpoch.value
-            kernel.intakeLog.debug(
-                "workspace_confirmation_rejected_superseded kind=\(kindForLog, privacy: .public) source=\(source.rawValue, privacy: .public) origin_txn=\(originatingEpoch.value) high=\(highValue)"
             )
             return false
         }

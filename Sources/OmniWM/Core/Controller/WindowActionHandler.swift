@@ -418,12 +418,11 @@ final class WindowActionHandler {
             preconditionFailure("WindowActionHandler.focusWindowInWorkspace requires WMRuntime to be attached")
         }
         _ = runtimeForPatch.applySessionPatch(patch, source: source)
-        controller.layoutRefreshController.commitWorkspaceTransition(
-            affectedWorkspaces: [workspaceId],
-            reason: .workspaceTransition
-        ) { [weak controller] in
-            controller?.focusWindow(token, source: source)
-        }
+        _ = runtimeForPatch.commitWorkspaceTransition(
+            affectedWorkspaceIds: [workspaceId],
+            postAction: .focusWindow(token),
+            source: source
+        )
         return true
     }
 
@@ -602,14 +601,17 @@ final class WindowActionHandler {
             for: result.workspace.id,
             source: source
         )
-        controller.layoutRefreshController.commitWorkspaceTransition(
-            affectedWorkspaces: [result.workspace.id],
-            reason: .workspaceTransition
-        ) { [weak controller] in
-            if let focusedToken {
-                controller?.focusWindow(focusedToken, source: source)
-            }
+        let postAction: WMEffect.PostWorkspaceTransitionAction
+        if let focusedToken {
+            postAction = .focusWindow(focusedToken)
+        } else {
+            postAction = .none
         }
+        _ = runtime.commitWorkspaceTransition(
+            affectedWorkspaceIds: [result.workspace.id],
+            postAction: postAction,
+            source: source
+        )
         return true
     }
 

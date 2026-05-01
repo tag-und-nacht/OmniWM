@@ -248,7 +248,7 @@ final class WMRuntime: RuntimeSnapshotPublishing {
                 return rejected
             }
 
-            if originating < effectRunner.highestAcceptedTransactionEpoch {
+            if let rejectionReason = focusRuntime.scopedFocusEventRejectionReason(for: event) {
                 let snapshot = workspaceManager.reconcileSnapshot()
                 let rejected = Transaction(
                     event: event,
@@ -261,9 +261,8 @@ final class WMRuntime: RuntimeSnapshotPublishing {
                 refreshSnapshotState()
                 let durationMicros = Self.elapsedMicros(since: startTime)
                 intakeSignpost.endInterval("submit_event", signpostState)
-                let highValue = effectRunner.highestAcceptedTransactionEpoch.value
                 intakeLog.debug(
-                    "event_rejected_superseded kind=\(event.kindForLog, privacy: .public) source=\(event.source.rawValue, privacy: .public) txn=\(epoch.value) origin_txn=\(originating.value) high=\(highValue) us=\(durationMicros)"
+                    "event_rejected_scoped_focus kind=\(event.kindForLog, privacy: .public) reason=\(rejectionReason, privacy: .public) source=\(event.source.rawValue, privacy: .public) txn=\(epoch.value) origin_txn=\(originating.value) us=\(durationMicros)"
                 )
                 return rejected
             }
@@ -423,6 +422,48 @@ final class WMRuntime: RuntimeSnapshotPublishing {
         )
     }
 
+    @discardableResult
+    func commitWorkspaceTransition(
+        affectedWorkspaceIds: Set<WorkspaceDescriptor.ID>,
+        postAction: WMEffect.PostWorkspaceTransitionAction,
+        source: WMEventSource = .command
+    ) -> Transaction {
+        let transactionEpoch = allocateTransactionEpoch()
+        let signpostState = intakeSignpost.beginInterval(
+            "commit_workspace_transition",
+            id: intakeSignpost.makeSignpostID(),
+            "source=\(source.rawValue) txn=\(transactionEpoch.value)"
+        )
+        let startTime = ContinuousClock.now
+        let transaction = Transaction(
+            event: .commandIntent(kindForLog: WMEffect.PostWorkspaceTransitionAction.kindForLog, source: source),
+            transactionEpoch: transactionEpoch,
+            effects: [
+                .commitWorkspaceTransition(
+                    affectedWorkspaceIds: affectedWorkspaceIds,
+                    postAction: postAction,
+                    source: source,
+                    epoch: allocateEffectEpoch()
+                )
+            ],
+            snapshot: workspaceManager.reconcileSnapshot()
+        )
+        let applyOutcome = effectRunner.apply(
+            transaction,
+            postApplySnapshot: { [workspaceManager] in
+                workspaceManager.reconcileSnapshot()
+            }
+        )
+        let recordedTransaction = workspaceManager.recordTransaction(applyOutcome.transaction)
+        refreshSnapshotState()
+        let durationMicros = Self.elapsedMicros(since: startTime)
+        intakeSignpost.endInterval("commit_workspace_transition", signpostState)
+        intakeLog.debug(
+            "commit_workspace_transition_intake source=\(source.rawValue, privacy: .public) txn=\(transactionEpoch.value) workspaces=\(affectedWorkspaceIds.count) post_action=\(postAction.logName, privacy: .public) us=\(durationMicros)"
+        )
+        return recordedTransaction
+    }
+
 
     @discardableResult
     func admitWindow(
@@ -536,8 +577,39 @@ final class WMRuntime: RuntimeSnapshotPublishing {
         }
     }
 
-    func frameWriteOutcomeOriginEpoch(source: WMEventSource = .ax) -> TransactionEpoch {
-        frameRuntime.frameWriteOutcomeOriginEpoch(source: source)
+    func observedFrameOriginEpoch(source: WMEventSource = .ax) -> TransactionEpoch {
+        frameRuntime.observedFrameOriginEpoch(source: source)
+    }
+
+    func observedFrameOriginEpoch(
+        for token: WindowToken,
+        source: WMEventSource = .ax
+    ) -> TransactionEpoch {
+        frameRuntime.observedFrameOriginEpoch(for: token, source: source)
+    }
+
+    func observedFrameOriginEpoch(
+        for token: WindowToken,
+        requestId: AXFrameRequestId?,
+        source: WMEventSource = .ax
+    ) -> TransactionEpoch {
+        frameRuntime.observedFrameOriginEpoch(
+            for: token,
+            requestId: requestId,
+            source: source
+        )
+    }
+
+    func frameWriteOutcomeOriginEpoch(
+        for token: WindowToken,
+        requestId: AXFrameRequestId,
+        source: WMEventSource = .ax
+    ) -> TransactionEpoch {
+        frameRuntime.frameWriteOutcomeOriginEpoch(
+            for: token,
+            requestId: requestId,
+            source: source
+        )
     }
 
     @discardableResult
@@ -551,6 +623,21 @@ final class WMRuntime: RuntimeSnapshotPublishing {
             for: token,
             axFailure: axFailure,
             originatingTransactionEpoch: originatingTransactionEpoch,
+            source: source
+        )
+    }
+
+    @discardableResult
+    func submitAXFrameWriteOutcome(
+        for token: WindowToken,
+        requestId: AXFrameRequestId,
+        axFailure: AXFrameWriteFailureReason?,
+        source: WMEventSource = .ax
+    ) -> Bool {
+        frameRuntime.submitAXFrameWriteOutcome(
+            for: token,
+            requestId: requestId,
+            axFailure: axFailure,
             source: source
         )
     }
@@ -935,13 +1022,6 @@ final class WMRuntime: RuntimeSnapshotPublishing {
 
     @discardableResult
     func clearManagedFocusAfterEmptyWorkspaceTransition(
-        source: WMEventSource = .command
-    ) -> Bool {
-        focusRuntime.clearManagedFocusAfterEmptyWorkspaceTransition(source: source)
-    }
-
-    @discardableResult
-    func clearManagedFocusAfterEmptyWorkspaceTransition(
         originatingTransactionEpoch: TransactionEpoch,
         source: WMEventSource = .command
     ) -> Bool {
@@ -1029,8 +1109,8 @@ final class WMRuntime: RuntimeSnapshotPublishing {
 
     @discardableResult
     func cancelManagedFocusRequest(
-        matching token: WindowToken? = nil,
-        workspaceId: WorkspaceDescriptor.ID? = nil,
+        matching token: WindowToken,
+        workspaceId: WorkspaceDescriptor.ID,
         originatingTransactionEpoch: TransactionEpoch,
         source: WMEventSource = .ax
     ) -> Bool {
@@ -1652,13 +1732,15 @@ extension WMRuntime {
     @discardableResult
     func recordPendingFrameWrite(
         frame: FrameState.Frame,
-        requestId: AXFrameRequestId,
-        for token: WindowToken
-    ) -> Bool {
+        requestId: AXFrameRequestId? = nil,
+        for token: WindowToken,
+        source: WMEventSource = .ax
+    ) -> PendingFrameWriteRecordResult {
         frameRuntime.recordPendingFrameWrite(
             frame: frame,
             requestId: requestId,
-            for: token
+            for: token,
+            source: source
         )
     }
 

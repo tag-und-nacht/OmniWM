@@ -20,6 +20,7 @@ enum MonitorSettingsStore {
         guard !monitor.name.isEmpty else { return nil }
         let nameMatches = settings.filter {
             canonicalDisplayUUID($0.monitorDisplayUUID) == nil &&
+                $0.monitorDisplayId == nil &&
                 !$0.monitorName.isEmpty &&
                 $0.monitorName.caseInsensitiveCompare(monitor.name) == .orderedSame
         }

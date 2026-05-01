@@ -118,6 +118,8 @@ final class WMEffectRunner {
     private let log = Logger(subsystem: "com.omniwm.core", category: "WMEffectRunner")
 
     private(set) var highestAcceptedTransactionEpoch: TransactionEpoch = .invalid
+    private var latestWorkspaceTransitionEpochByWorkspace:
+        [WorkspaceDescriptor.ID: TransactionEpoch] = [:]
 
     init(platform: WMEffectPlatform) {
         self.platform = platform
@@ -128,6 +130,30 @@ final class WMEffectRunner {
             return
         }
         highestAcceptedTransactionEpoch = epoch
+    }
+
+    func workspaceTransitionIsCurrent(
+        _ epoch: TransactionEpoch,
+        workspaceId: WorkspaceDescriptor.ID
+    ) -> Bool {
+        workspaceTransitionIsCurrent(epoch, affectedWorkspaceIds: [workspaceId])
+    }
+
+    func workspaceTransitionIsCurrent(
+        _ epoch: TransactionEpoch,
+        affectedWorkspaceIds: Set<WorkspaceDescriptor.ID>
+    ) -> Bool {
+        guard epoch.isValid else {
+            return false
+        }
+        for workspaceId in affectedWorkspaceIds {
+            if let latest = latestWorkspaceTransitionEpochByWorkspace[workspaceId],
+               latest > epoch
+            {
+                return false
+            }
+        }
+        return true
     }
 
     @discardableResult
@@ -293,11 +319,13 @@ final class WMEffectRunner {
             return nil
 
         case let .commitWorkspaceTransition(affectedWorkspaceIds, postAction, source, effectEpoch):
+            recordWorkspaceTransition(epoch: transactionEpoch, workspaceIds: affectedWorkspaceIds)
             platform.commitWorkspaceTransition(
                 affectedWorkspaceIds: affectedWorkspaceIds
             ) { [weak self] in
                 self?.runPostCommitAction(
                     postAction,
+                    affectedWorkspaceIds: affectedWorkspaceIds,
                     effectEpoch: effectEpoch,
                     transactionEpoch: transactionEpoch,
                     source: source
@@ -361,29 +389,27 @@ final class WMEffectRunner {
         }
     }
 
-    /// Number of post-commit actions dropped because their transaction
-    /// epoch was superseded between scheduling and the run. Exposed for
-    /// debug instrumentation; tests assert this counter doesn't grow on
-    /// the happy path.
+    /// Number of post-commit actions dropped because a newer transition
+    /// touched the same workspace scope between scheduling and the run.
+    /// Exposed for debug instrumentation; tests assert this counter doesn't
+    /// grow on the happy path.
     private(set) var supersededPostCommitDropCount: Int = 0
 
     private func runPostCommitAction(
         _ action: WMEffect.PostWorkspaceTransitionAction,
+        affectedWorkspaceIds: Set<WorkspaceDescriptor.ID>,
         effectEpoch: EffectEpoch,
         transactionEpoch: TransactionEpoch,
         source: WMEventSource
     ) {
-        guard transactionEpoch >= highestAcceptedTransactionEpoch else {
+        guard workspaceTransitionIsCurrent(
+            transactionEpoch,
+            affectedWorkspaceIds: affectedWorkspaceIds
+        ) else {
             let fxValue = effectEpoch.value
             let txnValue = transactionEpoch.value
-            let highValue = highestAcceptedTransactionEpoch.value
             supersededPostCommitDropCount += 1
-            // Promote from .debug to .notice: a dropped post-commit means
-            // the planner-intended focus/clear never ran. Combined with the
-            // FocusReducer epoch gate, the WM can land in an inconsistent
-            // (desired ≠ observed) state with no recovery, so the drop
-            // should be observable in normal-level logs without DEBUG=1.
-            log.notice("post_commit_superseded fx=\(fxValue) txn=\(txnValue) high=\(highValue) drops=\(self.supersededPostCommitDropCount)")
+            log.notice("post_commit_superseded_workspace_scope fx=\(fxValue) txn=\(txnValue) drops=\(self.supersededPostCommitDropCount)")
             return
         }
 
@@ -399,6 +425,21 @@ final class WMEffectRunner {
                 transactionEpoch: transactionEpoch,
                 source: source
             )
+        }
+    }
+
+    private func recordWorkspaceTransition(
+        epoch: TransactionEpoch,
+        workspaceIds: Set<WorkspaceDescriptor.ID>
+    ) {
+        guard epoch.isValid else { return }
+        for workspaceId in workspaceIds {
+            if let latest = latestWorkspaceTransitionEpochByWorkspace[workspaceId],
+               latest >= epoch
+            {
+                continue
+            }
+            latestWorkspaceTransitionEpochByWorkspace[workspaceId] = epoch
         }
     }
 }

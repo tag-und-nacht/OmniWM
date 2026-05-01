@@ -131,7 +131,7 @@ final class RuntimeMutationCoordinator {
         return result
     }
 
-    func rejectStaleOriginIfNeeded(
+    func rejectInvalidOriginIfNeeded(
         _ originatingTransactionEpoch: TransactionEpoch?,
         kind: String,
         txn: TransactionEpoch,
@@ -152,16 +152,6 @@ final class RuntimeMutationCoordinator {
             )
             return false
         }
-        guard originating < effectRunner.highestAcceptedTransactionEpoch else {
-            return nil
-        }
-        refreshSnapshotState()
-        let durationMicros = RuntimeKernel.elapsedMicros(since: startTime)
-        kernel.intakeSignpost.endInterval(signpostName, signpostState)
-        let highValue = effectRunner.highestAcceptedTransactionEpoch.value
-        kernel.intakeLog.debug(
-            "focus_mutation_rejected_superseded kind=\(kind, privacy: .public) source=\(source.rawValue, privacy: .public) txn=\(txn.value) origin_txn=\(originating.value) high=\(highValue) us=\(durationMicros)"
-        )
-        return false
+        return nil
     }
 }

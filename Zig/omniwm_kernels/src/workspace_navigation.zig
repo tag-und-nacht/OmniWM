@@ -218,6 +218,13 @@ fn uuidEq(lhs: UUID, rhs: UUID) bool {
     return lhs.high == rhs.high and lhs.low == rhs.low;
 }
 
+fn uuidSliceContains(values: []const UUID, value: UUID) bool {
+    for (values) |existing| {
+        if (uuidEq(existing, value)) return true;
+    }
+    return false;
+}
+
 fn tokenEq(lhs: WindowToken, rhs: WindowToken) bool {
     return lhs.pid == rhs.pid and lhs.window_id == rhs.window_id;
 }
@@ -767,7 +774,9 @@ fn plan(input: Input, monitors: []const MonitorSnapshot, workspaces: []const Wor
             setWorkspaceTransitionFocus(input, output, target, focus_workspace_handoff);
             if (input.has_current_workspace_id != 0) {
                 saveWorkspace(&sets, input.current_workspace_id);
+                affectWorkspace(&sets, input.current_workspace_id);
             }
+            affectWorkspace(&sets, target.workspace_id);
             return finalizeSets(output, sets);
         },
         op_switch_workspace_relative => {
@@ -794,6 +803,8 @@ fn plan(input: Input, monitors: []const MonitorSnapshot, workspaces: []const Wor
             setTargetWorkspace(output, target);
             setWorkspaceTransitionFocus(input, output, target, focus_workspace_handoff);
             saveWorkspace(&sets, input.current_workspace_id);
+            affectWorkspace(&sets, input.current_workspace_id);
+            affectWorkspace(&sets, target.workspace_id);
             return finalizeSets(output, sets);
         },
         op_focus_workspace_anywhere => {
@@ -817,11 +828,14 @@ fn plan(input: Input, monitors: []const MonitorSnapshot, workspaces: []const Wor
             setWorkspaceTransitionFocus(input, output, target, focus_workspace_handoff);
             if (input.has_current_workspace_id != 0) {
                 saveWorkspace(&sets, input.current_workspace_id);
+                affectWorkspace(&sets, input.current_workspace_id);
             }
+            affectWorkspace(&sets, target.workspace_id);
             if (input.has_current_monitor_id != 0 and input.current_monitor_id != target.monitor_id) {
                 if (activeOrFirstWorkspaceOnMonitor(monitors, workspaces, target.monitor_id)) |visible_target_index| {
                     const visible_target_workspace = workspaces[visible_target_index];
                     saveWorkspace(&sets, visible_target_workspace.workspace_id);
+                    affectWorkspace(&sets, visible_target_workspace.workspace_id);
                 }
             }
             return finalizeSets(output, sets);
@@ -861,7 +875,9 @@ fn plan(input: Input, monitors: []const MonitorSnapshot, workspaces: []const Wor
             setWorkspaceTransitionFocus(input, output, target, focus_workspace_handoff);
             if (input.has_current_workspace_id != 0) {
                 saveWorkspace(&sets, input.current_workspace_id);
+                affectWorkspace(&sets, input.current_workspace_id);
             }
+            affectWorkspace(&sets, target.workspace_id);
             return finalizeSets(output, sets);
         },
         op_focus_monitor_cyclic => {
@@ -1315,9 +1331,9 @@ fn makeInput(operation: u32) Input {
 }
 
 test "explicit switch targets workspace handoff and saves current workspace" {
-    var save_workspaces = [_]UUID{zeroUUID(), zeroUUID()};
-    var affected_workspaces = [_]UUID{zeroUUID(), zeroUUID()};
-    var affected_monitors = [_]u32{0, 0};
+    var save_workspaces = [_]UUID{ zeroUUID(), zeroUUID() };
+    var affected_workspaces = [_]UUID{ zeroUUID(), zeroUUID() };
+    var affected_monitors = [_]u32{ 0, 0 };
     var output = makeOutput(save_workspaces[0..], affected_workspaces[0..], affected_monitors[0..]);
     const ws1 = UUID{ .high = 1, .low = 1 };
     const ws2 = UUID{ .high = 2, .low = 2 };
@@ -1370,14 +1386,65 @@ test "explicit switch targets workspace handoff and saves current workspace" {
     try std.testing.expect(tokenEq(output.resolved_focus_token, target_token));
     try std.testing.expectEqual(@as(usize, 1), output.save_workspace_count);
     try std.testing.expect(uuidEq(save_workspaces[0], ws1));
+    try std.testing.expectEqual(@as(usize, 2), output.affected_workspace_count);
+    try std.testing.expect(uuidSliceContains(affected_workspaces[0..output.affected_workspace_count], ws1));
+    try std.testing.expect(uuidSliceContains(affected_workspaces[0..output.affected_workspace_count], ws2));
     try std.testing.expect(uuidEq(output.target_workspace_id, ws2));
     try std.testing.expectEqual(@as(u32, 11), output.target_monitor_id);
 }
 
+test "relative switch scopes current and target workspaces" {
+    var save_workspaces = [_]UUID{ zeroUUID(), zeroUUID() };
+    var affected_workspaces = [_]UUID{ zeroUUID(), zeroUUID() };
+    var affected_monitors = [_]u32{ 0, 0 };
+    var output = makeOutput(save_workspaces[0..], affected_workspaces[0..], affected_monitors[0..]);
+    const ws1 = UUID{ .high = 3, .low = 3 };
+    const ws2 = UUID{ .high = 4, .low = 4 };
+    const monitors = [_]MonitorSnapshot{
+        .{
+            .monitor_id = 11,
+            .frame_min_x = 0,
+            .frame_max_y = 1080,
+            .center_x = 960,
+            .center_y = 540,
+            .active_workspace_id = ws1,
+            .previous_workspace_id = zeroUUID(),
+            .has_active_workspace_id = 1,
+            .has_previous_workspace_id = 0,
+        },
+    };
+    const workspaces = [_]WorkspaceSnapshot{
+        makeWorkspaceSnapshot(ws1, 11, layout_niri),
+        makeWorkspaceSnapshot(ws2, 11, layout_niri),
+    };
+    var input = makeInput(op_switch_workspace_relative);
+    input.direction = direction_down;
+    input.current_workspace_id = ws1;
+    input.current_monitor_id = 11;
+    input.has_current_workspace_id = 1;
+    input.has_current_monitor_id = 1;
+
+    const status = omniwm_workspace_navigation_plan(
+        &input,
+        &monitors,
+        monitors.len,
+        &workspaces,
+        workspaces.len,
+        &output,
+    );
+
+    try std.testing.expectEqual(status_ok, status);
+    try std.testing.expectEqual(outcome_execute, output.outcome);
+    try std.testing.expectEqual(@as(u8, 1), output.should_commit_workspace_transition);
+    try std.testing.expectEqual(@as(usize, 2), output.affected_workspace_count);
+    try std.testing.expect(uuidSliceContains(affected_workspaces[0..output.affected_workspace_count], ws1));
+    try std.testing.expect(uuidSliceContains(affected_workspaces[0..output.affected_workspace_count], ws2));
+}
+
 test "adjacent window move plans source recovery and both affected workspaces" {
-    var save_workspaces = [_]UUID{zeroUUID(), zeroUUID()};
-    var affected_workspaces = [_]UUID{zeroUUID(), zeroUUID()};
-    var affected_monitors = [_]u32{0, 0};
+    var save_workspaces = [_]UUID{ zeroUUID(), zeroUUID() };
+    var affected_workspaces = [_]UUID{ zeroUUID(), zeroUUID() };
+    var affected_monitors = [_]u32{ 0, 0 };
     var output = makeOutput(save_workspaces[0..], affected_workspaces[0..], affected_monitors[0..]);
     const ws1 = UUID{ .high = 1, .low = 1 };
     const ws2 = UUID{ .high = 2, .low = 2 };
@@ -1431,9 +1498,9 @@ test "adjacent window move plans source recovery and both affected workspaces" {
 }
 
 test "adjacent window move can request numbered workspace materialization" {
-    var save_workspaces = [_]UUID{zeroUUID(), zeroUUID()};
-    var affected_workspaces = [_]UUID{zeroUUID(), zeroUUID()};
-    var affected_monitors = [_]u32{0, 0};
+    var save_workspaces = [_]UUID{ zeroUUID(), zeroUUID() };
+    var affected_workspaces = [_]UUID{ zeroUUID(), zeroUUID() };
+    var affected_monitors = [_]u32{ 0, 0 };
     var output = makeOutput(save_workspaces[0..], affected_workspaces[0..], affected_monitors[0..]);
     const ws1 = UUID{ .high = 1, .low = 1 };
     const token = WindowToken{ .pid = 7, .window_id = 99 };
@@ -1487,9 +1554,9 @@ test "adjacent window move can request numbered workspace materialization" {
 }
 
 test "adjacent column move can request numbered workspace materialization" {
-    var save_workspaces = [_]UUID{zeroUUID(), zeroUUID()};
-    var affected_workspaces = [_]UUID{zeroUUID(), zeroUUID()};
-    var affected_monitors = [_]u32{0, 0};
+    var save_workspaces = [_]UUID{ zeroUUID(), zeroUUID() };
+    var affected_workspaces = [_]UUID{ zeroUUID(), zeroUUID() };
+    var affected_monitors = [_]u32{ 0, 0 };
     var output = makeOutput(save_workspaces[0..], affected_workspaces[0..], affected_monitors[0..]);
     const ws1 = UUID{ .high = 11, .low = 11 };
     const token = WindowToken{ .pid = 17, .window_id = 199 };
@@ -1648,8 +1715,8 @@ test "relative workspace boundary stays a pure noop" {
 
 test "explicit window move does not request source workspace save" {
     var save_workspaces = [_]UUID{zeroUUID()};
-    var affected_workspaces = [_]UUID{zeroUUID(), zeroUUID()};
-    var affected_monitors = [_]u32{0, 0};
+    var affected_workspaces = [_]UUID{ zeroUUID(), zeroUUID() };
+    var affected_monitors = [_]u32{ 0, 0 };
     var output = makeOutput(save_workspaces[0..], affected_workspaces[0..], affected_monitors[0..]);
     const ws1 = UUID{ .high = 1, .low = 1 };
     const ws2 = UUID{ .high = 2, .low = 2 };
@@ -1708,7 +1775,7 @@ test "explicit window move does not request source workspace save" {
 
 test "focus workspace anywhere saves current and visible target workspace" {
     var save_workspaces = [_]UUID{ zeroUUID(), zeroUUID(), zeroUUID() };
-    var affected_workspaces = [_]UUID{ zeroUUID(), zeroUUID() };
+    var affected_workspaces = [_]UUID{ zeroUUID(), zeroUUID(), zeroUUID() };
     var affected_monitors = [_]u32{ 0, 0 };
     var output = makeOutput(save_workspaces[0..], affected_workspaces[0..], affected_monitors[0..]);
     const ws1 = UUID{ .high = 71, .low = 71 };
@@ -1778,6 +1845,10 @@ test "focus workspace anywhere saves current and visible target workspace" {
         (uuidEq(save_workspaces[0], ws1) and uuidEq(save_workspaces[1], ws2)) or
             (uuidEq(save_workspaces[0], ws2) and uuidEq(save_workspaces[1], ws1)),
     );
+    try std.testing.expectEqual(@as(usize, 3), output.affected_workspace_count);
+    try std.testing.expect(uuidSliceContains(affected_workspaces[0..output.affected_workspace_count], ws1));
+    try std.testing.expect(uuidSliceContains(affected_workspaces[0..output.affected_workspace_count], ws2));
+    try std.testing.expect(uuidSliceContains(affected_workspaces[0..output.affected_workspace_count], ws3));
 }
 
 test "follow-focus window move targets subject focus and activation" {
@@ -1935,4 +2006,52 @@ test "workspace back and forth noops when previous matches active" {
     try std.testing.expectEqual(outcome_noop, output.outcome);
     try std.testing.expectEqual(@as(u8, 0), output.should_hide_focus_border);
     try std.testing.expectEqual(@as(usize, 0), output.save_workspace_count);
+}
+
+test "workspace back and forth scopes current and previous workspaces" {
+    var save_workspaces = [_]UUID{ zeroUUID(), zeroUUID() };
+    var affected_workspaces = [_]UUID{ zeroUUID(), zeroUUID() };
+    var affected_monitors = [_]u32{ 0, 0 };
+    var output = makeOutput(save_workspaces[0..], affected_workspaces[0..], affected_monitors[0..]);
+    const ws1 = UUID{ .high = 102, .low = 102 };
+    const ws2 = UUID{ .high = 103, .low = 103 };
+    const monitors = [_]MonitorSnapshot{
+        .{
+            .monitor_id = 1301,
+            .frame_min_x = 0,
+            .frame_max_y = 1080,
+            .center_x = 960,
+            .center_y = 540,
+            .active_workspace_id = ws1,
+            .previous_workspace_id = ws2,
+            .has_active_workspace_id = 1,
+            .has_previous_workspace_id = 1,
+        },
+    };
+    const workspaces = [_]WorkspaceSnapshot{
+        makeWorkspaceSnapshot(ws1, 1301, layout_niri),
+        makeWorkspaceSnapshot(ws2, 1301, layout_niri),
+    };
+    var input = makeInput(op_workspace_back_and_forth);
+    input.direction = direction_right;
+    input.current_workspace_id = ws1;
+    input.current_monitor_id = 1301;
+    input.has_current_workspace_id = 1;
+    input.has_current_monitor_id = 1;
+
+    const status = omniwm_workspace_navigation_plan(
+        &input,
+        &monitors,
+        monitors.len,
+        &workspaces,
+        workspaces.len,
+        &output,
+    );
+
+    try std.testing.expectEqual(status_ok, status);
+    try std.testing.expectEqual(outcome_execute, output.outcome);
+    try std.testing.expectEqual(@as(u8, 1), output.should_commit_workspace_transition);
+    try std.testing.expectEqual(@as(usize, 2), output.affected_workspace_count);
+    try std.testing.expect(uuidSliceContains(affected_workspaces[0..output.affected_workspace_count], ws1));
+    try std.testing.expect(uuidSliceContains(affected_workspaces[0..output.affected_workspace_count], ws2));
 }

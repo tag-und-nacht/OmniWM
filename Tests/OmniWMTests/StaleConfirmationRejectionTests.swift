@@ -5,6 +5,45 @@ import Testing
 @testable import OmniWM
 
 @Suite(.serialized) struct StaleConfirmationRejectionTests {
+    @MainActor
+    private func workspaceId(
+        _ rawWorkspaceID: String,
+        in runtime: WMRuntime
+    ) -> WorkspaceDescriptor.ID {
+        runtime.controller.workspaceManager.workspaceId(
+            for: rawWorkspaceID,
+            createIfMissing: false
+        )!
+    }
+
+    @MainActor
+    private func requestFocus(
+        in runtime: WMRuntime,
+        windowId: Int,
+        rawWorkspaceID: String = "1"
+    ) -> (token: WindowToken, workspaceId: WorkspaceDescriptor.ID, origin: TransactionEpoch) {
+        let workspaceId = workspaceId(rawWorkspaceID, in: runtime)
+        let token = runtime.admitWindow(
+            makeLayoutPlanTestWindow(windowId: windowId),
+            pid: getpid(),
+            windowId: windowId,
+            to: workspaceId,
+            source: .ax
+        )
+        _ = runtime.requestManagedFocus(
+            token: token,
+            workspaceId: workspaceId,
+            source: .command
+        )
+        guard let origin = runtime.controller.focusBridge.originTransactionEpoch(
+            forToken: token
+        ) else {
+            Issue.record("expected runtime-routed focus request to stamp origin epoch")
+            return (token, workspaceId, .invalid)
+        }
+        return (token, workspaceId, origin)
+    }
+
     @Test @MainActor func unstampedConfirmationIsRejectedWithoutStateMutation() {
         let platform = RecordingEffectPlatform()
         let runtime = makeTransactionTestRuntime(platform: platform)
@@ -37,92 +76,100 @@ import Testing
         #expect(beforeSnapshot == afterSnapshot)
     }
 
-    @Test @MainActor func stampedConfirmationFromBeforeWatermarkIsRejectedAsSuperseded() {
+    @Test @MainActor func matchingPendingConfirmationIsAcceptedAfterUnrelatedMutation() {
         let platform = RecordingEffectPlatform()
         let runtime = makeTransactionTestRuntime(platform: platform)
 
-        let first = runtime.submit(
-            command: .workspaceSwitch(.explicit(rawWorkspaceID: "2"))
-        )
-        let staleOrigin = first.transactionEpoch
+        let request = requestFocus(in: runtime, windowId: 31_010)
+        _ = runtime.submit(.activeSpaceChanged(source: .workspaceManager))
+        #expect(runtime.currentEffectRunnerWatermark > request.origin)
 
-        _ = runtime.submit(
-            command: .workspaceSwitch(.explicit(rawWorkspaceID: "1"))
-        )
-
-        let token = WindowToken(pid: 4242, windowId: 9001)
-        let workspaceId = runtime.controller.workspaceManager.workspaceId(
-            for: "2",
-            createIfMissing: false
-        )!
-        let beforeSnapshot = runtime.controller.workspaceManager.reconcileSnapshot()
         let txn = runtime.submit(
             .managedFocusConfirmed(
-                token: token,
-                workspaceId: workspaceId,
+                token: request.token,
+                workspaceId: request.workspaceId,
                 monitorId: nil,
                 appFullscreen: false,
                 source: .ax,
-                originatingTransactionEpoch: staleOrigin
+                originatingTransactionEpoch: request.origin
             )
         )
-        let afterSnapshot = runtime.controller.workspaceManager.reconcileSnapshot()
 
         #expect(txn.transactionEpoch.isValid)
-        #expect(beforeSnapshot == afterSnapshot)
+        #expect(runtime.currentEffectRunnerWatermark == txn.transactionEpoch)
+        #expect(txn.plan.focusSession?.focusedToken == request.token)
+        #expect(txn.plan.focusSession?.pendingManagedFocus.token == nil)
     }
 
     @Test @MainActor func stampedConfirmationAtCurrentWatermarkIsAccepted() {
         let platform = RecordingEffectPlatform()
         let runtime = makeTransactionTestRuntime(platform: platform)
 
-        let result = runtime.submit(
-            command: .workspaceSwitch(.explicit(rawWorkspaceID: "2"))
-        )
-        let token = WindowToken(pid: 4242, windowId: 9001)
-        let workspaceId = runtime.controller.workspaceManager.workspaceId(
-            for: "2",
-            createIfMissing: false
-        )!
+        let request = requestFocus(in: runtime, windowId: 31_011)
         let txn = runtime.submit(
             .managedFocusConfirmed(
-                token: token,
-                workspaceId: workspaceId,
+                token: request.token,
+                workspaceId: request.workspaceId,
                 monitorId: nil,
                 appFullscreen: false,
                 source: .ax,
-                originatingTransactionEpoch: result.transactionEpoch
+                originatingTransactionEpoch: request.origin
             )
         )
         #expect(txn.transactionEpoch.isValid)
+        #expect(runtime.currentEffectRunnerWatermark == txn.transactionEpoch)
+        #expect(txn.plan.focusSession?.focusedToken == request.token)
+        #expect(txn.plan.focusSession?.pendingManagedFocus.token == nil)
     }
 
-    @Test @MainActor func stampedManagedFocusCancelledIsAlsoSubjectToEpochGate() {
+    @Test @MainActor func stampedManagedFocusCancellationFollowsScopedRequestRules() {
         let platform = RecordingEffectPlatform()
         let runtime = makeTransactionTestRuntime(platform: platform)
 
-        let first = runtime.submit(
-            command: .workspaceSwitch(.explicit(rawWorkspaceID: "2"))
-        )
-        _ = runtime.submit(
-            command: .workspaceSwitch(.explicit(rawWorkspaceID: "1"))
-        )
-        let token = WindowToken(pid: 4242, windowId: 9001)
-        let workspaceId = runtime.controller.workspaceManager.workspaceId(
-            for: "2",
-            createIfMissing: false
-        )!
-        let beforeSnapshot = runtime.controller.workspaceManager.reconcileSnapshot()
-        _ = runtime.submit(
+        let request = requestFocus(in: runtime, windowId: 31_012)
+        _ = runtime.submit(.activeSpaceChanged(source: .workspaceManager))
+        #expect(runtime.controller.workspaceManager.pendingFocusedToken == request.token)
+        let txn = runtime.submit(
             .managedFocusCancelled(
-                token: token,
-                workspaceId: workspaceId,
+                token: request.token,
+                workspaceId: request.workspaceId,
                 source: .ax,
-                originatingTransactionEpoch: first.transactionEpoch
+                originatingTransactionEpoch: request.origin
             )
         )
-        let afterSnapshot = runtime.controller.workspaceManager.reconcileSnapshot()
-        #expect(beforeSnapshot == afterSnapshot)
+        #expect(txn.transactionEpoch.isValid)
+        #expect(runtime.currentEffectRunnerWatermark == txn.transactionEpoch)
+        #expect(txn.plan.focusSession?.pendingManagedFocus.token == nil)
+    }
+
+    @Test @MainActor func stampedManagedFocusCancellationRequiresTokenAndWorkspace() {
+        let platform = RecordingEffectPlatform()
+        let runtime = makeTransactionTestRuntime(platform: platform)
+
+        let request = requestFocus(in: runtime, windowId: 31_112)
+        let watermarkAfterRequest = runtime.currentEffectRunnerWatermark
+
+        _ = runtime.submit(
+            .managedFocusCancelled(
+                token: nil,
+                workspaceId: request.workspaceId,
+                source: .ax,
+                originatingTransactionEpoch: request.origin
+            )
+        )
+        #expect(runtime.controller.workspaceManager.pendingFocusedToken == request.token)
+        #expect(runtime.currentEffectRunnerWatermark == watermarkAfterRequest)
+
+        _ = runtime.submit(
+            .managedFocusCancelled(
+                token: request.token,
+                workspaceId: nil,
+                source: .ax,
+                originatingTransactionEpoch: request.origin
+            )
+        )
+        #expect(runtime.controller.workspaceManager.pendingFocusedToken == request.token)
+        #expect(runtime.currentEffectRunnerWatermark == watermarkAfterRequest)
     }
 
     @Test func originatingTransactionEpochIsNilForNonConfirmationEvents() {
@@ -168,34 +215,27 @@ import Testing
         #expect(runtime.currentEffectRunnerWatermark == watermarkBefore)
     }
 
-    @Test @MainActor func supersededConfirmationDoesNotAdvanceRunnerWatermark() {
+    @Test @MainActor func olderFocusConfirmationAfterNewerRequestDoesNotAdvanceRunnerWatermark() {
         let platform = RecordingEffectPlatform()
         let runtime = makeTransactionTestRuntime(platform: platform)
 
-        let first = runtime.submit(
-            command: .workspaceSwitch(.explicit(rawWorkspaceID: "2"))
-        )
-        _ = runtime.submit(
-            command: .workspaceSwitch(.explicit(rawWorkspaceID: "1"))
-        )
+        let older = requestFocus(in: runtime, windowId: 31_013)
+        let newer = requestFocus(in: runtime, windowId: 31_014)
         let watermarkAfterSecond = runtime.currentEffectRunnerWatermark
 
-        let token = WindowToken(pid: 4242, windowId: 9001)
-        let workspaceId = runtime.controller.workspaceManager.workspaceId(
-            for: "2",
-            createIfMissing: false
-        )!
         _ = runtime.submit(
             .managedFocusConfirmed(
-                token: token,
-                workspaceId: workspaceId,
+                token: older.token,
+                workspaceId: older.workspaceId,
                 monitorId: nil,
                 appFullscreen: false,
                 source: .ax,
-                originatingTransactionEpoch: first.transactionEpoch
+                originatingTransactionEpoch: older.origin
             )
         )
 
+        #expect(runtime.controller.workspaceManager.pendingFocusedToken == newer.token)
+        #expect(runtime.controller.workspaceManager.focusedToken != older.token)
         #expect(runtime.currentEffectRunnerWatermark == watermarkAfterSecond)
     }
 

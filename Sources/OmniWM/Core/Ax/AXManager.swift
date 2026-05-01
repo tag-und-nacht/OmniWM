@@ -39,7 +39,7 @@ final class AXManager {
         }
     }
     private(set) var frameApplyOverrideConfirmsPositionPlansForTests = false
-    var onFrameConfirmed: ((pid_t, Int, CGRect, FrameConfirmResult) -> Void)?
+    var onFrameConfirmed: ((pid_t, Int, CGRect, FrameConfirmResult, AXFrameRequestId?) -> Void)?
     var onFramePending: ((pid_t, Int, CGRect, AXFrameRequestId) -> Void)?
     /// Invoked when a batched AX frame write reaches its terminal failure
     /// state (the retry budget is exhausted or the failure is non-retryable).
@@ -47,7 +47,7 @@ final class AXManager {
     /// quarantine / retry / failure-handling state machine can advance —
     /// previously the failure path notified the request observer but left
     /// the runtime side unwired, so quarantine never transitioned.
-    var onFrameFailed: ((pid_t, Int, CGRect, AXFrameWriteFailureReason) -> Void)?
+    var onFrameFailed: ((pid_t, Int, CGRect, AXFrameWriteFailureReason, AXFrameRequestId) -> Void)?
 
     private struct PendingFrameObserver {
         var windowId: Int
@@ -220,7 +220,7 @@ final class AXManager {
         recentFrameWriteFailures.removeValue(forKey: windowId)
         retryBudgetByWindowId.removeValue(forKey: windowId)
         if let pid {
-            onFrameConfirmed?(pid, windowId, frame, .confirmedWrite)
+            onFrameConfirmed?(pid, windowId, frame, .confirmedWrite, nil)
         }
     }
 
@@ -388,7 +388,7 @@ final class AXManager {
                             )
                         )
                     }
-                    onFrameConfirmed?(pid, windowId, cached, .cachedNoOp)
+                    onFrameConfirmed?(pid, windowId, cached, .cachedNoOp, nil)
                     continue
                 }
             }
@@ -606,7 +606,8 @@ final class AXManager {
                     resolvedResult.pid,
                     resolvedWindowId,
                     confirmedFrame,
-                    .confirmedWrite
+                    .confirmedWrite,
+                    resolvedResult.requestId
                 )
                 notifyPendingFrameObserver(with: resolvedResult)
                 continue
@@ -632,7 +633,8 @@ final class AXManager {
                         resolvedResult.pid,
                         resolvedWindowId,
                         resolvedResult.targetFrame,
-                        failureReason
+                        failureReason,
+                        resolvedResult.requestId
                     )
                 }
                 notifyPendingFrameObserver(with: resolvedResult)

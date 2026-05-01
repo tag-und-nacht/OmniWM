@@ -47,6 +47,7 @@ enum RuntimeMutationKind: String {
     case nativeFullscreenStaleExpiry = "native_fullscreen_stale_expiry"
     case nativeStateRestored = "native_state_restored"
     case niriViewportStateUpdated = "niri_viewport_state_updated"
+    case pendingFrameWrite = "pending_frame_write"
     case borderOwnershipReconciled = "border_ownership_reconciled"
     case axFrameWriteOutcomeQuarantine = "ax_frame_write_outcome"
     case observedFrame = "observed_frame"

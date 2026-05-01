@@ -101,6 +101,7 @@ private func makeWorkspaceNavigationKernelInput(
         #expect(plan.focusAction == .workspaceHandoff)
         #expect(plan.resolvedFocusToken == targetToken)
         #expect(plan.saveWorkspaceIds == [workspaceOne])
+        #expect(plan.affectedWorkspaceIds == Set([workspaceOne, workspaceTwo]))
         #expect(plan.shouldActivateTargetWorkspace)
         #expect(plan.shouldCommitWorkspaceTransition)
     }
@@ -134,6 +135,41 @@ private func makeWorkspaceNavigationKernelInput(
         #expect(plan.outcome == .execute)
         #expect(plan.focusAction == .clearManagedFocus)
         #expect(plan.resolvedFocusToken == nil)
+        #expect(plan.affectedWorkspaceIds == Set([workspaceOne, workspaceTwo]))
+        #expect(plan.shouldCommitWorkspaceTransition)
+    }
+
+    @Test func relativeSwitchScopesCurrentAndTargetWorkspaces() {
+        let workspaceOne = WorkspaceDescriptor.ID()
+        let workspaceTwo = WorkspaceDescriptor.ID()
+
+        let input = makeWorkspaceNavigationKernelInput(
+            intent: .init(
+                operation: .switchWorkspaceRelative,
+                direction: .down,
+                currentWorkspaceId: workspaceOne,
+                currentMonitorId: .init(displayId: 1)
+            ),
+            monitors: [
+                makeWorkspaceNavigationKernelMonitor(
+                    id: 1,
+                    minX: 0,
+                    centerX: 960,
+                    activeWorkspaceId: workspaceOne
+                )
+            ],
+            workspaces: [
+                makeWorkspaceNavigationKernelWorkspace(id: workspaceOne, monitorId: 1),
+                makeWorkspaceNavigationKernelWorkspace(id: workspaceTwo, monitorId: 1)
+            ]
+        )
+
+        let plan = WorkspaceNavigationKernel.plan(input)
+
+        #expect(plan.outcome == .execute)
+        #expect(plan.targetWorkspaceId == workspaceTwo)
+        #expect(plan.affectedWorkspaceIds == Set([workspaceOne, workspaceTwo]))
+        #expect(plan.shouldCommitWorkspaceTransition)
     }
 
     @Test func focusWorkspaceAnywhereSavesCurrentAndVisibleTargetWorkspace() {
@@ -174,7 +210,42 @@ private func makeWorkspaceNavigationKernelInput(
         #expect(plan.outcome == .execute)
         #expect(plan.targetWorkspaceId == workspaceThree)
         #expect(plan.saveWorkspaceIds == [workspaceOne, workspaceTwo])
+        #expect(plan.affectedWorkspaceIds == Set([workspaceOne, workspaceTwo, workspaceThree]))
         #expect(plan.shouldSyncMonitorsToNiri)
+        #expect(plan.shouldCommitWorkspaceTransition)
+    }
+
+    @Test func workspaceBackAndForthScopesCurrentAndPreviousWorkspaces() {
+        let workspaceOne = WorkspaceDescriptor.ID()
+        let workspaceTwo = WorkspaceDescriptor.ID()
+
+        let input = makeWorkspaceNavigationKernelInput(
+            intent: .init(
+                operation: .workspaceBackAndForth,
+                currentWorkspaceId: workspaceOne,
+                currentMonitorId: .init(displayId: 1)
+            ),
+            monitors: [
+                makeWorkspaceNavigationKernelMonitor(
+                    id: 1,
+                    minX: 0,
+                    centerX: 960,
+                    activeWorkspaceId: workspaceOne,
+                    previousWorkspaceId: workspaceTwo
+                )
+            ],
+            workspaces: [
+                makeWorkspaceNavigationKernelWorkspace(id: workspaceOne, monitorId: 1),
+                makeWorkspaceNavigationKernelWorkspace(id: workspaceTwo, monitorId: 1)
+            ]
+        )
+
+        let plan = WorkspaceNavigationKernel.plan(input)
+
+        #expect(plan.outcome == .execute)
+        #expect(plan.targetWorkspaceId == workspaceTwo)
+        #expect(plan.affectedWorkspaceIds == Set([workspaceOne, workspaceTwo]))
+        #expect(plan.shouldCommitWorkspaceTransition)
     }
 
     @Test func moveWindowAdjacentMaterializesConfiguredWorkspaceWhenNeighborIsMissing() {

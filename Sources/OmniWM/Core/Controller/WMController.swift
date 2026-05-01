@@ -217,26 +217,30 @@ final class WMController {
         self.workspaceManager.onSessionStateChanged = { [weak self] in
             self?.handleSessionStateChanged()
         }
-        axManager.onFrameConfirmed = { [weak self] pid, windowId, frame, frameConfirmResult in
+        axManager.onFrameConfirmed = { [weak self] pid, windowId, frame, frameConfirmResult, requestId in
             guard let self else { return }
             let token = WindowToken(pid: pid, windowId: windowId)
+            guard let runtime = self.runtime else { return }
+            let originatingEpoch = runtime.observedFrameOriginEpoch(
+                for: token,
+                requestId: requestId,
+                source: .ax
+            )
+            let accepted = runtime.submit(
+                WMEffectConfirmation.observedFrame(
+                    token: token,
+                    frame: frame,
+                    source: .ax,
+                    originatingTransactionEpoch: originatingEpoch
+                )
+            )
+            guard accepted else { return }
             self.recordManagedRestoreGeometry(
                 for: token,
                 frame: frame,
                 reason: .frameConfirmed,
                 frameConfirmResult: frameConfirmResult
             )
-            if let runtime = self.runtime {
-                let originatingEpoch = runtime.frameWriteOutcomeOriginEpoch(source: .ax)
-                _ = runtime.submit(
-                    WMEffectConfirmation.observedFrame(
-                        token: token,
-                        frame: frame,
-                        source: .ax,
-                        originatingTransactionEpoch: originatingEpoch
-                    )
-                )
-            }
         }
         axManager.onFramePending = { [weak self] pid, windowId, frame, requestId in
             guard let self, let runtime = self.runtime else { return }
@@ -247,14 +251,13 @@ final class WMController {
                 for: token
             )
         }
-        axManager.onFrameFailed = { [weak self] pid, windowId, _, failureReason in
+        axManager.onFrameFailed = { [weak self] pid, windowId, _, failureReason, requestId in
             guard let self, let runtime = self.runtime else { return }
             let token = WindowToken(pid: pid, windowId: windowId)
-            let originatingEpoch = runtime.frameWriteOutcomeOriginEpoch(source: .ax)
             _ = runtime.submitAXFrameWriteOutcome(
                 for: token,
+                requestId: requestId,
                 axFailure: failureReason,
-                originatingTransactionEpoch: originatingEpoch,
                 source: .ax
             )
         }

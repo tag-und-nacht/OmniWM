@@ -166,10 +166,10 @@ private func axManagerTestWriteResult(
         let originalOnFrameConfirmed = controller.axManager.onFrameConfirmed
         var confirmedFrames: [CGRect] = []
         var confirmResults: [FrameConfirmResult] = []
-        controller.axManager.onFrameConfirmed = { pid, windowId, frame, result in
+        controller.axManager.onFrameConfirmed = { pid, windowId, frame, result, requestId in
             confirmedFrames.append(frame)
             confirmResults.append(result)
-            originalOnFrameConfirmed?(pid, windowId, frame, result)
+            originalOnFrameConfirmed?(pid, windowId, frame, result, requestId)
         }
 
         var attemptCount = 0
@@ -238,10 +238,10 @@ private func axManagerTestWriteResult(
         let originalOnFrameConfirmed = controller.axManager.onFrameConfirmed
         var confirmedFrames: [CGRect] = []
         var confirmResults: [FrameConfirmResult] = []
-        controller.axManager.onFrameConfirmed = { pid, windowId, frame, result in
+        controller.axManager.onFrameConfirmed = { pid, windowId, frame, result, requestId in
             confirmedFrames.append(frame)
             confirmResults.append(result)
-            originalOnFrameConfirmed?(pid, windowId, frame, result)
+            originalOnFrameConfirmed?(pid, windowId, frame, result, requestId)
         }
 
         controller.axManager.applyFramesParallel([(token.pid, token.windowId, targetFrame)])

@@ -294,7 +294,7 @@ import Testing
         ])
     }
 
-    @Test @MainActor func postCommitActionIsDroppedWhenSupersededBeforeFiring() {
+    @Test @MainActor func postCommitActionRunsWhenLaterTransitionIsDisjoint() {
         let platform = RecordingEffectPlatform()
         platform.synchronousPostActions = false
         let runner = WMEffectRunner(platform: platform)
@@ -330,7 +330,50 @@ import Testing
         let focusEvents = platform.events.filter {
             if case .focusWindow = $0 { true } else { false }
         }
-        #expect(focusEvents.isEmpty, "stale post-layout must not focus window")
+        #expect(focusEvents == [
+            .focusWindow(token: focusToken, source: .command)
+        ])
+        #expect(runner.supersededPostCommitDropCount == 0)
+    }
+
+    @Test @MainActor func postCommitActionIsDroppedWhenSameWorkspaceIsSuperseded() {
+        let platform = RecordingEffectPlatform()
+        platform.synchronousPostActions = false
+        let runner = WMEffectRunner(platform: platform)
+
+        let focusToken = WindowToken(pid: 42, windowId: 99)
+        _ = runner.apply(makeTransaction(
+            transactionEpoch: 3,
+            effects: [
+                .commitWorkspaceTransition(
+                    affectedWorkspaceIds: [workspaceA],
+                    postAction: .focusWindow(focusToken),
+                    source: .command,
+                    epoch: EffectEpoch(value: 1)
+                )
+            ]
+        ))
+        #expect(platform.pendingPostActionCount == 1)
+
+        _ = runner.apply(makeTransaction(
+            transactionEpoch: 5,
+            effects: [
+                .commitWorkspaceTransition(
+                    affectedWorkspaceIds: [workspaceA],
+                    postAction: .none,
+                    source: .command,
+                    epoch: EffectEpoch(value: 2)
+                )
+            ]
+        ))
+
+        platform.runPendingPostActions()
+
+        let focusEvents = platform.events.filter {
+            if case .focusWindow = $0 { true } else { false }
+        }
+        #expect(focusEvents.isEmpty)
+        #expect(runner.supersededPostCommitDropCount == 1)
     }
 
     @Test @MainActor func idempotentReapplyUsesSameEpoch() {
@@ -381,7 +424,7 @@ import Testing
         #expect(runner.highestAcceptedTransactionEpoch == TransactionEpoch(value: 5))
     }
 
-    @Test @MainActor func eventOnlyTransactionSupersedesPendingPostAction() {
+    @Test @MainActor func eventOnlyTransactionDoesNotSupersedePendingPostAction() {
         let platform = RecordingEffectPlatform()
         platform.synchronousPostActions = false
         let runner = WMEffectRunner(platform: platform)
@@ -405,6 +448,9 @@ import Testing
         let focusEvents = platform.events.filter {
             if case .focusWindow = $0 { true } else { false }
         }
-        #expect(focusEvents.isEmpty, "event-only txn must supersede pending post-action")
+        #expect(focusEvents == [
+            .focusWindow(token: focusToken, source: .command)
+        ])
+        #expect(runner.supersededPostCommitDropCount == 0)
     }
 }

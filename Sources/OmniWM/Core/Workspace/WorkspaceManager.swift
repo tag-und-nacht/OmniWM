@@ -397,7 +397,11 @@ final class WorkspaceManager {
                 if !restoreEventPlan.notes.isEmpty {
                     plan.notes.append(contentsOf: restoreEventPlan.notes)
                 }
-                return self.applyActionPlan(plan, to: token)
+                return self.applyActionPlan(
+                    plan,
+                    to: token,
+                    transactionEpoch: transactionEpoch
+                )
             }
         )
     }
@@ -514,7 +518,11 @@ final class WorkspaceManager {
                         plan.notes.append("restore_refresh=topology")
                     }
                 }
-                return self.applyActionPlan(plan, to: nil)
+                return self.applyActionPlan(
+                    plan,
+                    to: nil,
+                    transactionEpoch: transactionEpoch
+                )
             }
         ))
     }
@@ -545,7 +553,8 @@ final class WorkspaceManager {
 
     private func applyActionPlan(
         _ plan: ActionPlan,
-        to token: WindowToken?
+        to token: WindowToken?,
+        transactionEpoch: TransactionEpoch
     ) -> ActionPlan {
         var resolvedPlan = plan
 
@@ -554,7 +563,10 @@ final class WorkspaceManager {
         }
 
         if let focusSession = plan.focusSession {
-            applyReconciledFocusSession(focusSession)
+            applyReconciledFocusSession(
+                focusSession,
+                transactionEpoch: transactionEpoch
+            )
         }
 
         if let topologyTransition = plan.topologyTransition {
@@ -615,7 +627,10 @@ final class WorkspaceManager {
         return resolvedPlan
     }
 
-    private func applyReconciledFocusSession(_ focusSession: FocusSessionSnapshot) {
+    private func applyReconciledFocusSession(
+        _ focusSession: FocusSessionSnapshot,
+        transactionEpoch: TransactionEpoch
+    ) {
         defer { _ = refreshWorkspaceGraphFocusState() }
         let previousLease = sessionState.focus.focusLease
         let previousFocusedToken = sessionState.focus.focusedToken
@@ -644,7 +659,7 @@ final class WorkspaceManager {
                 .activationRequested(
                     desired: .logical(logicalId, workspaceId: workspaceId),
                     requestId: 0,
-                    originatingTransactionEpoch: .invalid
+                    originatingTransactionEpoch: transactionEpoch
                 )
             )
         }
@@ -652,15 +667,15 @@ final class WorkspaceManager {
             if let token = newFocusedToken {
                 if newPendingFocus.token != nil {
                     applyFocusReducerEvent(
-                        .observationSettled(observedToken: token, txn: .invalid)
+                        .observationSettled(observedToken: token, txn: transactionEpoch)
                     )
                 } else {
                     applyFocusReducerEvent(
-                        .activationConfirmed(observedToken: token, observedAt: .invalid)
+                        .activationConfirmed(observedToken: token, observedAt: transactionEpoch)
                     )
                 }
             } else {
-                applyFocusReducerEvent(.activationCancelled(txn: .invalid))
+                applyFocusReducerEvent(.activationCancelled(txn: transactionEpoch))
                 clearStoredFocusObservedToken()
             }
         }
@@ -668,7 +683,7 @@ final class WorkspaceManager {
            previousPendingToken != nil,
            focusSession.pendingManagedFocus.token == nil
         {
-            applyFocusReducerEvent(.activationCancelled(txn: .invalid))
+            applyFocusReducerEvent(.activationCancelled(txn: transactionEpoch))
         }
 
         if focusSession.isAppFullscreenActive, !previousAppFullscreenActive,
@@ -1315,7 +1330,8 @@ final class WorkspaceManager {
 
     @discardableResult
     func applyOrchestrationFocusState(
-        _ focusSnapshot: FocusOrchestrationSnapshot
+        _ focusSnapshot: FocusOrchestrationSnapshot,
+        transactionEpoch: TransactionEpoch = .invalid
     ) -> Bool {
         var changed = false
         let previousPendingToken = sessionState.focus.pendingManagedFocus.token
@@ -1335,14 +1351,14 @@ final class WorkspaceManager {
                     .activationRequested(
                         desired: .logical(logicalId, workspaceId: workspaceId),
                         requestId: 0,
-                        originatingTransactionEpoch: .invalid
+                        originatingTransactionEpoch: transactionEpoch
                     )
                 )
             }
         } else {
             changed = clearPendingManagedFocusRequest(focus: &sessionState.focus) || changed
             if previousPendingToken != nil {
-                applyFocusReducerEvent(.activationCancelled(txn: .invalid))
+                applyFocusReducerEvent(.activationCancelled(txn: transactionEpoch))
             }
         }
 

@@ -65,6 +65,14 @@ import Testing
         return manager.logicalWindowRegistry.record(for: logicalId)?.quarantine
     }
 
+    private var pendingFrame: FrameState.Frame {
+        FrameState.Frame(
+            rect: CGRect(x: 20, y: 30, width: 640, height: 480),
+            space: .appKit,
+            isVisibleFrame: true
+        )
+    }
+
 
     @Test @MainActor func missingBelowThresholdMarksDelayedAdmission() {
         let (manager, workspaceId) = makeManager()
@@ -226,11 +234,15 @@ import Testing
             to: workspaceId
         )
 
-        let origin = runtime.frameWriteOutcomeOriginEpoch(source: .ax)
+        let pending = runtime.recordPendingFrameWrite(
+            frame: pendingFrame,
+            requestId: 5305,
+            for: token
+        )
         let changed = runtime.submitAXFrameWriteOutcome(
             for: token,
             axFailure: .staleElement,
-            originatingTransactionEpoch: origin,
+            originatingTransactionEpoch: pending.transactionEpoch,
             source: .ax
         )
 
@@ -238,7 +250,7 @@ import Testing
         #expect(quarantineState(runtime.workspaceManager, for: token) == .quarantined(reason: .axReadFailure))
     }
 
-    @Test @MainActor func staleAXOutcomeConfirmationDoesNotMutateQuarantine() {
+    @Test @MainActor func axOutcomeConfirmationSurvivesUnrelatedRuntimeMutation() {
         let (runtime, workspaceId) = makeRuntime()
         let token = runtime.admitWindow(
             AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: 5306),
@@ -247,17 +259,244 @@ import Testing
             to: workspaceId
         )
 
-        let staleOrigin = runtime.frameWriteOutcomeOriginEpoch(source: .ax)
+        let pending = runtime.recordPendingFrameWrite(
+            frame: pendingFrame,
+            requestId: 5306,
+            for: token
+        )
         _ = runtime.submit(.activeSpaceChanged(source: .workspaceManager))
         let changed = runtime.submitAXFrameWriteOutcome(
             for: token,
             axFailure: .staleElement,
-            originatingTransactionEpoch: staleOrigin,
+            originatingTransactionEpoch: pending.transactionEpoch,
+            source: .ax
+        )
+
+        #expect(changed)
+        #expect(quarantineState(runtime.workspaceManager, for: token) == .quarantined(reason: .axReadFailure))
+    }
+
+    @Test @MainActor func successfulAXOutcomeRequiresPendingWrite() {
+        let (runtime, workspaceId) = makeRuntime()
+        let token = runtime.admitWindow(
+            AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: 5310),
+            pid: 9001,
+            windowId: 5310,
+            to: workspaceId
+        )
+        _ = runtime.workspaceManager.applyAXOutcomeQuarantine(
+            for: token,
+            axFailure: .staleElement
+        )
+        #expect(quarantineState(runtime.workspaceManager, for: token) == .quarantined(reason: .axReadFailure))
+
+        let changed = runtime.submitAXFrameWriteOutcome(
+            for: token,
+            axFailure: nil,
+            originatingTransactionEpoch: runtime.currentEffectRunnerWatermark,
+            source: .ax
+        )
+
+        #expect(!changed)
+        #expect(quarantineState(runtime.workspaceManager, for: token) == .quarantined(reason: .axReadFailure))
+    }
+
+    @Test @MainActor func successfulAXOutcomeWithPendingWriteSurvivesUnrelatedMutation() {
+        let (runtime, workspaceId) = makeRuntime()
+        let token = runtime.admitWindow(
+            AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: 5311),
+            pid: 9001,
+            windowId: 5311,
+            to: workspaceId
+        )
+        _ = runtime.workspaceManager.applyAXOutcomeQuarantine(
+            for: token,
+            axFailure: .staleElement
+        )
+        let pending = runtime.recordPendingFrameWrite(
+            frame: pendingFrame,
+            requestId: 5311,
+            for: token
+        )
+        _ = runtime.submit(.activeSpaceChanged(source: .workspaceManager))
+
+        let changed = runtime.submitAXFrameWriteOutcome(
+            for: token,
+            axFailure: nil,
+            originatingTransactionEpoch: pending.transactionEpoch,
+            source: .ax
+        )
+
+        #expect(changed)
+        #expect(quarantineState(runtime.workspaceManager, for: token) == .clear)
+    }
+
+    @Test @MainActor func axOutcomeConfirmationIsRejectedAfterNewerPendingWriteForSameWindow() {
+        let (runtime, workspaceId) = makeRuntime()
+        let token = runtime.admitWindow(
+            AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: 5307),
+            pid: 9001,
+            windowId: 5307,
+            to: workspaceId
+        )
+
+        let olderPending = runtime.recordPendingFrameWrite(
+            frame: pendingFrame,
+            requestId: 5307,
+            for: token
+        )
+        _ = runtime.recordPendingFrameWrite(
+            frame: FrameState.Frame(
+                rect: CGRect(x: 40, y: 50, width: 700, height: 500),
+                space: .appKit,
+                isVisibleFrame: true
+            ),
+            requestId: 5308,
+            for: token
+        )
+        let changed = runtime.submitAXFrameWriteOutcome(
+            for: token,
+            axFailure: .staleElement,
+            originatingTransactionEpoch: olderPending.transactionEpoch,
             source: .ax
         )
 
         #expect(!changed)
         #expect(quarantineState(runtime.workspaceManager, for: token) == .clear)
+    }
+
+    @Test @MainActor func staleFrameFailureCallbackDoesNotFailNewerPendingWrite() {
+        let (runtime, workspaceId) = makeRuntime()
+        let controller = runtime.controller
+        let token = runtime.admitWindow(
+            AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: 5312),
+            pid: 9001,
+            windowId: 5312,
+            to: workspaceId
+        )
+
+        let olderPending = runtime.recordPendingFrameWrite(
+            frame: pendingFrame,
+            requestId: 5312,
+            for: token
+        )
+        let newerPending = runtime.recordPendingFrameWrite(
+            frame: FrameState.Frame(
+                rect: CGRect(x: 40, y: 50, width: 700, height: 500),
+                space: .appKit,
+                isVisibleFrame: true
+            ),
+            requestId: 5313,
+            for: token
+        )
+
+        controller.axManager.onFrameFailed?(
+            token.pid,
+            token.windowId,
+            pendingFrame.rect,
+            .staleElement,
+            olderPending.requestId
+        )
+
+        #expect(quarantineState(runtime.workspaceManager, for: token) == .clear)
+        #expect(
+            runtime.workspaceManager.frameState(for: token)?.write
+                == .pending(requestId: newerPending.requestId, since: newerPending.transactionEpoch)
+        )
+    }
+
+    @Test @MainActor func matchingFrameFailureCallbackFailsCurrentPendingWrite() {
+        let (runtime, workspaceId) = makeRuntime()
+        let controller = runtime.controller
+        let token = runtime.admitWindow(
+            AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: 5314),
+            pid: 9001,
+            windowId: 5314,
+            to: workspaceId
+        )
+
+        let pending = runtime.recordPendingFrameWrite(
+            frame: pendingFrame,
+            requestId: 5314,
+            for: token
+        )
+
+        controller.axManager.onFrameFailed?(
+            token.pid,
+            token.windowId,
+            pendingFrame.rect,
+            .staleElement,
+            pending.requestId
+        )
+
+        #expect(quarantineState(runtime.workspaceManager, for: token) == .quarantined(reason: .axReadFailure))
+        #expect(
+            runtime.workspaceManager.frameState(for: token)?.write
+                == .failed(reason: .staleElement, attemptedAt: pending.transactionEpoch)
+        )
+    }
+
+    @Test @MainActor func rejectedObservedFrameConfirmationDoesNotPersistManagedRestoreGeometry() {
+        let (runtime, workspaceId) = makeRuntime()
+        let controller = runtime.controller
+        let token = runtime.admitWindow(
+            AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: 5308),
+            pid: 9001,
+            windowId: 5308,
+            to: workspaceId
+        )
+        let originalFrame = CGRect(x: 20, y: 30, width: 640, height: 480)
+        let olderConfirmedFrame = CGRect(x: 40, y: 50, width: 700, height: 500)
+        let newerPendingFrame = CGRect(x: 240, y: 260, width: 760, height: 540)
+        _ = controller.workspaceManager.setManagedReplacementMetadata(
+            ManagedReplacementMetadata(
+                bundleId: "com.example.rejected-observed-frame",
+                workspaceId: workspaceId,
+                mode: .tiling,
+                role: kAXWindowRole as String,
+                subrole: kAXStandardWindowSubrole as String,
+                title: "Rejected Observed Frame",
+                windowLevel: 0,
+                parentWindowId: nil,
+                frame: originalFrame
+            ),
+            for: token
+        )
+        controller.recordManagedRestoreGeometry(for: token, frame: originalFrame)
+        #expect(controller.workspaceManager.managedRestoreSnapshot(for: token)?.frame == originalFrame)
+
+        _ = runtime.recordPendingFrameWrite(
+            frame: FrameState.Frame(
+                rect: olderConfirmedFrame,
+                space: .appKit,
+                isVisibleFrame: true
+            ),
+            requestId: 5308,
+            for: token
+        )
+        let newerPending = runtime.recordPendingFrameWrite(
+            frame: FrameState.Frame(
+                rect: newerPendingFrame,
+                space: .appKit,
+                isVisibleFrame: true
+            ),
+            requestId: 5309,
+            for: token
+        )
+
+        controller.axManager.onFrameConfirmed?(
+            token.pid,
+            token.windowId,
+            olderConfirmedFrame,
+            .confirmedWrite,
+            5308
+        )
+
+        #expect(controller.workspaceManager.managedRestoreSnapshot(for: token)?.frame == originalFrame)
+        #expect(
+            runtime.workspaceManager.frameState(for: token)?.write
+                == .pending(requestId: 5309, since: newerPending.transactionEpoch)
+        )
     }
 
     @Test @MainActor func axOutcomeQuarantineRejectsStaleTokenWrites() {

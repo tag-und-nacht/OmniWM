@@ -1910,7 +1910,7 @@ final class AXEventHandler: CGSEventDelegate {
         guard let entry = controller.workspaceManager.entry(for: token),
               let frame = AXWindowService.fastFrame(entry.axRef)
         else { return }
-        let originatingEpoch = runtime.frameWriteOutcomeOriginEpoch(source: .ax)
+        let originatingEpoch = runtime.observedFrameOriginEpoch(for: token, source: .ax)
         _ = runtime.submit(
             WMEffectConfirmation.observedFrame(
                 token: token,
@@ -2901,7 +2901,7 @@ final class AXEventHandler: CGSEventDelegate {
             shutdownRaceLog.notice("AXEventHandler.clearManagedFocusState: WMRuntime detached during shutdown; soft-returning")
             return
         }
-        if let originEpochForCancel {
+        if let originEpochForCancel, let workspaceId {
             _ = runtime.cancelManagedFocusRequest(
                 matching: token,
                 workspaceId: workspaceId,

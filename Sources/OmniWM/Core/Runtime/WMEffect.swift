@@ -74,6 +74,19 @@ enum WMEffect: Equatable {
         case none
         case focusWindow(WindowToken)
         case clearManagedFocusAfterEmptyWorkspaceTransition
+
+        static let kindForLog = "commit_workspace_transition"
+
+        var logName: String {
+            switch self {
+            case .none:
+                "none"
+            case .focusWindow:
+                "focus_window"
+            case .clearManagedFocusAfterEmptyWorkspaceTransition:
+                "clear_managed_focus_after_empty_workspace_transition"
+            }
+        }
     }
 
     var epoch: EffectEpoch {
