@@ -425,7 +425,7 @@ private func makeRestoreKernelPersistedKey(
         #expect(output.floating_frame.y == 700)
     }
 
-    @Test func floatingRescuePlannerSkipsHiddenAndApproximateFrames() {
+    @Test func floatingRescuePlannerSkipsScratchpadAndApproximateFrames() {
         let candidates = [
             omniwm_restore_floating_rescue_candidate(
                 token: omniwm_window_token(pid: 1, window_id: 1),
@@ -472,6 +472,21 @@ private func makeRestoreKernelPersistedKey(
                 is_scratchpad_hidden: 1,
                 is_workspace_inactive_hidden: 0
             ),
+            omniwm_restore_floating_rescue_candidate(
+                token: omniwm_window_token(pid: 4, window_id: 4),
+                workspace_id: makeRestoreKernelUUID(high: 4, low: 4),
+                target_monitor_id: 10,
+                target_monitor_visible_frame: makeRestoreKernelRect(x: 0, y: 0, width: 1600, height: 900),
+                current_frame: makeRestoreKernelRect(),
+                floating_frame: makeRestoreKernelRect(x: 700, y: 420, width: 300, height: 200),
+                normalized_origin: makeRestoreKernelPoint(),
+                reference_monitor_id: 0,
+                has_current_frame: 0,
+                has_normalized_origin: 0,
+                has_reference_monitor_id: 0,
+                is_scratchpad_hidden: 0,
+                is_workspace_inactive_hidden: 1
+            ),
         ]
         var operations = Array(
             repeating: omniwm_restore_floating_rescue_operation(
@@ -498,10 +513,13 @@ private func makeRestoreKernelPersistedKey(
         }
 
         #expect(status == OMNIWM_KERNELS_STATUS_OK)
-        #expect(output.operation_count == 1)
+        #expect(output.operation_count == 2)
         #expect(operations[0].candidate_index == 0)
         #expect(operations[0].target_frame.x == 100)
         #expect(operations[0].target_frame.y == 120)
+        #expect(operations[1].candidate_index == 3)
+        #expect(operations[1].target_frame.x == 700)
+        #expect(operations[1].target_frame.y == 420)
     }
 
     @Test func floatingRescuePlannerOrdersOperationsByStableIdentity() {

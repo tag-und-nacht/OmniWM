@@ -505,6 +505,7 @@ private let layoutShutdownRaceLog = Logger(
         executeLayoutPlans(plan.workspacePlans)
 
         if let visibility = plan.effects.visibility {
+            restoreFloatingWindowsForActiveWorkspaces(visibility.activeWorkspaceIds)
             hideInactiveWorkspaces(
                 activeWorkspaceIds: visibility.activeWorkspaceIds,
                 workspaceEntries: visibilityWorkspaceEntries,
@@ -2087,6 +2088,29 @@ private let layoutShutdownRaceLog = Logger(
         )
     }
 
+    private func restoreFloatingWindowsForActiveWorkspaces(
+        _ activeWorkspaceIds: Set<WorkspaceDescriptor.ID>
+    ) {
+        guard let controller else { return }
+        let graph = controller.workspaceManager.workspaceGraphSnapshot()
+
+        for workspaceId in activeWorkspaceIds {
+            for graphEntry in graph.floatingMembership(in: workspaceId) {
+                guard let entry = controller.workspaceManager.entry(for: graphEntry.token) else { continue }
+                guard entry.mode == .floating, entry.layoutReason == .standard else { continue }
+                guard let hiddenState = controller.workspaceManager.hiddenState(for: entry.token),
+                      hiddenState.workspaceInactive
+                else {
+                    continue
+                }
+                guard let monitor = controller.workspaceManager.monitor(for: entry.workspaceId) else { continue }
+
+                controller.axManager.markWindowActive(entry.windowId)
+                unhideWindow(entry, monitor: monitor)
+            }
+        }
+    }
+
     func hideInactiveWorkspaces(
         activeWorkspaceIds: Set<WorkspaceDescriptor.ID>,
         workspaceEntries: [(workspace: WorkspaceDescriptor, entries: [WindowModel.Entry])]? = nil,
@@ -2715,8 +2739,7 @@ private let layoutShutdownRaceLog = Logger(
         for entry: WindowModel.Entry,
         hiddenState: WindowModel.HiddenState
     ) -> Bool {
-        !hiddenState.workspaceInactive
-            && entry.mode == .floating
+        entry.mode == .floating
             && hiddenState.restoresViaFloatingState
     }
 

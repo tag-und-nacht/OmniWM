@@ -1719,6 +1719,60 @@ private func expectNoWorkspaceBarRefresh(
         #expect(recorder.fullRescanReasons.isEmpty)
     }
 
+    @Test @MainActor func niriMixedWorkspaceSwitchRestoresFloatingWindowOnReturn() async {
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
+        defer { cleanupRefreshTestController(controller) }
+
+        guard let ws1 = controller.workspaceManager.workspaceId(for: "1", createIfMissing: false),
+              let ws2 = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true),
+              let monitor = controller.workspaceManager.monitors.first
+        else {
+            Issue.record("Failed to create mixed Niri workspace switch fixture")
+            return
+        }
+
+        _ = await prepareNiriState(
+            on: controller,
+            assignments: [
+                (ws1, 2_241),
+                (ws2, 2_242),
+            ],
+            focusedWindowId: 2_241,
+            ensureWorkspaces: [ws2]
+        )
+        let floatingToken = controller.workspaceManager.addWindow(
+            makeRefreshTestWindow(windowId: 2_243),
+            pid: getpid(),
+            windowId: 2_243,
+            to: ws1,
+            mode: .floating
+        )
+        let floatingFrame = CGRect(x: 320, y: 180, width: 640, height: 420)
+        controller.workspaceManager.updateFloatingGeometry(
+            frame: floatingFrame,
+            for: floatingToken,
+            referenceMonitor: monitor
+        )
+        controller.axManager.forceApplyNextFrame(for: floatingToken.windowId)
+        controller.axManager.applyFramesParallel([(getpid(), floatingToken.windowId, floatingFrame)])
+
+        controller.workspaceNavigationHandler.switchWorkspace(index: 1)
+        await waitForRefreshWork(on: controller)
+
+        #expect(controller.activeWorkspace()?.id == ws2)
+        #expect(controller.workspaceManager.hiddenState(for: floatingToken)?.workspaceInactive == true)
+        #expect(controller.axManager.inactiveWorkspaceWindowIds.contains(floatingToken.windowId))
+
+        controller.workspaceNavigationHandler.switchWorkspace(index: 0)
+        await waitForRefreshWork(on: controller)
+
+        #expect(controller.activeWorkspace()?.id == ws1)
+        #expect(controller.workspaceManager.hiddenState(for: floatingToken) == nil)
+        #expect(!controller.axManager.inactiveWorkspaceWindowIds.contains(floatingToken.windowId))
+        #expect(controller.axManager.lastAppliedFrame(for: floatingToken.windowId) == floatingFrame)
+    }
+
     @Test @MainActor func dwindleWorkspaceSwitchSkipsAnimationWhenTargetWasHidden() async {
         let runtime = makeRefreshTestRuntime()
         let controller = runtime.controller
@@ -1748,6 +1802,67 @@ private func expectNoWorkspaceBarRefresh(
         #expect(recorder.relayoutEvents.map(\.0) == [.workspaceTransition])
         #expect(recorder.relayoutEvents.map(\.1) == [.immediateRelayout])
         #expect(recorder.fullRescanReasons.isEmpty)
+    }
+
+    @Test @MainActor func dwindleMixedWorkspaceSwitchRestoresFloatingWindowOnReturn() async {
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
+        defer { cleanupRefreshTestController(controller) }
+
+        guard let ws1 = controller.workspaceManager.workspaceId(for: "1", createIfMissing: false),
+              let ws2 = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true),
+              let monitor = controller.workspaceManager.monitors.first
+        else {
+            Issue.record("Failed to create mixed Dwindle workspace switch fixture")
+            return
+        }
+
+        configureWorkspaceLayouts(on: controller, layoutsByName: [
+            "1": .dwindle,
+            "2": .dwindle
+        ])
+        let sourceTiledHandle = addWindow(on: controller, workspaceId: ws1, pid: getpid(), windowId: 2_251)
+        let targetTiledHandle = addWindow(on: controller, workspaceId: ws2, pid: getpid(), windowId: 2_252)
+        _ = controller.workspaceManager.rememberFocus(sourceTiledHandle, in: ws1)
+        _ = controller.workspaceManager.rememberFocus(targetTiledHandle, in: ws2)
+        _ = controller.workspaceManager.setManagedFocus(
+            sourceTiledHandle,
+            in: ws1,
+            onMonitor: monitor.id
+        )
+        controller.enableDwindleLayout()
+        await waitForRefreshWork(on: controller)
+
+        let floatingToken = controller.workspaceManager.addWindow(
+            makeRefreshTestWindow(windowId: 2_253),
+            pid: getpid(),
+            windowId: 2_253,
+            to: ws1,
+            mode: .floating
+        )
+        let floatingFrame = CGRect(x: 420, y: 220, width: 620, height: 400)
+        controller.workspaceManager.updateFloatingGeometry(
+            frame: floatingFrame,
+            for: floatingToken,
+            referenceMonitor: monitor
+        )
+        controller.axManager.forceApplyNextFrame(for: floatingToken.windowId)
+        controller.axManager.applyFramesParallel([(getpid(), floatingToken.windowId, floatingFrame)])
+
+        controller.workspaceNavigationHandler.switchWorkspace(index: 1)
+        await waitForRefreshWork(on: controller)
+
+        #expect(controller.activeWorkspace()?.id == ws2)
+        #expect(controller.workspaceManager.hiddenState(for: floatingToken)?.workspaceInactive == true)
+        #expect(controller.axManager.inactiveWorkspaceWindowIds.contains(floatingToken.windowId))
+
+        controller.workspaceNavigationHandler.switchWorkspace(index: 0)
+        await waitForRefreshWork(on: controller)
+
+        #expect(controller.activeWorkspace()?.id == ws1)
+        #expect(controller.workspaceManager.hiddenState(for: floatingToken) == nil)
+        #expect(!controller.axManager.inactiveWorkspaceWindowIds.contains(floatingToken.windowId))
+        #expect(controller.axManager.lastAppliedFrame(for: floatingToken.windowId) == floatingFrame)
     }
 
     @Test @MainActor func workspaceRelativeSwitchUsesImmediateRelayoutOnly() async {

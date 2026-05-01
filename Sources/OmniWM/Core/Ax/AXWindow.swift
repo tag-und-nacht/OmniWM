@@ -57,6 +57,8 @@ enum AXFrameWriteFailureReason: Equatable, Sendable {
 }
 
 struct AXFrameWriteResult: Equatable, Sendable {
+    private static let verifiedFrameTolerancePoints: CGFloat = 1.0
+
     let targetFrame: CGRect
     let observedFrame: CGRect?
     let writeOrder: AXFrameWriteOrder
@@ -65,7 +67,15 @@ struct AXFrameWriteResult: Equatable, Sendable {
     let failureReason: AXFrameWriteFailureReason?
 
     var isVerifiedSuccess: Bool {
-        failureReason == nil
+        if let observedFrame {
+            // Some apps report an AX attribute write error after applying the
+            // requested geometry. Readback is the authoritative success signal.
+            return observedFrame.approximatelyEqual(
+                to: targetFrame,
+                tolerance: Self.verifiedFrameTolerancePoints
+            )
+        }
+        return failureReason == nil
     }
 
     var shouldRetryAfterRefresh: Bool {

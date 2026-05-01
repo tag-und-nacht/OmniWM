@@ -353,7 +353,7 @@ Workspace IDs are positive numeric strings. Direct hotkeys stay limited to `1-9`
 |---------|-----------|--------|-------------|
 | `command toggle-focused-window-floating` | — | shared | Toggle focused window between tiled and floating |
 | `command raise-all-floating-windows` | — | shared | Raise all visible floating windows |
-| `command rescue-offscreen-windows` | — | shared | Clamp tracked floating windows back onto their visible monitors |
+| `command rescue-offscreen-windows` | — | shared | Clamp visible-workspace floating windows back onto their monitors and clear stale workspace-inactive hidden state |
 | `command scratchpad assign` | — | shared | Assign the focused window to the scratchpad |
 | `command scratchpad toggle` | — | shared | Show or hide the scratchpad window |
 

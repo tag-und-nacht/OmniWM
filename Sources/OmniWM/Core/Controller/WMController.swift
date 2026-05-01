@@ -2254,6 +2254,8 @@ final class WMController {
         }
         for operation in rescuePlan.operations {
             guard let entry = workspaceManager.entry(for: operation.token) else { continue }
+            let hiddenState = workspaceManager.hiddenState(for: operation.token)
+            let wasWorkspaceInactiveHidden = hiddenState?.workspaceInactive == true
             runtime.updateFloatingGeometry(
                 frame: operation.targetFrame,
                 for: operation.token,
@@ -2261,6 +2263,11 @@ final class WMController {
                 restoreToFloating: true,
                 source: source
             )
+            if wasWorkspaceInactiveHidden {
+                runtime.setHiddenState(nil, for: operation.token, source: source)
+                axManager.unsuppressFrameWrites([(operation.pid, operation.windowId)])
+                axManager.markWindowActive(operation.windowId)
+            }
             axManager.forceApplyNextFrame(for: operation.windowId)
             frameUpdates.append((operation.pid, operation.windowId, operation.targetFrame))
             rescuedEntries.append(entry)
