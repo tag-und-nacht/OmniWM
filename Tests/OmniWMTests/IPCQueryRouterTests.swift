@@ -68,7 +68,7 @@ private func prepareIPCQueryRouterNiriState(
 }
 
 @Suite(.serialized) @MainActor struct IPCQueryRouterTests {
-    @Test func workspaceBarQueryKeepsLegacyTiledOnlyProjectionWhenFloatingWindowsAreDisabled() throws {
+    @Test func workspaceBarQueryKeepsTiledOnlyProjectionWhenFloatingWindowsAreDisabled() throws {
         let controller = makeLayoutPlanTestController()
         defer { resetSharedControllerStateForTests() }
         controller.settings.workspaceBarHideEmptyWorkspaces = true

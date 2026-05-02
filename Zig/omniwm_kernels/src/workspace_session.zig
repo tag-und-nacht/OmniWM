@@ -53,6 +53,10 @@ const WindowToken = extern struct {
     window_id: i64,
 };
 
+const LogicalWindowId = extern struct {
+    value: u64 = 0,
+};
+
 const Point = extern struct {
     x: f64,
     y: f64,
@@ -78,10 +82,10 @@ const Input = extern struct {
     pending_tiled_workspace_id: UUID,
     confirmed_tiled_workspace_id: UUID,
     confirmed_floating_workspace_id: UUID,
-    pending_tiled_focus_token: WindowToken,
-    confirmed_tiled_focus_token: WindowToken,
-    confirmed_floating_focus_token: WindowToken,
-    remembered_focus_token: WindowToken,
+    pending_tiled_focus_logical_id: LogicalWindowId = .{},
+    confirmed_tiled_focus_logical_id: LogicalWindowId = .{},
+    confirmed_floating_focus_logical_id: LogicalWindowId = .{},
+    remembered_focus_logical_id: LogicalWindowId = .{},
     interaction_monitor_id: u32,
     previous_interaction_monitor_id: u32,
     current_viewport_kind: u32,
@@ -94,10 +98,10 @@ const Input = extern struct {
     has_pending_tiled_workspace_id: u8,
     has_confirmed_tiled_workspace_id: u8,
     has_confirmed_floating_workspace_id: u8,
-    has_pending_tiled_focus_token: u8,
-    has_confirmed_tiled_focus_token: u8,
-    has_confirmed_floating_focus_token: u8,
-    has_remembered_focus_token: u8,
+    has_pending_tiled_focus_logical_id: u8 = 0,
+    has_confirmed_tiled_focus_logical_id: u8 = 0,
+    has_confirmed_floating_focus_logical_id: u8 = 0,
+    has_remembered_focus_logical_id: u8 = 0,
     has_interaction_monitor_id: u8,
     has_previous_interaction_monitor_id: u8,
     has_current_viewport_state: u8,
@@ -168,6 +172,7 @@ const WorkspaceInput = extern struct {
 const WindowCandidateInput = extern struct {
     workspace_id: UUID,
     token: WindowToken,
+    logical_id: LogicalWindowId = .{},
     mode: u32,
     order_index: u32,
     has_hidden_proportional_position: u8,
@@ -207,6 +212,7 @@ const Output = extern struct {
     interaction_monitor_id: u32,
     previous_interaction_monitor_id: u32,
     resolved_focus_token: WindowToken,
+    resolved_focus_logical_id: LogicalWindowId = .{},
     monitor_results: [*c]MonitorResult,
     monitor_result_capacity: usize,
     monitor_result_count: usize,
@@ -219,6 +225,7 @@ const Output = extern struct {
     has_interaction_monitor_id: u8,
     has_previous_interaction_monitor_id: u8,
     has_resolved_focus_token: u8,
+    has_resolved_focus_logical_id: u8 = 0,
     should_remember_focus: u8,
     refresh_restore_intents: u8,
 };
@@ -467,6 +474,39 @@ fn tokenEq(lhs: WindowToken, rhs: WindowToken) bool {
 
 fn workspaceToken(has_token: u8, token: WindowToken) ?WindowToken {
     return if (has_token != 0) token else null;
+}
+
+fn logicalIdForResolvedToken(
+    window_candidates: []const WindowCandidateInput,
+    workspace_id: UUID,
+    token: WindowToken,
+) ?LogicalWindowId {
+    for (window_candidates) |candidate| {
+        if (!uuidEq(candidate.workspace_id, workspace_id)) {
+            continue;
+        }
+        if (tokenEq(candidate.token, token) and candidate.logical_id.value != 0) {
+            return candidate.logical_id;
+        }
+    }
+    return null;
+}
+
+fn writeResolvedFocus(
+    output: *Output,
+    window_candidates: []const WindowCandidateInput,
+    workspace_id: UUID,
+    token: WindowToken,
+) void {
+    output.resolved_focus_token = token;
+    output.has_resolved_focus_token = 1;
+    if (logicalIdForResolvedToken(window_candidates, workspace_id, token)) |logical_id| {
+        output.resolved_focus_logical_id = logical_id;
+        output.has_resolved_focus_logical_id = 1;
+    } else {
+        output.resolved_focus_logical_id = .{};
+        output.has_resolved_focus_logical_id = 0;
+    }
 }
 
 fn workspaceHasConfiguredAssignment(workspace: WorkspaceState) bool {
@@ -908,10 +948,6 @@ fn activateWorkspaceOnMonitor(
                 .pending_tiled_workspace_id = zeroUUID(),
                 .confirmed_tiled_workspace_id = zeroUUID(),
                 .confirmed_floating_workspace_id = zeroUUID(),
-                .pending_tiled_focus_token = zeroToken(),
-                .confirmed_tiled_focus_token = zeroToken(),
-                .confirmed_floating_focus_token = zeroToken(),
-                .remembered_focus_token = zeroToken(),
                 .interaction_monitor_id = input.interaction_monitor_id,
                 .previous_interaction_monitor_id = input.previous_interaction_monitor_id,
                 .current_viewport_kind = viewport_none,
@@ -924,10 +960,6 @@ fn activateWorkspaceOnMonitor(
                 .has_pending_tiled_workspace_id = 0,
                 .has_confirmed_tiled_workspace_id = 0,
                 .has_confirmed_floating_workspace_id = 0,
-                .has_pending_tiled_focus_token = 0,
-                .has_confirmed_tiled_focus_token = 0,
-                .has_confirmed_floating_focus_token = 0,
-                .has_remembered_focus_token = 0,
                 .has_interaction_monitor_id = input.has_interaction_monitor_id,
                 .has_previous_interaction_monitor_id = input.has_previous_interaction_monitor_id,
                 .has_current_viewport_state = 0,
@@ -1110,6 +1142,52 @@ fn tokenIsEligibleForWorkspace(
     return false;
 }
 
+fn focusInputMatchesCandidate(
+    candidate: WindowCandidateInput,
+    has_logical_id: u8,
+    logical_id: LogicalWindowId,
+) bool {
+    if (has_logical_id == 0 or logical_id.value == 0) {
+        return false;
+    }
+    return candidate.logical_id.value != 0 and
+        candidate.logical_id.value == logical_id.value;
+}
+
+fn focusInputCandidateForWorkspace(
+    window_candidates: []const WindowCandidateInput,
+    workspace_id: UUID,
+    mode: u32,
+    has_logical_id: u8,
+    logical_id: LogicalWindowId,
+) ?WindowCandidateInput {
+    for (window_candidates) |candidate| {
+        if (focusInputMatchesCandidate(candidate, has_logical_id, logical_id) and
+            candidateIsEligible(candidate, workspace_id, mode))
+        {
+            return candidate;
+        }
+    }
+    return null;
+}
+
+fn focusInputCandidateForWorkspaceIgnoringHiddenState(
+    window_candidates: []const WindowCandidateInput,
+    workspace_id: UUID,
+    mode: u32,
+    has_logical_id: u8,
+    logical_id: LogicalWindowId,
+) ?WindowCandidateInput {
+    for (window_candidates) |candidate| {
+        if (focusInputMatchesCandidate(candidate, has_logical_id, logical_id) and
+            uuidEq(candidate.workspace_id, workspace_id) and candidate.mode == mode)
+        {
+            return candidate;
+        }
+    }
+    return null;
+}
+
 fn firstEligibleTokenForWorkspace(
     window_candidates: []const WindowCandidateInput,
     workspace_id: UUID,
@@ -1210,17 +1288,19 @@ fn preferredFocusToken(
     workspace: WorkspaceState,
     window_candidates: []const WindowCandidateInput,
 ) ?WindowToken {
-    if (input.has_pending_tiled_focus_token != 0 and
+    if (input.has_pending_tiled_focus_logical_id != 0 and
         input.has_pending_tiled_workspace_id != 0 and
-        uuidEq(input.pending_tiled_workspace_id, workspace.input.workspace_id) and
-        tokenIsEligibleForWorkspace(
+        uuidEq(input.pending_tiled_workspace_id, workspace.input.workspace_id))
+    {
+        if (focusInputCandidateForWorkspace(
             window_candidates,
             workspace.input.workspace_id,
             window_mode_tiling,
-            input.pending_tiled_focus_token,
-        ))
-    {
-        return input.pending_tiled_focus_token;
+            input.has_pending_tiled_focus_logical_id,
+            input.pending_tiled_focus_logical_id,
+        )) |candidate| {
+            return candidate.token;
+        }
     }
     if (workspaceToken(
         workspace.input.has_remembered_tiled_focus_token,
@@ -1235,17 +1315,19 @@ fn preferredFocusToken(
             return token;
         }
     }
-    if (input.has_confirmed_tiled_focus_token != 0 and
+    if (input.has_confirmed_tiled_focus_logical_id != 0 and
         input.has_confirmed_tiled_workspace_id != 0 and
-        uuidEq(input.confirmed_tiled_workspace_id, workspace.input.workspace_id) and
-        tokenIsEligibleForWorkspace(
+        uuidEq(input.confirmed_tiled_workspace_id, workspace.input.workspace_id))
+    {
+        if (focusInputCandidateForWorkspace(
             window_candidates,
             workspace.input.workspace_id,
             window_mode_tiling,
-            input.confirmed_tiled_focus_token,
-        ))
-    {
-        return input.confirmed_tiled_focus_token;
+            input.has_confirmed_tiled_focus_logical_id,
+            input.confirmed_tiled_focus_logical_id,
+        )) |candidate| {
+            return candidate.token;
+        }
     }
     if (firstEligibleTokenForWorkspace(
         window_candidates,
@@ -1253,6 +1335,22 @@ fn preferredFocusToken(
         window_mode_tiling,
     )) |token| {
         return token;
+    }
+    if (input.has_pending_tiled_focus_logical_id != 0 and
+        input.has_pending_tiled_workspace_id != 0 and
+        uuidEq(input.pending_tiled_workspace_id, workspace.input.workspace_id))
+    {
+        // Managed focus requests remain authoritative while Niri may briefly
+        // carry layout-transient hidden state for every tiled candidate.
+        if (focusInputCandidateForWorkspaceIgnoringHiddenState(
+            window_candidates,
+            workspace.input.workspace_id,
+            window_mode_tiling,
+            input.has_pending_tiled_focus_logical_id,
+            input.pending_tiled_focus_logical_id,
+        )) |candidate| {
+            return candidate.token;
+        }
     }
     return null;
 }
@@ -1291,17 +1389,19 @@ fn resolveWorkspaceFocusToken(
             return token;
         }
     }
-    if (input.has_confirmed_floating_focus_token != 0 and
+    if (input.has_confirmed_floating_focus_logical_id != 0 and
         input.has_confirmed_floating_workspace_id != 0 and
-        uuidEq(input.confirmed_floating_workspace_id, workspace.input.workspace_id) and
-        tokenIsEligibleForWorkspace(
+        uuidEq(input.confirmed_floating_workspace_id, workspace.input.workspace_id))
+    {
+        if (focusInputCandidateForWorkspace(
             window_candidates,
             workspace.input.workspace_id,
             window_mode_floating,
-            input.confirmed_floating_focus_token,
-        ))
-    {
-        return input.confirmed_floating_focus_token;
+            input.has_confirmed_floating_focus_logical_id,
+            input.confirmed_floating_focus_logical_id,
+        )) |candidate| {
+            return candidate.token;
+        }
     }
     if (firstEligibleTokenForWorkspace(
         window_candidates,
@@ -1792,8 +1892,7 @@ fn planInternal(
                 return kernel_ok;
             };
             if (preferredFocusToken(input.*, workspaces[workspace_index], window_candidates)) |token| {
-                output.resolved_focus_token = token;
-                output.has_resolved_focus_token = 1;
+                writeResolvedFocus(output, window_candidates, input.workspace_id, token);
                 output.outcome = outcome_apply;
             } else {
                 output.outcome = outcome_noop;
@@ -1808,8 +1907,7 @@ fn planInternal(
                 return kernel_ok;
             };
             if (resolveWorkspaceFocusToken(input.*, workspaces[workspace_index], window_candidates)) |token| {
-                output.resolved_focus_token = token;
-                output.has_resolved_focus_token = 1;
+                writeResolvedFocus(output, window_candidates, input.workspace_id, token);
                 output.outcome = outcome_apply;
             } else {
                 const should_clear_confirmed = (input.has_focused_workspace_id != 0 and
@@ -1827,7 +1925,7 @@ fn planInternal(
         },
         op_apply_session_patch => {
             const has_viewport_patch = input.has_patch_viewport_state != 0;
-            const has_remembered_focus = input.has_remembered_focus_token != 0;
+            const has_remembered_focus = input.has_remembered_focus_logical_id != 0;
 
             if (!has_viewport_patch and !has_remembered_focus) {
                 output.outcome = outcome_noop;
@@ -1923,10 +2021,6 @@ test "project resolves specific display fallback using updated anchor" {
         .pending_tiled_workspace_id = zeroUUID(),
         .confirmed_tiled_workspace_id = zeroUUID(),
         .confirmed_floating_workspace_id = zeroUUID(),
-        .pending_tiled_focus_token = zeroToken(),
-        .confirmed_tiled_focus_token = zeroToken(),
-        .confirmed_floating_focus_token = zeroToken(),
-        .remembered_focus_token = zeroToken(),
         .interaction_monitor_id = 0,
         .previous_interaction_monitor_id = 0,
         .current_viewport_kind = viewport_none,
@@ -1939,10 +2033,6 @@ test "project resolves specific display fallback using updated anchor" {
         .has_pending_tiled_workspace_id = 0,
         .has_confirmed_tiled_workspace_id = 0,
         .has_confirmed_floating_workspace_id = 0,
-        .has_pending_tiled_focus_token = 0,
-        .has_confirmed_tiled_focus_token = 0,
-        .has_confirmed_floating_focus_token = 0,
-        .has_remembered_focus_token = 0,
         .has_interaction_monitor_id = 0,
         .has_previous_interaction_monitor_id = 0,
         .has_current_viewport_state = 0,
@@ -2473,8 +2563,10 @@ test "preferred focus skips hidden pending candidate and uses first eligible til
 
     const hidden_pending = WindowToken{ .pid = 50, .window_id = 5001 };
     const first_eligible = WindowToken{ .pid = 50, .window_id = 5002 };
-    input.pending_tiled_focus_token = hidden_pending;
-    input.has_pending_tiled_focus_token = 1;
+    const hidden_pending_id = LogicalWindowId{ .value = 1 };
+    const first_eligible_id = LogicalWindowId{ .value = 2 };
+    input.pending_tiled_focus_logical_id = hidden_pending_id;
+    input.has_pending_tiled_focus_logical_id = 1;
 
     const workspace = [_]WorkspaceInput{
         .{
@@ -2496,6 +2588,7 @@ test "preferred focus skips hidden pending candidate and uses first eligible til
         .{
             .workspace_id = input.workspace_id,
             .token = hidden_pending,
+            .logical_id = hidden_pending_id,
             .mode = window_mode_tiling,
             .order_index = 0,
             .has_hidden_proportional_position = 1,
@@ -2504,6 +2597,7 @@ test "preferred focus skips hidden pending candidate and uses first eligible til
         .{
             .workspace_id = input.workspace_id,
             .token = first_eligible,
+            .logical_id = first_eligible_id,
             .mode = window_mode_tiling,
             .order_index = 1,
             .has_hidden_proportional_position = 0,
@@ -2552,6 +2646,101 @@ test "preferred focus skips hidden pending candidate and uses first eligible til
     try std.testing.expectEqual(kernel_ok, status);
     try std.testing.expectEqual(@as(u8, 1), output.has_resolved_focus_token);
     try std.testing.expectEqual(first_eligible.window_id, output.resolved_focus_token.window_id);
+}
+
+test "preferred focus falls back to pending tiled candidate when all tiled windows are transient hidden" {
+    var input = std.mem.zeroes(Input);
+    input.operation = op_resolve_preferred_focus;
+    input.workspace_id = UUID{ .high = 11, .low = 11 };
+    input.has_workspace_id = 1;
+    input.pending_tiled_workspace_id = input.workspace_id;
+    input.has_pending_tiled_workspace_id = 1;
+
+    const pending = WindowToken{ .pid = 70, .window_id = 7001 };
+    const other = WindowToken{ .pid = 70, .window_id = 7002 };
+    const pending_id = LogicalWindowId{ .value = 3 };
+    const other_id = LogicalWindowId{ .value = 4 };
+    input.pending_tiled_focus_logical_id = pending_id;
+    input.has_pending_tiled_focus_logical_id = 1;
+
+    const workspace = [_]WorkspaceInput{
+        .{
+            .workspace_id = input.workspace_id,
+            .assigned_anchor_point = .{ .x = 0, .y = 0 },
+            .assignment_kind = assignment_unconfigured,
+            .specific_display_id = 0,
+            .specific_display_name = .{ .offset = 0, .length = 0 },
+            .remembered_tiled_focus_token = zeroToken(),
+            .remembered_floating_focus_token = zeroToken(),
+            .has_assigned_anchor_point = 0,
+            .has_specific_display_id = 0,
+            .has_specific_display_name = 0,
+            .has_remembered_tiled_focus_token = 0,
+            .has_remembered_floating_focus_token = 0,
+        },
+    };
+    const candidates = [_]WindowCandidateInput{
+        .{
+            .workspace_id = input.workspace_id,
+            .token = pending,
+            .logical_id = pending_id,
+            .mode = window_mode_tiling,
+            .order_index = 0,
+            .has_hidden_proportional_position = 1,
+            .hidden_reason_is_workspace_inactive = 0,
+        },
+        .{
+            .workspace_id = input.workspace_id,
+            .token = other,
+            .logical_id = other_id,
+            .mode = window_mode_tiling,
+            .order_index = 1,
+            .has_hidden_proportional_position = 1,
+            .hidden_reason_is_workspace_inactive = 0,
+        },
+    };
+    var output = Output{
+        .outcome = 0,
+        .patch_viewport_action = 0,
+        .focus_clear_action = 0,
+        .interaction_monitor_id = 0,
+        .previous_interaction_monitor_id = 0,
+        .resolved_focus_token = zeroToken(),
+        .monitor_results = null,
+        .monitor_result_capacity = 0,
+        .monitor_result_count = 0,
+        .workspace_projections = null,
+        .workspace_projection_capacity = 0,
+        .workspace_projection_count = 0,
+        .disconnected_cache_results = null,
+        .disconnected_cache_result_capacity = 0,
+        .disconnected_cache_result_count = 0,
+        .has_interaction_monitor_id = 0,
+        .has_previous_interaction_monitor_id = 0,
+        .has_resolved_focus_token = 0,
+        .should_remember_focus = 0,
+        .refresh_restore_intents = 0,
+    };
+
+    const status = omniwm_workspace_session_plan(
+        &input,
+        null,
+        0,
+        null,
+        0,
+        &workspace,
+        workspace.len,
+        &candidates,
+        candidates.len,
+        null,
+        0,
+        null,
+        0,
+        &output,
+    );
+    try std.testing.expectEqual(kernel_ok, status);
+    try std.testing.expectEqual(@as(u8, 1), output.has_resolved_focus_token);
+    try std.testing.expectEqual(pending.window_id, output.resolved_focus_token.window_id);
 }
 
 test "resolve workspace focus falls back to first eligible floating candidate" {

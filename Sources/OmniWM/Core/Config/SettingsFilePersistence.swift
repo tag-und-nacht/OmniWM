@@ -5,19 +5,32 @@ import Foundation
 @MainActor
 final class SettingsFilePersistence {
     struct FileFingerprint: Equatable {
-        let modificationDate: Date
+        // Atomic external editors replace the path with a new inode; mtime+size alone
+        // can match a just-written file closely enough to suppress a real reload.
+        let deviceID: UInt64
+        let inode: UInt64
+        let modificationTimeNanoseconds: Int64
+        let statusChangeTimeNanoseconds: Int64
         let fileSize: UInt64
     }
 
-    private struct UnsupportedSettingsVersionError: LocalizedError {
-        let foundVersion: Int
+    private struct FileSnapshot {
+        let export: SettingsExport
+        let fingerprint: FileFingerprint
+    }
 
-        var errorDescription: String? {
-            "Unsupported settings schema version \(foundVersion). Expected \(SettingsFilePersistence.configVersion)."
+    private struct FileIdentity: Equatable {
+        let deviceID: UInt64
+        let inode: UInt64
+
+        init(_ fingerprint: FileFingerprint) {
+            deviceID = fingerprint.deviceID
+            inode = fingerprint.inode
         }
     }
 
-    nonisolated static let configVersion = 5
+    private static let nanosecondsPerSecond: Int64 = 1_000_000_000
+
     nonisolated static let defaultDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".config/omniwm", isDirectory: true)
     nonisolated static let fileName = "settings.toml"
@@ -32,6 +45,9 @@ final class SettingsFilePersistence {
     private let deferSaves: Bool
     private var directoryFileDescriptor: CInt = -1
     private var directoryWatcher: DispatchSourceFileSystemObject?
+    private var settingsFileDescriptor: CInt = -1
+    private var settingsFileWatcher: DispatchSourceFileSystemObject?
+    private var watchedSettingsFileIdentity: FileIdentity?
     private var pendingExport: SettingsExport?
     private var saveScheduled = false
     private var lastWrittenFingerprint: FileFingerprint?
@@ -48,11 +64,15 @@ final class SettingsFilePersistence {
         self.deferSaves = deferSaves
 
         if startWatching {
-            startFileWatcher()
+            startWatchers()
         }
     }
 
     deinit {
+        settingsFileWatcher?.cancel()
+        if settingsFileWatcher == nil, settingsFileDescriptor >= 0 {
+            close(settingsFileDescriptor)
+        }
         directoryWatcher?.cancel()
         if directoryWatcher == nil, directoryFileDescriptor >= 0 {
             close(directoryFileDescriptor)
@@ -72,9 +92,9 @@ final class SettingsFilePersistence {
                 return defaults
             }
 
-            let export = try readExport()
-            lastObservedFingerprint = currentFingerprint()
-            return export
+            let snapshot = try readSnapshot()
+            lastObservedFingerprint = snapshot.fingerprint
+            return snapshot.export
         } catch {
             report("Failed to load \(fileURL.path): \(error.localizedDescription)")
             moveCorruptFileAsideIfPresent()
@@ -87,14 +107,13 @@ final class SettingsFilePersistence {
     func save(_ export: SettingsExport) {
         do {
             try ensureDirectoryExists()
-            var canonicalExport = export
-            canonicalExport.version = Self.configVersion
-            let data = try SettingsTOMLCodec.encode(canonicalExport)
+            let data = try SettingsTOMLCodec.encode(export)
             try data.write(to: fileURL, options: .atomic)
 
             let fingerprint = currentFingerprint()
             lastWrittenFingerprint = fingerprint
             lastObservedFingerprint = fingerprint
+            refreshSettingsFileWatcher(for: fingerprint)
         } catch {
             report("Failed to save \(fileURL.path): \(error.localizedDescription)")
         }
@@ -132,16 +151,16 @@ final class SettingsFilePersistence {
         }
 
         do {
-            let export = try readExport()
-            lastObservedFingerprint = currentFingerprint()
-            return export
+            let snapshot = try readSnapshot()
+            lastObservedFingerprint = snapshot.fingerprint
+            return snapshot.export
         } catch {
             report("Ignoring invalid external settings edit at \(fileURL.path): \(error.localizedDescription)")
             return nil
         }
     }
 
-    private func startFileWatcher() {
+    private func startWatchers() {
         do {
             try ensureDirectoryExists()
         } catch {
@@ -149,14 +168,20 @@ final class SettingsFilePersistence {
             return
         }
 
+        startDirectoryWatcher()
+        refreshSettingsFileWatcher()
+    }
+
+    private func startDirectoryWatcher() {
         directoryFileDescriptor = open(directoryURL.path, O_EVTONLY)
         guard directoryFileDescriptor >= 0 else {
             report("Failed to watch settings directory \(directoryURL.path).")
             return
         }
 
+        let fileDescriptor = directoryFileDescriptor
         let watcher = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: directoryFileDescriptor,
+            fileDescriptor: fileDescriptor,
             eventMask: .write,
             queue: .main
         )
@@ -164,16 +189,24 @@ final class SettingsFilePersistence {
             self?.handleDirectoryWriteEvent()
         }
         watcher.setCancelHandler { [weak self] in
-            guard let self, self.directoryFileDescriptor >= 0 else { return }
-            close(self.directoryFileDescriptor)
-            self.directoryFileDescriptor = -1
+            close(fileDescriptor)
+            self?.directoryFileDescriptor = -1
         }
         directoryWatcher = watcher
         watcher.resume()
     }
 
     private func handleDirectoryWriteEvent() {
+        handlePossibleSettingsFileChange()
+    }
+
+    private func handleSettingsFileEvent() {
+        handlePossibleSettingsFileChange()
+    }
+
+    private func handlePossibleSettingsFileChange() {
         let observedFingerprint = currentFingerprint()
+        refreshSettingsFileWatcher(for: observedFingerprint)
 
         if observedFingerprint == lastWrittenFingerprint {
             lastObservedFingerprint = observedFingerprint
@@ -185,31 +218,102 @@ final class SettingsFilePersistence {
         onExternalChange?(export)
     }
 
+    private func refreshSettingsFileWatcher(for observedFingerprint: FileFingerprint? = nil) {
+        let fingerprint = observedFingerprint ?? currentFingerprint()
+        guard let fingerprint else {
+            cancelSettingsFileWatcher()
+            return
+        }
+
+        let identity = FileIdentity(fingerprint)
+        guard settingsFileWatcher == nil || watchedSettingsFileIdentity != identity else { return }
+
+        cancelSettingsFileWatcher()
+
+        let fileDescriptor = open(fileURL.path, O_EVTONLY)
+        guard fileDescriptor >= 0 else {
+            settingsFileDescriptor = -1
+            watchedSettingsFileIdentity = nil
+            report("Failed to watch settings file \(fileURL.path).")
+            return
+        }
+
+        settingsFileDescriptor = fileDescriptor
+        watchedSettingsFileIdentity = identity
+
+        let watcher = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fileDescriptor,
+            eventMask: [.write, .delete, .rename],
+            queue: .main
+        )
+        watcher.setEventHandler { [weak self] in
+            self?.handleSettingsFileEvent()
+        }
+        watcher.setCancelHandler { [weak self] in
+            close(fileDescriptor)
+            if self?.settingsFileDescriptor == fileDescriptor {
+                self?.settingsFileDescriptor = -1
+            }
+        }
+        settingsFileWatcher = watcher
+        watcher.resume()
+    }
+
+    private func cancelSettingsFileWatcher() {
+        settingsFileWatcher?.cancel()
+        settingsFileWatcher = nil
+        settingsFileDescriptor = -1
+        watchedSettingsFileIdentity = nil
+    }
+
     private func ensureDirectoryExists() throws {
         try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
     }
 
-    private func readExport() throws -> SettingsExport {
-        let data = try Data(contentsOf: fileURL)
-        let export = try SettingsTOMLCodec.decode(data)
-        guard export.version == Self.configVersion else {
-            throw UnsupportedSettingsVersionError(foundVersion: export.version)
+    private func readSnapshot() throws -> FileSnapshot {
+        let handle = try FileHandle(forReadingFrom: fileURL)
+        defer {
+            try? handle.close()
         }
-        return export
+
+        guard let data = try handle.readToEnd() else {
+            throw CocoaError(.fileReadUnknown)
+        }
+
+        var statBuffer = stat()
+        guard Darwin.fstat(handle.fileDescriptor, &statBuffer) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+
+        return FileSnapshot(
+            export: try SettingsTOMLCodec.decode(data),
+            fingerprint: Self.fingerprint(from: statBuffer)
+        )
     }
 
     private func currentFingerprint() -> FileFingerprint? {
-        guard let resourceValues = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]),
-              let modificationDate = resourceValues.contentModificationDate,
-              let fileSize = resourceValues.fileSize
-        else {
-            return nil
+        var statBuffer = stat()
+        let result = fileURL.withUnsafeFileSystemRepresentation { path -> CInt in
+            guard let path else { return -1 }
+            return Darwin.fstatat(AT_FDCWD, path, &statBuffer, 0)
         }
 
-        return FileFingerprint(
-            modificationDate: modificationDate,
-            fileSize: UInt64(fileSize)
+        guard result == 0 else { return nil }
+        return Self.fingerprint(from: statBuffer)
+    }
+
+    private static func fingerprint(from statBuffer: stat) -> FileFingerprint {
+        FileFingerprint(
+            deviceID: UInt64(statBuffer.st_dev),
+            inode: UInt64(statBuffer.st_ino),
+            modificationTimeNanoseconds: nanoseconds(from: statBuffer.st_mtimespec),
+            statusChangeTimeNanoseconds: nanoseconds(from: statBuffer.st_ctimespec),
+            fileSize: UInt64(statBuffer.st_size)
         )
+    }
+
+    private static func nanoseconds(from timestamp: timespec) -> Int64 {
+        Int64(timestamp.tv_sec) * nanosecondsPerSecond + Int64(timestamp.tv_nsec)
     }
 
     private func moveCorruptFileAsideIfPresent() {

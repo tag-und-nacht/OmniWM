@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 import AppKit
 import CoreGraphics
+import ColorSync
 
 @MainActor
 final class ScreenLookupCache {
@@ -68,21 +69,38 @@ struct Monitor: Identifiable, Hashable {
     let hasNotch: Bool
 
     let name: String
+    let displayUUID: String?
+
+    init(
+        id: ID,
+        displayId: CGDirectDisplayID,
+        frame: CGRect,
+        visibleFrame: CGRect,
+        hasNotch: Bool,
+        name: String,
+        displayUUID: String? = nil
+    ) {
+        self.id = id
+        self.displayId = displayId
+        self.frame = frame
+        self.visibleFrame = visibleFrame
+        self.hasNotch = hasNotch
+        self.name = name
+        self.displayUUID = displayUUID
+    }
 
     static func current() -> [Monitor] {
         NSScreen.screens.compactMap { screen -> Monitor? in
             guard let displayId = screen.displayId else { return nil }
-            var hasNotch = false
-            if #available(macOS 12.0, *) {
-                hasNotch = screen.safeAreaInsets.top > 0
-            }
+            let hasNotch = screen.safeAreaInsets.top > 0
             return Monitor(
                 id: ID(displayId: displayId),
                 displayId: displayId,
                 frame: screen.frame,
                 visibleFrame: screen.visibleFrame,
                 hasNotch: hasNotch,
-                name: screen.localizedName
+                name: screen.localizedName,
+                displayUUID: displayUUID(for: displayId)
             )
         }
     }
@@ -90,10 +108,7 @@ struct Monitor: Identifiable, Hashable {
     static func fallback() -> Monitor {
         let frame = NSScreen.main?.frame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
         let displayId = NSScreen.main?.displayId ?? CGMainDisplayID()
-        var hasNotch = false
-        if #available(macOS 12.0, *) {
-            hasNotch = NSScreen.main?.safeAreaInsets.top ?? 0 > 0
-        }
+        let hasNotch = (NSScreen.main?.safeAreaInsets.top ?? 0) > 0
         return Monitor(
             id: .fallback,
             displayId: displayId,
@@ -102,6 +117,13 @@ struct Monitor: Identifiable, Hashable {
             hasNotch: hasNotch,
             name: "Fallback"
         )
+    }
+
+    static func displayUUID(for displayId: CGDirectDisplayID) -> String? {
+        guard let uuid = CGDisplayCreateUUIDFromDisplayID(displayId)?.takeRetainedValue() else {
+            return nil
+        }
+        return CFUUIDCreateString(kCFAllocatorDefault, uuid) as String
     }
 }
 

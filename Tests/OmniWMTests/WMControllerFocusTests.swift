@@ -148,6 +148,19 @@ private final class NotificationValueBox<Value>: @unchecked Sendable {
 }
 
 @MainActor
+private var _retainedFocusTestRuntimes: [WMRuntime] = []
+
+@MainActor
+private func makeFocusTestController(
+    settings: SettingsStore,
+    windowFocusOperations: WindowFocusOperations? = nil
+) -> WMController {
+    let runtime = WMRuntime(settings: settings, windowFocusOperations: windowFocusOperations)
+    _retainedFocusTestRuntimes.append(runtime)
+    return runtime.controller
+}
+
+@MainActor
 private func makeFocusTestController(
     windowFocusOperations: WindowFocusOperations,
     workspaceConfigurations: [WorkspaceConfiguration] = [
@@ -157,7 +170,7 @@ private func makeFocusTestController(
     resetSharedControllerStateForTests()
     let settings = SettingsStore(defaults: makeFocusTestDefaults())
     settings.workspaceConfigurations = workspaceConfigurations
-    let controller = WMController(settings: settings, windowFocusOperations: windowFocusOperations)
+    let controller = makeFocusTestController(settings: settings, windowFocusOperations: windowFocusOperations)
     let monitor = makeFocusTestMonitor()
     controller.workspaceManager.applyMonitorConfigurationChange([monitor])
 
@@ -189,7 +202,7 @@ private func makeTwoMonitorFocusController(
         WorkspaceConfiguration(name: "1", monitorAssignment: .main),
         WorkspaceConfiguration(name: "2", monitorAssignment: .secondary)
     ]
-    let controller = WMController(settings: settings, windowFocusOperations: windowFocusOperations)
+    let controller = makeFocusTestController(settings: settings, windowFocusOperations: windowFocusOperations)
     let primaryMonitor = makeLayoutPlanPrimaryTestMonitor(name: "Primary")
     let secondaryMonitor = makeLayoutPlanSecondaryTestMonitor(name: "Secondary", x: 1920)
     controller.workspaceManager.applyMonitorConfigurationChange([primaryMonitor, secondaryMonitor])
@@ -217,7 +230,7 @@ private func waitForFocusRefresh(on controller: WMController) async {
 @Suite(.serialized) struct WMControllerFocusTests {
     @Test @MainActor func toggleHiddenBarUpdatesCollapsedStateWithoutEnableGate() {
         let settings = SettingsStore(defaults: makeFocusTestDefaults())
-        let controller = WMController(settings: settings)
+        let controller = makeFocusTestController(settings: settings)
         settings.hiddenBarIsCollapsed = false
 
         #expect(settings.hiddenBarIsCollapsed == false)
@@ -230,7 +243,7 @@ private func waitForFocusRefresh(on controller: WMController) async {
     @Test @MainActor func applyPersistedSettingsDisablesViewportAnimationsOnColdStart() {
         let settings = SettingsStore(defaults: makeFocusTestDefaults())
         settings.animationsEnabled = false
-        let controller = WMController(settings: settings)
+        let controller = makeFocusTestController(settings: settings)
 
         controller.applyPersistedSettings(settings)
 
@@ -289,7 +302,7 @@ private func waitForFocusRefresh(on controller: WMController) async {
 
     @Test @MainActor func turningAnimationsOffDoesNotForceQuakeTransitionCompletion() {
         let settings = SettingsStore(defaults: makeFocusTestDefaults())
-        let controller = WMController(settings: settings)
+        let controller = makeFocusTestController(settings: settings)
 
         controller.configureQuakeTransitionForTests(visible: true, isTransitioning: true)
 
@@ -370,7 +383,7 @@ private func waitForFocusRefresh(on controller: WMController) async {
         )
         let (controller, _, handle) = makeFocusTestController(windowFocusOperations: operations)
 
-        controller.focusWindow(handle)
+        controller.focusWindow(handle, source: .command)
 
         #expect(events == [
             .activate(getpid()),
@@ -487,7 +500,7 @@ private func waitForFocusRefresh(on controller: WMController) async {
         let (controller, workspaceId, handle) = makeFocusTestController(windowFocusOperations: operations)
         _ = controller.workspaceManager.enterNonManagedFocus(appFullscreen: false)
 
-        controller.focusWindow(handle)
+        controller.focusWindow(handle, source: .command)
 
         #expect(controller.workspaceManager.pendingFocusedHandle == handle)
         #expect(controller.workspaceManager.pendingFocusedWorkspaceId == workspaceId)
@@ -505,7 +518,7 @@ private func waitForFocusRefresh(on controller: WMController) async {
         let (controller, _, handle) = makeFocusTestController(windowFocusOperations: operations)
         _ = controller.workspaceManager.enterNonManagedFocus(appFullscreen: true)
 
-        controller.focusWindow(handle)
+        controller.focusWindow(handle, source: .command)
 
         #expect(controller.workspaceManager.pendingFocusedHandle == handle)
         #expect(controller.workspaceManager.isAppFullscreenActive == true)
@@ -528,7 +541,7 @@ private func waitForFocusRefresh(on controller: WMController) async {
         let (controller, _, handle) = makeFocusTestController(windowFocusOperations: operations)
         controller.workspaceManager.setLayoutReason(.nativeFullscreen, for: handle)
 
-        controller.focusWindow(handle)
+        controller.focusWindow(handle, source: .command)
 
         #expect(events.isEmpty)
         #expect(controller.workspaceManager.pendingFocusedHandle == nil)
@@ -775,7 +788,7 @@ private func waitForFocusRefresh(on controller: WMController) async {
             onMonitor: fixture.primaryMonitor.id
         )
 
-        fixture.controller.focusWindow(secondaryHandle)
+        fixture.controller.focusWindow(secondaryHandle, source: .command)
         #expect(fixture.controller.workspaceManager.pendingFocusedHandle == secondaryHandle)
         #expect(fixture.controller.workspaceManager.focusedHandle == primaryHandle)
 
@@ -820,7 +833,7 @@ private func waitForFocusRefresh(on controller: WMController) async {
             onMonitor: controller.workspaceManager.monitorId(for: workspaceId)
         )
 
-        controller.focusWindow(pendingHandle)
+        controller.focusWindow(pendingHandle, source: .command)
         #expect(controller.workspaceManager.pendingFocusedHandle == pendingHandle)
 
         guard let entry = controller.workspaceManager.entry(for: confirmedHandle) else {
@@ -977,7 +990,7 @@ private func waitForFocusRefresh(on controller: WMController) async {
         let (controller, _, handle) = makeFocusTestController(windowFocusOperations: operations)
         controller.isLockScreenActive = true
 
-        controller.focusWindow(handle)
+        controller.focusWindow(handle, source: .command)
 
         #expect(events.isEmpty)
         #expect(controller.workspaceManager.pendingFocusedHandle == nil)
@@ -1027,7 +1040,7 @@ private func waitForFocusRefresh(on controller: WMController) async {
         settings.workspaceConfigurations = [
             WorkspaceConfiguration(name: "1", monitorAssignment: .main)
         ]
-        let controller = WMController(
+        let controller = makeFocusTestController(
             settings: settings,
             windowFocusOperations: makeRaiseAllFloatingOperations(recorder: recorder)
         )
@@ -1378,6 +1391,7 @@ private func waitForFocusRefresh(on controller: WMController) async {
 
         #expect(ghosttyEntry.mode == .tiling)
         #expect(controller.workspaceManager.manualLayoutOverride(for: ghosttyHandle.id) == .forceTile)
-        #expect(controller.workspaceManager.tiledEntries(in: workspaceId).contains { $0.token == ghosttyHandle.id })
+        let graph = controller.workspaceManager.workspaceGraphSnapshot()
+        #expect(graph.tiledMembership(in: workspaceId).contains { $0.token == ghosttyHandle.id })
     }
 }

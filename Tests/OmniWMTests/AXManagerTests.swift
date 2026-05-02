@@ -152,6 +152,57 @@ private func axManagerTestWriteResult(
         #expect(controller.axManager.recentFrameWriteFailure(for: token.windowId) == .verificationMismatch)
     }
 
+    @Test @MainActor func observedTargetFrameConfirmsDespiteAttributeWriteFailure() async {
+        let controller = makeLayoutPlanTestController()
+        guard let monitor = controller.workspaceManager.monitors.first,
+              let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
+        else {
+            Issue.record("Missing monitor or active workspace for AXManager verified readback test")
+            return
+        }
+
+        let token = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 913)
+        let targetFrame = CGRect(x: 216, y: 132, width: 230, height: 408)
+        var observerResults: [AXFrameApplyResult] = []
+        var failedReasons: [AXFrameWriteFailureReason] = []
+        controller.axManager.onFrameFailed = { _, _, _, reason, _ in
+            failedReasons.append(reason)
+        }
+        controller.axManager.frameApplyOverrideForTests = { requests in
+            requests.map { request in
+                AXFrameApplyResult(
+                    requestId: request.requestId,
+                    pid: request.pid,
+                    windowId: request.windowId,
+                    targetFrame: request.frame,
+                    currentFrameHint: request.currentFrameHint,
+                    writeResult: axManagerTestWriteResult(
+                        targetFrame: request.frame,
+                        currentFrameHint: request.currentFrameHint,
+                        observedFrame: request.frame,
+                        failureReason: .sizeWriteFailed(.attributeUnsupported)
+                    )
+                )
+            }
+        }
+
+        controller.axManager.applyFramesParallel(
+            [(token.pid, token.windowId, targetFrame)],
+            terminalObserver: { observerResults.append($0) }
+        )
+
+        let observedTerminalResult = await waitForConditionForTests {
+            observerResults.count == 1
+        }
+
+        #expect(observedTerminalResult)
+        #expect(observerResults.count == 1)
+        #expect(observerResults.first?.confirmedFrame == targetFrame)
+        #expect(controller.axManager.lastAppliedFrame(for: token.windowId) == targetFrame)
+        #expect(controller.axManager.recentFrameWriteFailure(for: token.windowId) == nil)
+        #expect(failedReasons.isEmpty)
+    }
+
     @Test @MainActor func terminalObserverCompletesImmediatelyWhenTargetFrameAlreadyCached() {
         let controller = makeLayoutPlanTestController()
         guard let monitor = controller.workspaceManager.monitors.first,
@@ -166,10 +217,10 @@ private func axManagerTestWriteResult(
         let originalOnFrameConfirmed = controller.axManager.onFrameConfirmed
         var confirmedFrames: [CGRect] = []
         var confirmResults: [FrameConfirmResult] = []
-        controller.axManager.onFrameConfirmed = { pid, windowId, frame, result in
+        controller.axManager.onFrameConfirmed = { pid, windowId, frame, result, requestId in
             confirmedFrames.append(frame)
             confirmResults.append(result)
-            originalOnFrameConfirmed?(pid, windowId, frame, result)
+            originalOnFrameConfirmed?(pid, windowId, frame, result, requestId)
         }
 
         var attemptCount = 0
@@ -226,7 +277,6 @@ private func axManagerTestWriteResult(
         controller.axManager.confirmFrameWrite(for: token.windowId, frame: targetFrame)
         _ = controller.workspaceManager.setManagedRestoreSnapshot(
             ManagedWindowRestoreSnapshot(
-                token: token,
                 workspaceId: workspaceId,
                 frame: staleFrame,
                 topologyProfile: controller.workspaceManager.topologyProfile,
@@ -239,10 +289,10 @@ private func axManagerTestWriteResult(
         let originalOnFrameConfirmed = controller.axManager.onFrameConfirmed
         var confirmedFrames: [CGRect] = []
         var confirmResults: [FrameConfirmResult] = []
-        controller.axManager.onFrameConfirmed = { pid, windowId, frame, result in
+        controller.axManager.onFrameConfirmed = { pid, windowId, frame, result, requestId in
             confirmedFrames.append(frame)
             confirmResults.append(result)
-            originalOnFrameConfirmed?(pid, windowId, frame, result)
+            originalOnFrameConfirmed?(pid, windowId, frame, result, requestId)
         }
 
         controller.axManager.applyFramesParallel([(token.pid, token.windowId, targetFrame)])

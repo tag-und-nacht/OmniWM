@@ -74,32 +74,37 @@ private func assertRoundTrip<T: Codable & Equatable>(_ value: T) throws {
         #expect(object["id"] as? String == "req-3")
     }
 
-    @Test func eventEnvelopeDecodesLegacyShapeWithoutStableResponseFields() throws {
-        let legacyJSON = """
-        {
-          "channel": "focus",
-          "kind": "event",
-          "result": {
-            "kind": "focused-window",
-            "payload": {
-              "window": null
+    @Test func workspaceRequestUsesWorkspaceTargetWireKey() throws {
+        let request = IPCWorkspaceRequest(name: .focusName, target: .displayName("Main"))
+        let data = try IPCWire.makeEncoder(prettyPrinted: true).encode(request)
+        let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+
+        #expect(object["name"] as? String == IPCWorkspaceActionName.focusName.rawValue)
+        #expect(object["workspaceTarget"] != nil)
+        #expect(object["target"] == nil)
+        #expect(object["workspaceName"] == nil)
+
+        let decoded = try IPCWire.makeDecoder().decode(IPCWorkspaceRequest.self, from: data)
+        #expect(decoded == request)
+    }
+
+    @Test func workspaceNameOnlyWorkspacePayloadFailsDecode() {
+        let data = Data(
+            """
+            {
+              "name": "focus-name",
+              "workspaceName": "2"
             }
-          },
-          "version": 1
+            """.utf8
+        )
+
+        #expect(throws: DecodingError.self) {
+            _ = try IPCWire.makeDecoder().decode(IPCWorkspaceRequest.self, from: data)
         }
-        """
-
-        let decoded = try IPCWire.decodeEvent(from: Data(legacyJSON.utf8))
-
-        #expect(decoded.id.isEmpty)
-        #expect(decoded.ok)
-        #expect(decoded.status == .success)
-        #expect(decoded.code == nil)
-        #expect(decoded.channel == .focus)
     }
 
     @Test func publicDTOsRoundTripThroughJSON() throws {
-        #expect(OmniWMIPCProtocol.version == 3)
+        #expect(OmniWMIPCProtocol.version == 5)
         #expect(IPCErrorCode.protocolMismatch.rawValue == "protocol_mismatch")
 
         try assertRoundTrip(
@@ -398,15 +403,10 @@ private func assertRoundTrip<T: Codable & Equatable>(_ value: T) throws {
 
     @Test func opaqueWindowIDSupportsSessionScopedValidation() {
         let encoded = IPCWindowOpaqueID.encode(pid: 4242, windowId: 73, sessionToken: "session-a")
-        let decoded = IPCWindowOpaqueID.decode(encoded)
         let sessionDecoded = IPCWindowOpaqueID.decode(encoded, expectingSessionToken: "session-a")
-        let legacyEncoded = IPCWindowOpaqueID.encode(pid: 4242, windowId: 73)
 
-        #expect(decoded?.pid == 4242)
-        #expect(decoded?.windowId == 73)
         #expect(sessionDecoded?.pid == 4242)
         #expect(sessionDecoded?.windowId == 73)
         #expect(IPCWindowOpaqueID.decode(encoded, expectingSessionToken: "session-b") == nil)
-        #expect(IPCWindowOpaqueID.decode(legacyEncoded, expectingSessionToken: "session-a") == nil)
     }
 }

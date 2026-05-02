@@ -223,6 +223,46 @@ private func makeTestFocusEvent(id: String, title: String) -> IPCEventEnvelope {
         #expect(response.code == .unauthorized)
     }
 
+    @Test func bridgeRejectsAuthorizedRequestsAfterShutdownStarts() async {
+        let controller = makeLayoutPlanTestController()
+        let bridge = IPCApplicationBridge(
+            controller: controller,
+            appVersion: nil,
+            sessionToken: ipcServerTestSessionToken,
+            authorizationToken: "bridge-shutdown-token"
+        )
+
+        bridge.beginShutdown()
+
+        let unauthorized = await bridge.response(for: IPCRequest(id: "unauth-after-stop", kind: .ping))
+        #expect(unauthorized.ok == false)
+        #expect(unauthorized.code == .unauthorized)
+
+        let authorized = await bridge.response(
+            for: IPCRequest(
+                id: "command-after-stop",
+                command: .focus(direction: .left),
+                authorizationToken: "bridge-shutdown-token"
+            )
+        )
+        #expect(authorized.ok == false)
+        #expect(authorized.status == .ignored)
+        #expect(authorized.code == .disabled)
+        #expect(authorized.kind == .command)
+
+        let rule = await bridge.response(
+            for: IPCRequest(
+                id: "rule-after-stop",
+                rule: .add(rule: IPCRuleDefinition(bundleId: "com.example.app")),
+                authorizationToken: "bridge-shutdown-token"
+            )
+        )
+        #expect(rule.ok == false)
+        #expect(rule.status == .ignored)
+        #expect(rule.code == .disabled)
+        #expect(rule.kind == .rule)
+    }
+
     @Test func serverUnlinksSocketOnStop() throws {
         let socketPath = makeIPCTestSocketPath()
         let controller = makeLayoutPlanTestController()
@@ -444,6 +484,45 @@ private func makeTestFocusEvent(id: String, title: String) -> IPCEventEnvelope {
         } else {
             Issue.record("Expected recovery version payload")
         }
+    }
+
+    @Test func staleRawWorkspaceNameOnlyRequestReturnsInvalidRequestBeforeVersionHandshake() async throws {
+        let socketPath = makeIPCTestSocketPath()
+        let controller = makeLayoutPlanTestController()
+        let initialWorkspaceName = try #require(controller.activeWorkspace()?.name)
+        let server = IPCServer(controller: controller, socketPath: socketPath)
+        defer {
+            server.stop()
+            try? FileManager.default.removeItem(atPath: socketPath)
+        }
+        try server.start()
+
+        let connection = try openRawIPCTestConnection(to: socketPath)
+        defer { try? connection.close() }
+
+        // v4 was the last protocol version that decoded bare `workspaceName` payloads.
+        let retiredWorkspaceNamePayloadProtocolVersion = 4
+        let rawRequest = """
+        {
+          "version": \(retiredWorkspaceNamePayloadProtocolVersion),
+          "id": "legacy-workspace",
+          "kind": "workspace",
+          "payload": {
+            "name": "focus-name",
+            "workspaceName": "2"
+          }
+        }
+        """
+
+        try connection.write(contentsOf: Data((rawRequest + "\n").utf8))
+        let line = try #require(try readRawLine(from: connection))
+        let response = try IPCWire.decodeResponse(from: line)
+
+        #expect(response.ok == false)
+        #expect(response.id == "")
+        #expect(response.kind == .error)
+        #expect(response.code == .invalidRequest)
+        #expect(controller.activeWorkspace()?.name == initialWorkspaceName)
     }
 
     @Test func disabledMutationsStillReturnClearQueries() async throws {

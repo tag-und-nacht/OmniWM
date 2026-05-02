@@ -17,7 +17,11 @@ final class DisplayConfigurationObserver: NSObject {
     private var previousMonitors: [Monitor.ID: (monitor: Monitor, outputId: OutputId)] = [:]
     private var debounceTask: Task<Void, Never>?
 
-    private let debounceInterval: UInt64 = 100_000_000
+    // 100 ms — `NSApplication.didChangeScreenParametersNotification` fires
+    // multiple times per real reconfigure (lid open, resolution change, dock
+    // arrangement) within ~50 ms; 100 ms covers the burst with measured
+    // headroom and stays well under perceived-input latency.
+    private let debounceIntervalNanoseconds: UInt64 = 100_000_000
 
     override nonisolated init() {
         super.init()
@@ -52,7 +56,7 @@ final class DisplayConfigurationObserver: NSObject {
         debounceTask?.cancel()
 
         debounceTask = Task {
-            try? await Task.sleep(nanoseconds: debounceInterval)
+            try? await Task.sleep(nanoseconds: debounceIntervalNanoseconds)
             guard !Task.isCancelled else { return }
             handleDisplayChange()
         }

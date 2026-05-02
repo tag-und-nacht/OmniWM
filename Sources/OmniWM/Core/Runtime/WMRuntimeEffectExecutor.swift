@@ -9,8 +9,8 @@ final class WMRuntimeEffectExecutor: EffectExecutor {
         context: WMRuntimeEffectContext
     ) {
         switch context {
-        case .focusRequest:
-            controller.applyRuntimeFocusRequestResult(result)
+        case let .focusRequest(source):
+            controller.applyRuntimeFocusRequestResult(result, source: source)
 
         case let .activationObserved(observedAXRef, managedEntry, source, confirmRequest):
             controller.axEventHandler.applyActivationOrchestrationResult(

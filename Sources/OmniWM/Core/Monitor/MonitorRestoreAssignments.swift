@@ -2,14 +2,22 @@
 import COmniWMKernels
 import CoreGraphics
 import Foundation
+import OSLog
+
+private let restoreAssignmentsLog = Logger(
+    subsystem: "com.omniwm.core",
+    category: "MonitorRestoreAssignments"
+)
 
 struct MonitorRestoreKey: Hashable {
+    let displayUUID: String?
     let displayId: CGDirectDisplayID
     let name: String
     let anchorPoint: CGPoint
     let frameSize: CGSize
 
     init(monitor: Monitor) {
+        displayUUID = monitor.displayUUID
         displayId = monitor.displayId
         name = monitor.name
         anchorPoint = monitor.workspaceAnchorPoint
@@ -107,17 +115,33 @@ func resolveWorkspaceRestoreAssignments(
         }
     }
 
-    precondition(
-        status == OMNIWM_KERNELS_STATUS_OK,
-        "omniwm_restore_resolve_assignments returned \(status)"
-    )
+    // The assignment kernel runs from inside the display-reconfigure pipeline.
+    // Crashing here would crash the WM at the worst possible moment (the OS
+    // is mid-reconfigure); degrade to "no restored assignments" instead and
+    // let the topology pipeline recover via reconciliation.
+    guard status == OMNIWM_KERNELS_STATUS_OK else {
+        restoreAssignmentsLog.error(
+            "omniwm_restore_resolve_assignments returned non-OK status \(status, privacy: .public); returning empty assignment map"
+        )
+        return [:]
+    }
 
     var assignments: [Monitor.ID: WorkspaceDescriptor.ID] = [:]
     assignments.reserveCapacity(rawAssignmentCount)
 
     for assignment in rawAssignments.prefix(rawAssignmentCount) {
-        assignments[monitors[Int(assignment.monitor_index)].id] =
-            filteredSnapshots[Int(assignment.snapshot_index)].workspaceId
+        let monitorIndex = Int(assignment.monitor_index)
+        let snapshotIndex = Int(assignment.snapshot_index)
+        guard monitors.indices.contains(monitorIndex),
+              filteredSnapshots.indices.contains(snapshotIndex)
+        else {
+            restoreAssignmentsLog.error(
+                "kernel returned out-of-bounds restore assignment (monitor \(monitorIndex, privacy: .public), snapshot \(snapshotIndex, privacy: .public)); skipping"
+            )
+            continue
+        }
+        assignments[monitors[monitorIndex].id] =
+            filteredSnapshots[snapshotIndex].workspaceId
     }
 
     return assignments

@@ -24,7 +24,7 @@ protocol PlatformAdapter {
 extension WMPlatform: PlatformAdapter {}
 
 enum WMRuntimeEffectContext {
-    case focusRequest
+    case focusRequest(source: WMEventSource)
     case activationObserved(
         observedAXRef: AXWindowRef?,
         managedEntry: WindowModel.Entry?,
@@ -49,9 +49,9 @@ struct WMRuntimeSnapshot {
     var configuration: WMRuntimeConfiguration
 }
 
-struct WMRuntimeConfiguration {
-    struct LayoutConfiguration {
-        struct Niri {
+struct WMRuntimeConfiguration: Equatable {
+    struct LayoutConfiguration: Equatable {
+        struct Niri: Equatable {
             var maxWindowsPerColumn: Int
             var maxVisibleColumns: Int
             var infiniteLoop: Bool
@@ -62,7 +62,7 @@ struct WMRuntimeConfiguration {
             var defaultColumnWidth: Double?
         }
 
-        struct Dwindle {
+        struct Dwindle: Equatable {
             var smartSplit: Bool
             var defaultSplitRatio: Double
             var splitWidthMultiplier: Double

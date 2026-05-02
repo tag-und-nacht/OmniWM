@@ -312,9 +312,9 @@ import OmniWMIPC
         }
     }
 
-    @Test func parsesQueryMonitorAliasesAndDisplaySelectorAlias() throws {
+    @Test func parsesCanonicalDisplayQueryAndRejectsQueryAliases() throws {
         let parsed = try CLIParser.parse(
-            arguments: ["omniwmctl", "query", "monitors", "--monitor", "Built-in Retina Display"]
+            arguments: ["omniwmctl", "query", "displays", "--display", "Built-in Retina Display"]
         )
 
         #expect(parsed.outputFormat == .json)
@@ -325,14 +325,23 @@ import OmniWMIPC
 
         #expect(query.name == .displays)
         #expect(query.selectors.display == "Built-in Retina Display")
+
+        #expect(throws: CLIParseError.usage(CLIParser.usageText)) {
+            _ = try CLIParser.parse(arguments: ["omniwmctl", "query", "monitors"])
+        }
+        #expect(throws: CLIParseError.usage(CLIParser.usageText)) {
+            _ = try CLIParser.parse(
+                arguments: ["omniwmctl", "query", "displays", "--monitor", "Built-in Retina Display"]
+            )
+        }
     }
 
-    @Test func parsesCommandAliasesForPreviousAndBackAndForth() throws {
-        let previous = try CLIParser.parse(arguments: ["omniwmctl", "command", "focus-monitor", "previous"])
+    @Test func parsesCanonicalPreviousCommandsAndRejectsCommandAliases() throws {
+        let previous = try CLIParser.parse(arguments: ["omniwmctl", "command", "focus-monitor", "prev"])
         let workspacePrevious = try CLIParser.parse(
-            arguments: ["omniwmctl", "command", "switch-workspace", "previous"]
+            arguments: ["omniwmctl", "command", "switch-workspace", "prev"]
         )
-        let back = try CLIParser.parse(arguments: ["omniwmctl", "command", "switch-workspace", "back"])
+        let back = try CLIParser.parse(arguments: ["omniwmctl", "command", "switch-workspace", "back-and-forth"])
 
         guard case let .command(previousCommand) = previous.request.payload else {
             Issue.record("Expected a focus-monitor command payload")
@@ -350,6 +359,16 @@ import OmniWMIPC
         #expect(previousCommand == .focusMonitorPrevious)
         #expect(workspacePreviousCommand == .switchWorkspacePrevious)
         #expect(backCommand == .switchWorkspaceBackAndForth)
+
+        #expect(throws: CLIParseError.usage(CLIParser.usageText)) {
+            _ = try CLIParser.parse(arguments: ["omniwmctl", "command", "focus-monitor", "previous"])
+        }
+        #expect(throws: CLIParseError.usage(CLIParser.usageText)) {
+            _ = try CLIParser.parse(arguments: ["omniwmctl", "command", "switch-workspace", "previous"])
+        }
+        #expect(throws: CLIParseError.usage(CLIParser.usageText)) {
+            _ = try CLIParser.parse(arguments: ["omniwmctl", "command", "switch-workspace", "back"])
+        }
     }
 
     @Test func parsesRuleCommandsAndExplicitOutputFormats() throws {

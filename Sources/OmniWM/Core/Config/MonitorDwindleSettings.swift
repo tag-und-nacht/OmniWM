@@ -5,6 +5,7 @@ import CoreGraphics
 struct MonitorDwindleSettings: MonitorSettingsType {
     let id: UUID
     var monitorName: String
+    var monitorDisplayUUID: String?
     var monitorDisplayId: CGDirectDisplayID?
 
     var smartSplit: Bool?
@@ -21,6 +22,7 @@ struct MonitorDwindleSettings: MonitorSettingsType {
     init(
         id: UUID = UUID(),
         monitorName: String,
+        monitorDisplayUUID: String? = nil,
         monitorDisplayId: CGDirectDisplayID? = nil,
         smartSplit: Bool? = nil,
         defaultSplitRatio: Double? = nil,
@@ -35,6 +37,7 @@ struct MonitorDwindleSettings: MonitorSettingsType {
     ) {
         self.id = id
         self.monitorName = monitorName
+        self.monitorDisplayUUID = monitorDisplayUUID
         self.monitorDisplayId = monitorDisplayId
         self.smartSplit = smartSplit
         self.defaultSplitRatio = defaultSplitRatio
@@ -49,7 +52,8 @@ struct MonitorDwindleSettings: MonitorSettingsType {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, monitorName, monitorDisplayId, smartSplit, defaultSplitRatio, splitWidthMultiplier
+        case id, monitorName, monitorDisplayUUID, monitorDisplayId, smartSplit, defaultSplitRatio
+        case splitWidthMultiplier
         case singleWindowAspectRatio, useGlobalGaps, innerGap
         case outerGapTop, outerGapBottom, outerGapLeft, outerGapRight
     }
@@ -58,12 +62,12 @@ struct MonitorDwindleSettings: MonitorSettingsType {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(UUID.self, forKey: .id)
         monitorName = try container.decode(String.self, forKey: .monitorName)
+        monitorDisplayUUID = try container.decodeIfPresent(String.self, forKey: .monitorDisplayUUID)
         monitorDisplayId = try container.decodeIfPresent(CGDirectDisplayID.self, forKey: .monitorDisplayId)
         smartSplit = try container.decodeIfPresent(Bool.self, forKey: .smartSplit)
         defaultSplitRatio = try container.decodeIfPresent(Double.self, forKey: .defaultSplitRatio)
         splitWidthMultiplier = try container.decodeIfPresent(Double.self, forKey: .splitWidthMultiplier)
-        singleWindowAspectRatio = try container.decodeIfPresent(String.self, forKey: .singleWindowAspectRatio)
-            .flatMap { DwindleSingleWindowAspectRatio(rawValue: $0) }
+        singleWindowAspectRatio = try container.decodeIfPresent(DwindleSingleWindowAspectRatio.self, forKey: .singleWindowAspectRatio)
         useGlobalGaps = try container.decodeIfPresent(Bool.self, forKey: .useGlobalGaps)
         innerGap = try container.decodeIfPresent(Double.self, forKey: .innerGap)
         outerGapTop = try container.decodeIfPresent(Double.self, forKey: .outerGapTop)
@@ -76,11 +80,11 @@ struct MonitorDwindleSettings: MonitorSettingsType {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(id, forKey: .id)
         try container.encode(monitorName, forKey: .monitorName)
-        try container.encodeIfPresent(monitorDisplayId, forKey: .monitorDisplayId)
+        try container.encodeIfPresent(monitorDisplayUUID, forKey: .monitorDisplayUUID)
         try container.encodeIfPresent(smartSplit, forKey: .smartSplit)
         try container.encodeIfPresent(defaultSplitRatio, forKey: .defaultSplitRatio)
         try container.encodeIfPresent(splitWidthMultiplier, forKey: .splitWidthMultiplier)
-        try container.encodeIfPresent(singleWindowAspectRatio?.rawValue, forKey: .singleWindowAspectRatio)
+        try container.encodeIfPresent(singleWindowAspectRatio, forKey: .singleWindowAspectRatio)
         try container.encodeIfPresent(useGlobalGaps, forKey: .useGlobalGaps)
         try container.encodeIfPresent(innerGap, forKey: .innerGap)
         try container.encodeIfPresent(outerGapTop, forKey: .outerGapTop)

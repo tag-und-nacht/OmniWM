@@ -64,7 +64,7 @@ private func makeRuntimeTestSettings() -> SettingsStore {
             to: workspaceId
         )
 
-        controller.focusWindow(token)
+        controller.focusWindow(token, source: .command)
 
         #expect(runtime.orchestrationSnapshot.focus.activeManagedRequest?.token == token)
         #expect(controller.workspaceManager.pendingFocusedToken == token)

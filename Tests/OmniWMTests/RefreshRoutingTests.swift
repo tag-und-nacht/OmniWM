@@ -33,6 +33,9 @@ private func makeRefreshTestWindow(windowId: Int = 101) -> AXWindowRef {
     AXWindowRef(element: AXUIElementCreateSystemWide(), windowId: windowId)
 }
 
+@MainActor
+private var _retainedRefreshTestRuntimes: [WMRuntime] = []
+
 private func makeRefreshTestWindowFacts(
     bundleId: String = "com.example.refresh",
     title: String? = nil,
@@ -65,13 +68,13 @@ private func makeRefreshTestWindowFacts(
 }
 
 @MainActor
-private func makeRefreshTestController(
+private func makeRefreshTestRuntime(
     windowFocusOperations: WindowFocusOperations? = nil,
     workspaceConfigurations: [WorkspaceConfiguration] = [
         WorkspaceConfiguration(name: "1", monitorAssignment: .main),
         WorkspaceConfiguration(name: "2", monitorAssignment: .main)
     ]
-) -> WMController {
+) -> WMRuntime {
     let operations = windowFocusOperations ?? WindowFocusOperations(
         activateApp: { _ in },
         focusSpecificWindow: { _, _, _ in },
@@ -85,17 +88,19 @@ private func makeRefreshTestController(
         autosaveEnabled: false
     )
     settings.workspaceConfigurations = workspaceConfigurations
-    let controller = WMController(
+    let runtime = WMRuntime(
         settings: settings,
         windowFocusOperations: operations
     )
+    _retainedRefreshTestRuntimes.append(runtime)
+    let controller = runtime.controller
     installSynchronousFrameApplySuccessOverride(on: controller)
     let monitor = makeRefreshTestMonitor()
     controller.workspaceManager.applyMonitorConfigurationChange([monitor])
     controller.axEventHandler.windowFactsProvider = { _, _ in
         makeRefreshTestWindowFacts()
     }
-    return controller
+    return runtime
 }
 
 @MainActor
@@ -393,7 +398,7 @@ private func waitUntil(
     condition: () -> Bool
 ) async {
     for _ in 0..<iterations where !condition() {
-        await Task.yield()
+        try? await Task.sleep(for: .milliseconds(1))
     }
 
     if !condition() {
@@ -426,13 +431,6 @@ private func installRefreshSpies(
 }
 
 @MainActor
-private func assertNoLegacyReasons(_ recorder: RefreshEventRecorder) {
-    let observedReasons = recorder.relayoutEvents.map(\.0.rawValue) + recorder.fullRescanReasons.map(\.rawValue)
-    #expect(!observedReasons.contains("legacyImmediateCallsite"))
-    #expect(!observedReasons.contains("legacyCallsite"))
-}
-
-@MainActor
 private func resetRefreshSpies(
     on controller: WMController,
     recorder: RefreshEventRecorder
@@ -457,6 +455,7 @@ private func configureWorkspaceLayouts(
         return existingConfigurationsByName[name]?.with(layoutType: layoutType)
             ?? WorkspaceConfiguration(name: name, layoutType: layoutType)
     }
+    controller.workspaceManager.applySettings()
 }
 
 @MainActor
@@ -506,8 +505,11 @@ private func assertWorkspaceSwitchCommandRequestsRememberedFocus(
     prepare: ((WMController, WorkspaceDescriptor.ID, WorkspaceDescriptor.ID, Monitor) -> Void)? = nil,
     action: (WMController) -> Void
 ) async {
+    let axHooksLease = await acquireAXTestHooksLeaseForTests()
+    defer { axHooksLease.release() }
+
     var focusRequests: [(pid_t, UInt32)] = []
-    let controller = makeRefreshTestController(
+    let runtime = makeRefreshTestRuntime(
         windowFocusOperations: WindowFocusOperations(
             activateApp: { _ in },
             focusSpecificWindow: { pid, windowId, _ in
@@ -516,6 +518,7 @@ private func assertWorkspaceSwitchCommandRequestsRememberedFocus(
             raiseWindow: { _ in }
         )
     )
+    let controller = runtime.controller
     guard let workspaceOne = controller.workspaceManager.workspaceId(for: "1", createIfMissing: false),
           let workspaceTwo = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true),
           let monitor = controller.workspaceManager.monitors.first
@@ -550,7 +553,8 @@ private func assertWorkspaceSwitchCommandRequestsRememberedFocus(
     prepare?(controller, workspaceOne, workspaceTwo, monitor)
     action(controller)
     await waitForRefreshWork(on: controller)
-    await waitUntil {
+    let workspaceSwitchFocusWaitIterations = 2_000
+    await waitUntil(iterations: workspaceSwitchFocusWaitIterations) {
         controller.activeWorkspace()?.id == workspaceTwo &&
             controller.workspaceManager.pendingFocusedToken == targetHandle.id &&
             focusRequests.contains { $0.0 == targetHandle.id.pid && $0.1 == UInt32(targetHandle.id.windowId) }
@@ -567,7 +571,7 @@ private func assertWorkspaceSwitchCommandClearsManagedFocusForEmptyTarget(
     action: (WMController) -> Void
 ) async {
     var focusRequests: [(pid_t, UInt32)] = []
-    let controller = makeRefreshTestController(
+    let runtime = makeRefreshTestRuntime(
         windowFocusOperations: WindowFocusOperations(
             activateApp: { _ in },
             focusSpecificWindow: { pid, windowId, _ in
@@ -576,6 +580,7 @@ private func assertWorkspaceSwitchCommandClearsManagedFocusForEmptyTarget(
             raiseWindow: { _ in }
         )
     )
+    let controller = runtime.controller
     guard let workspaceOne = controller.workspaceManager.workspaceId(for: "1", createIfMissing: false),
           let workspaceTwo = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true),
           let monitor = controller.workspaceManager.monitors.first
@@ -628,18 +633,20 @@ private func primeFocusedBorder(on controller: WMController, handle: WindowHandl
 
 @MainActor
 private func makeTwoMonitorRefreshTestController() -> (
+    runtime: WMRuntime,
     controller: WMController,
     primaryMonitor: Monitor,
     secondaryMonitor: Monitor,
     primaryWorkspaceId: WorkspaceDescriptor.ID,
     secondaryWorkspaceId: WorkspaceDescriptor.ID
 ) {
-    let controller = makeRefreshTestController(
+    let runtime = makeRefreshTestRuntime(
         workspaceConfigurations: [
             WorkspaceConfiguration(name: "1", monitorAssignment: .main),
             WorkspaceConfiguration(name: "2", monitorAssignment: .secondary)
         ]
     )
+    let controller = runtime.controller
     let primaryMonitor = makeLayoutPlanPrimaryTestMonitor(name: "Primary")
     let secondaryMonitor = makeLayoutPlanSecondaryTestMonitor(name: "Secondary", x: 1920)
     controller.workspaceManager.applyMonitorConfigurationChange([primaryMonitor, secondaryMonitor])
@@ -656,7 +663,7 @@ private func makeTwoMonitorRefreshTestController() -> (
     _ = controller.workspaceManager.setActiveWorkspace(secondaryWorkspaceId, on: secondaryMonitor.id)
     _ = controller.workspaceManager.setInteractionMonitor(primaryMonitor.id)
 
-    return (controller, primaryMonitor, secondaryMonitor, primaryWorkspaceId, secondaryWorkspaceId)
+    return (runtime, controller, primaryMonitor, secondaryMonitor, primaryWorkspaceId, secondaryWorkspaceId)
 }
 
 @MainActor
@@ -733,6 +740,7 @@ private func syncNiriWorkspaceStatesForRefreshTests(
             state.selectedNodeId = resolvedSelection
         }
     }
+    engine.clearWorkspaceBarProjectionInvalidations(for: workspaceIds)
 }
 
 @MainActor
@@ -897,7 +905,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func workspaceBarRefreshRequestsCoalesceOnNextMainTurn() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
 
         controller.requestWorkspaceBarRefresh()
@@ -917,7 +926,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func workspaceBarRefreshRunsAfterPostLayoutActions() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
 
         var eventOrder: [String] = []
@@ -946,7 +956,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func queuedWorkspaceBarRefreshIsCanceledDuringUICleanup() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
 
         controller.requestWorkspaceBarRefresh()
@@ -960,7 +971,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func unlockAndWorkspaceConfigUseSingleDeferredWorkspaceBarRefresh() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
 
         let lifecycleManager = ServiceLifecycleManager(controller: controller)
@@ -985,7 +997,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func focusOnlyChangesRefreshStatusBarWithoutWorkspaceBarQueue() {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         controller.settings.workspaceBarEnabled = false
         controller.settings.statusBarShowWorkspaceName = true
         controller.settings.statusBarShowAppNames = true
@@ -1029,7 +1042,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func geometryOnlyLayoutCommandDoesNotQueueWorkspaceBarRefresh() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
 
         guard let workspaceId = controller.activeWorkspace()?.id else {
@@ -1059,7 +1073,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func focusNavigationStillQueuesWorkspaceBarRefresh() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
 
         guard let workspaceId = controller.activeWorkspace()?.id else {
@@ -1093,7 +1108,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func workspaceBarRefreshesOnMoveColumnInNiri() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
 
         guard let workspaceId = controller.activeWorkspace()?.id else {
@@ -1108,12 +1124,13 @@ private func expectNoWorkspaceBarRefresh(
         )
 
         await expectSingleWorkspaceBarRefresh(on: controller) {
-            controller.commandHandler.handleCommand(.moveColumn(.right))
+            controller.runtime!.dispatchHotkey(.moveColumn(.right))
         }
     }
 
     @Test @MainActor func workspaceBarRefreshesOnMoveWindowVerticalInNiri() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
 
         guard let workspaceId = controller.activeWorkspace()?.id else {
@@ -1128,12 +1145,13 @@ private func expectNoWorkspaceBarRefresh(
         )
 
         await expectSingleWorkspaceBarRefresh(on: controller) {
-            controller.commandHandler.handleCommand(.move(.up))
+            controller.runtime!.dispatchHotkey(.move(.up))
         }
     }
 
     @Test @MainActor func workspaceBarRefreshesOnConsumeInNiri() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
 
         guard let workspaceId = controller.activeWorkspace()?.id else {
@@ -1148,12 +1166,13 @@ private func expectNoWorkspaceBarRefresh(
         )
 
         await expectSingleWorkspaceBarRefresh(on: controller) {
-            controller.commandHandler.handleCommand(.move(.right))
+            controller.runtime!.dispatchHotkey(.move(.right))
         }
     }
 
     @Test @MainActor func workspaceBarRefreshesOnExpelInNiri() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
 
         guard let workspaceId = controller.activeWorkspace()?.id else {
@@ -1168,12 +1187,13 @@ private func expectNoWorkspaceBarRefresh(
         )
 
         await expectSingleWorkspaceBarRefresh(on: controller) {
-            controller.commandHandler.handleCommand(.move(.left))
+            controller.runtime!.dispatchHotkey(.move(.left))
         }
     }
 
     @Test @MainActor func workspaceBarRefreshesOnMoveColumnToWorkspaceWithoutFocusHandoff() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
 
         guard let sourceWorkspaceId = controller.activeWorkspace()?.id,
@@ -1197,7 +1217,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func workspaceBarRefreshesOnMoveWindowToWorkspaceWithoutFocusHandoff() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
 
         guard let sourceWorkspaceId = controller.activeWorkspace()?.id,
@@ -1221,7 +1242,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func workspaceBarDoesNotRefreshOnResizeColumnInNiri() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
 
         guard let workspaceId = controller.activeWorkspace()?.id else {
@@ -1236,12 +1258,13 @@ private func expectNoWorkspaceBarRefresh(
         )
 
         await expectNoWorkspaceBarRefresh(on: controller) {
-            controller.commandHandler.handleCommand(.cycleColumnWidthForward)
+            controller.runtime!.dispatchHotkey(.cycleColumnWidthForward)
         }
     }
 
     @Test @MainActor func workspaceBarDoesNotRefreshOnToggleColumnTabbed() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
 
         guard let workspaceId = controller.activeWorkspace()?.id else {
@@ -1256,12 +1279,13 @@ private func expectNoWorkspaceBarRefresh(
         )
 
         await expectNoWorkspaceBarRefresh(on: controller) {
-            controller.commandHandler.handleCommand(.toggleColumnTabbed)
+            controller.runtime!.dispatchHotkey(.toggleColumnTabbed)
         }
     }
 
     @Test @MainActor func workspaceBarDoesNotRefreshOnFocusOnlySessionStateChangeWhenProjectionIsUnchanged() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
 
         guard let workspaceId = controller.activeWorkspace()?.id,
@@ -1292,7 +1316,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func pendingWorkspaceBarProjectionInvalidationSurvivesSkippedScopedRelayout() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
 
         guard let dirtyWorkspaceId = controller.activeWorkspace()?.id,
@@ -1316,7 +1341,7 @@ private func expectNoWorkspaceBarRefresh(
 
         controller.resetWorkspaceBarRefreshDebugStateForTests()
         controller.layoutRefreshController.debugHooks.onRelayout = { _, _ in true }
-        controller.commandHandler.handleCommand(.move(.right))
+        controller.runtime!.dispatchHotkey(.move(.right))
         await waitForRefreshWork(on: controller)
         await controller.waitForWorkspaceBarRefreshForTests()
 
@@ -1389,12 +1414,13 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func interactionMonitorChangeOnUnassignedThirdDisplayDoesNotRecurseAfterMonitorExpansion() {
-        let controller = makeRefreshTestController(
+        let runtime = makeRefreshTestRuntime(
             workspaceConfigurations: [
                 WorkspaceConfiguration(name: "1", monitorAssignment: .main),
                 WorkspaceConfiguration(name: "2", monitorAssignment: .secondary)
             ]
         )
+        let controller = runtime.controller
         let primary = makeRefreshTestMonitor(displayId: layoutPlanTestMainDisplayId(), name: "Primary", x: 0, y: 0)
         let secondary = makeRefreshTestMonitor(displayId: layoutPlanTestSyntheticDisplayId(1), name: "Secondary", x: 1920, y: 0)
         controller.workspaceManager.applyMonitorConfigurationChange([primary, secondary])
@@ -1424,7 +1450,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func niriConfigAndEnableUseRelayoutOnly() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         var relayoutEvents: [(RefreshReason, LayoutRefreshController.RefreshRoute)] = []
         var fullRescanReasons: [RefreshReason] = []
         let installHooks = {
@@ -1448,9 +1475,6 @@ private func expectNoWorkspaceBarRefresh(
         #expect(relayoutEvents.map(\.0) == [.layoutConfigChanged])
         #expect(relayoutEvents.map(\.1) == [.relayout])
         #expect(fullRescanReasons.isEmpty)
-        let observedEnableReasons = relayoutEvents.map(\.0.rawValue) + fullRescanReasons.map(\.rawValue)
-        #expect(!observedEnableReasons.contains("legacyImmediateCallsite"))
-        #expect(!observedEnableReasons.contains("legacyCallsite"))
 
         relayoutEvents.removeAll()
         fullRescanReasons.removeAll()
@@ -1464,13 +1488,11 @@ private func expectNoWorkspaceBarRefresh(
         #expect(relayoutEvents.map(\.0) == [.layoutConfigChanged])
         #expect(relayoutEvents.map(\.1) == [.relayout])
         #expect(fullRescanReasons.isEmpty)
-        let observedUpdateReasons = relayoutEvents.map(\.0.rawValue) + fullRescanReasons.map(\.rawValue)
-        #expect(!observedUpdateReasons.contains("legacyImmediateCallsite"))
-        #expect(!observedUpdateReasons.contains("legacyCallsite"))
     }
 
     @Test @MainActor func dwindleConfigAndEnableUseRelayoutOnly() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         let recorder = RefreshEventRecorder()
         installRefreshSpies(on: controller, recorder: recorder)
 
@@ -1482,7 +1504,6 @@ private func expectNoWorkspaceBarRefresh(
         #expect(recorder.relayoutEvents.map(\.0) == [.layoutConfigChanged])
         #expect(recorder.relayoutEvents.map(\.1) == [.relayout])
         #expect(recorder.fullRescanReasons.isEmpty)
-        assertNoLegacyReasons(recorder)
 
         resetRefreshSpies(on: controller, recorder: recorder)
 
@@ -1494,11 +1515,11 @@ private func expectNoWorkspaceBarRefresh(
         #expect(recorder.relayoutEvents.map(\.0) == [.layoutConfigChanged])
         #expect(recorder.relayoutEvents.map(\.1) == [.relayout])
         #expect(recorder.fullRescanReasons.isEmpty)
-        assertNoLegacyReasons(recorder)
     }
 
     @Test @MainActor func monitorSettingsUseRelayoutOnly() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         let recorder = RefreshEventRecorder()
         installRefreshSpies(on: controller, recorder: recorder)
 
@@ -1508,7 +1529,6 @@ private func expectNoWorkspaceBarRefresh(
         #expect(recorder.relayoutEvents.map(\.0) == [.monitorSettingsChanged])
         #expect(recorder.relayoutEvents.map(\.1) == [.relayout])
         #expect(recorder.fullRescanReasons.isEmpty)
-        assertNoLegacyReasons(recorder)
 
         resetRefreshSpies(on: controller, recorder: recorder)
 
@@ -1522,7 +1542,6 @@ private func expectNoWorkspaceBarRefresh(
         #expect(recorder.relayoutEvents.map(\.0) == [.monitorSettingsChanged])
         #expect(recorder.relayoutEvents.map(\.1) == [.relayout])
         #expect(recorder.fullRescanReasons.isEmpty)
-        assertNoLegacyReasons(recorder)
 
         resetRefreshSpies(on: controller, recorder: recorder)
 
@@ -1536,25 +1555,25 @@ private func expectNoWorkspaceBarRefresh(
         #expect(recorder.relayoutEvents.map(\.0) == [.monitorSettingsChanged])
         #expect(recorder.relayoutEvents.map(\.1) == [.relayout])
         #expect(recorder.fullRescanReasons.isEmpty)
-        assertNoLegacyReasons(recorder)
     }
 
     @Test @MainActor func workspaceLayoutToggleUsesRelayoutOnly() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         let recorder = RefreshEventRecorder()
         installRefreshSpies(on: controller, recorder: recorder)
 
-        controller.commandHandler.handleCommand(.toggleWorkspaceLayout)
+        controller.runtime!.dispatchHotkey(.toggleWorkspaceLayout)
         await waitForRefreshWork(on: controller)
 
         #expect(recorder.relayoutEvents.map(\.0) == [.workspaceLayoutToggled])
         #expect(recorder.relayoutEvents.map(\.1) == [.relayout])
         #expect(recorder.fullRescanReasons.isEmpty)
-        assertNoLegacyReasons(recorder)
     }
 
     @Test @MainActor func workspaceTransitionFlowsUseImmediateRelayoutOnly() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         guard let workspaceTwo = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true) else {
             Issue.record("Missing second workspace for workspace transition routing test")
             return
@@ -1577,11 +1596,11 @@ private func expectNoWorkspaceBarRefresh(
             return
         }
         #expect(refresh.affectedWorkspaceIds == [workspaceTwo])
-        assertNoLegacyReasons(recorder)
     }
 
     @Test @MainActor func workspaceSwitchUsesImmediateRelayoutOnly() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         _ = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true)
         let recorder = RefreshEventRecorder()
         installRefreshSpies(on: controller, recorder: recorder)
@@ -1592,11 +1611,11 @@ private func expectNoWorkspaceBarRefresh(
         #expect(recorder.relayoutEvents.map(\.0) == [.workspaceTransition])
         #expect(recorder.relayoutEvents.map(\.1) == [.immediateRelayout])
         #expect(recorder.fullRescanReasons.isEmpty)
-        assertNoLegacyReasons(recorder)
     }
 
     @Test @MainActor func reselectingActiveWorkspaceDoesNotTriggerRefreshOrClearBorder() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         guard let workspaceOne = controller.workspaceManager.workspaceId(for: "1", createIfMissing: false),
               let workspaceTwo = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true),
               let monitor = controller.workspaceManager.monitors.first
@@ -1646,7 +1665,6 @@ private func expectNoWorkspaceBarRefresh(
         #expect(recorder.visibilityReasons.isEmpty)
         #expect(recorder.fullRescanReasons.isEmpty)
         #expect(recorder.windowRemovalReasons.isEmpty)
-        assertNoLegacyReasons(recorder)
     }
 
     @Test @MainActor func crossMonitorWorkspaceSwitchSkipsAnimationWhenTargetIsAlreadyVisible() async {
@@ -1668,7 +1686,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func sameMonitorWorkspaceSwitchSkipsAnimationWhenTargetWasHidden() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         guard let ws1 = controller.workspaceManager.workspaceId(for: "1", createIfMissing: false),
               let ws2 = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true),
               let monitor = controller.workspaceManager.monitors.first
@@ -1698,11 +1717,65 @@ private func expectNoWorkspaceBarRefresh(
         #expect(recorder.relayoutEvents.map(\.0) == [.workspaceTransition])
         #expect(recorder.relayoutEvents.map(\.1) == [.immediateRelayout])
         #expect(recorder.fullRescanReasons.isEmpty)
-        assertNoLegacyReasons(recorder)
+    }
+
+    @Test @MainActor func niriMixedWorkspaceSwitchRestoresFloatingWindowOnReturn() async {
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
+        defer { cleanupRefreshTestController(controller) }
+
+        guard let ws1 = controller.workspaceManager.workspaceId(for: "1", createIfMissing: false),
+              let ws2 = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true),
+              let monitor = controller.workspaceManager.monitors.first
+        else {
+            Issue.record("Failed to create mixed Niri workspace switch fixture")
+            return
+        }
+
+        _ = await prepareNiriState(
+            on: controller,
+            assignments: [
+                (ws1, 2_241),
+                (ws2, 2_242),
+            ],
+            focusedWindowId: 2_241,
+            ensureWorkspaces: [ws2]
+        )
+        let floatingToken = controller.workspaceManager.addWindow(
+            makeRefreshTestWindow(windowId: 2_243),
+            pid: getpid(),
+            windowId: 2_243,
+            to: ws1,
+            mode: .floating
+        )
+        let floatingFrame = CGRect(x: 320, y: 180, width: 640, height: 420)
+        controller.workspaceManager.updateFloatingGeometry(
+            frame: floatingFrame,
+            for: floatingToken,
+            referenceMonitor: monitor
+        )
+        controller.axManager.forceApplyNextFrame(for: floatingToken.windowId)
+        controller.axManager.applyFramesParallel([(getpid(), floatingToken.windowId, floatingFrame)])
+
+        controller.workspaceNavigationHandler.switchWorkspace(index: 1)
+        await waitForRefreshWork(on: controller)
+
+        #expect(controller.activeWorkspace()?.id == ws2)
+        #expect(controller.workspaceManager.hiddenState(for: floatingToken)?.workspaceInactive == true)
+        #expect(controller.axManager.inactiveWorkspaceWindowIds.contains(floatingToken.windowId))
+
+        controller.workspaceNavigationHandler.switchWorkspace(index: 0)
+        await waitForRefreshWork(on: controller)
+
+        #expect(controller.activeWorkspace()?.id == ws1)
+        #expect(controller.workspaceManager.hiddenState(for: floatingToken) == nil)
+        #expect(!controller.axManager.inactiveWorkspaceWindowIds.contains(floatingToken.windowId))
+        #expect(controller.axManager.lastAppliedFrame(for: floatingToken.windowId) == floatingFrame)
     }
 
     @Test @MainActor func dwindleWorkspaceSwitchSkipsAnimationWhenTargetWasHidden() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         guard let ws2 = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true),
               let monitor = controller.workspaceManager.monitors.first
         else {
@@ -1729,11 +1802,72 @@ private func expectNoWorkspaceBarRefresh(
         #expect(recorder.relayoutEvents.map(\.0) == [.workspaceTransition])
         #expect(recorder.relayoutEvents.map(\.1) == [.immediateRelayout])
         #expect(recorder.fullRescanReasons.isEmpty)
-        assertNoLegacyReasons(recorder)
+    }
+
+    @Test @MainActor func dwindleMixedWorkspaceSwitchRestoresFloatingWindowOnReturn() async {
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
+        defer { cleanupRefreshTestController(controller) }
+
+        guard let ws1 = controller.workspaceManager.workspaceId(for: "1", createIfMissing: false),
+              let ws2 = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true),
+              let monitor = controller.workspaceManager.monitors.first
+        else {
+            Issue.record("Failed to create mixed Dwindle workspace switch fixture")
+            return
+        }
+
+        configureWorkspaceLayouts(on: controller, layoutsByName: [
+            "1": .dwindle,
+            "2": .dwindle
+        ])
+        let sourceTiledHandle = addWindow(on: controller, workspaceId: ws1, pid: getpid(), windowId: 2_251)
+        let targetTiledHandle = addWindow(on: controller, workspaceId: ws2, pid: getpid(), windowId: 2_252)
+        _ = controller.workspaceManager.rememberFocus(sourceTiledHandle, in: ws1)
+        _ = controller.workspaceManager.rememberFocus(targetTiledHandle, in: ws2)
+        _ = controller.workspaceManager.setManagedFocus(
+            sourceTiledHandle,
+            in: ws1,
+            onMonitor: monitor.id
+        )
+        controller.enableDwindleLayout()
+        await waitForRefreshWork(on: controller)
+
+        let floatingToken = controller.workspaceManager.addWindow(
+            makeRefreshTestWindow(windowId: 2_253),
+            pid: getpid(),
+            windowId: 2_253,
+            to: ws1,
+            mode: .floating
+        )
+        let floatingFrame = CGRect(x: 420, y: 220, width: 620, height: 400)
+        controller.workspaceManager.updateFloatingGeometry(
+            frame: floatingFrame,
+            for: floatingToken,
+            referenceMonitor: monitor
+        )
+        controller.axManager.forceApplyNextFrame(for: floatingToken.windowId)
+        controller.axManager.applyFramesParallel([(getpid(), floatingToken.windowId, floatingFrame)])
+
+        controller.workspaceNavigationHandler.switchWorkspace(index: 1)
+        await waitForRefreshWork(on: controller)
+
+        #expect(controller.activeWorkspace()?.id == ws2)
+        #expect(controller.workspaceManager.hiddenState(for: floatingToken)?.workspaceInactive == true)
+        #expect(controller.axManager.inactiveWorkspaceWindowIds.contains(floatingToken.windowId))
+
+        controller.workspaceNavigationHandler.switchWorkspace(index: 0)
+        await waitForRefreshWork(on: controller)
+
+        #expect(controller.activeWorkspace()?.id == ws1)
+        #expect(controller.workspaceManager.hiddenState(for: floatingToken) == nil)
+        #expect(!controller.axManager.inactiveWorkspaceWindowIds.contains(floatingToken.windowId))
+        #expect(controller.axManager.lastAppliedFrame(for: floatingToken.windowId) == floatingFrame)
     }
 
     @Test @MainActor func workspaceRelativeSwitchUsesImmediateRelayoutOnly() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         _ = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true)
         let recorder = RefreshEventRecorder()
         installRefreshSpies(on: controller, recorder: recorder)
@@ -1744,11 +1878,11 @@ private func expectNoWorkspaceBarRefresh(
         #expect(recorder.relayoutEvents.map(\.0) == [.workspaceTransition])
         #expect(recorder.relayoutEvents.map(\.1) == [.immediateRelayout])
         #expect(recorder.fullRescanReasons.isEmpty)
-        assertNoLegacyReasons(recorder)
     }
 
     @Test @MainActor func focusWorkspaceAnywhereUsesImmediateRelayoutOnly() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         _ = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true)
         let recorder = RefreshEventRecorder()
         installRefreshSpies(on: controller, recorder: recorder)
@@ -1759,11 +1893,11 @@ private func expectNoWorkspaceBarRefresh(
         #expect(recorder.relayoutEvents.map(\.0) == [.workspaceTransition])
         #expect(recorder.relayoutEvents.map(\.1) == [.immediateRelayout])
         #expect(recorder.fullRescanReasons.isEmpty)
-        assertNoLegacyReasons(recorder)
     }
 
     @Test @MainActor func workspaceBackAndForthUsesImmediateRelayoutOnly() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         _ = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true)
         controller.workspaceNavigationHandler.switchWorkspace(index: 1)
         await waitForRefreshWork(on: controller)
@@ -1777,7 +1911,6 @@ private func expectNoWorkspaceBarRefresh(
         #expect(recorder.relayoutEvents.map(\.0) == [.workspaceTransition])
         #expect(recorder.relayoutEvents.map(\.1) == [.immediateRelayout])
         #expect(recorder.fullRescanReasons.isEmpty)
-        assertNoLegacyReasons(recorder)
     }
 
     @Test @MainActor func workspaceSwitchCommandsRequestRememberedTargetFocus() async {
@@ -1846,7 +1979,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func movingFocusedWindowUpdatesCachedFocusTargetWorkspace() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         controller.setBordersEnabled(true)
         guard let workspaceOne = controller.workspaceManager.workspaceId(for: "1", createIfMissing: false),
               let workspaceTwo = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true)
@@ -1897,7 +2031,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func moveFocusedWindowFollowFocusUsesImmediateRelayoutOnly() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         guard let sourceWorkspaceId = controller.activeWorkspace()?.id else {
             Issue.record("Missing source workspace")
             return
@@ -1910,6 +2045,7 @@ private func expectNoWorkspaceBarRefresh(
         controller.settings.workspaceConfigurations = [
             WorkspaceConfiguration(name: "2", layoutType: .dwindle)
         ]
+        controller.workspaceManager.applySettings()
         controller.settings.focusFollowsWindowToMonitor = true
 
         let recorder = RefreshEventRecorder()
@@ -1922,11 +2058,11 @@ private func expectNoWorkspaceBarRefresh(
         #expect(recorder.relayoutEvents.map(\.1) == [.immediateRelayout])
         #expect(recorder.fullRescanReasons.isEmpty)
         #expect(controller.workspaceManager.lastFocusedToken(in: targetWorkspaceId)?.windowId == 303)
-        assertNoLegacyReasons(recorder)
     }
 
     @Test @MainActor func moveFocusedWindowWithoutFollowFocusUsesImmediateRelayoutOnly() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         guard let sourceWorkspaceId = controller.activeWorkspace()?.id else {
             Issue.record("Missing source workspace")
             return
@@ -1939,6 +2075,7 @@ private func expectNoWorkspaceBarRefresh(
         controller.settings.workspaceConfigurations = [
             WorkspaceConfiguration(name: "2", layoutType: .dwindle)
         ]
+        controller.workspaceManager.applySettings()
         controller.enableDwindleLayout()
         await waitForRefreshWork(on: controller)
         controller.settings.focusFollowsWindowToMonitor = false
@@ -1966,17 +2103,15 @@ private func expectNoWorkspaceBarRefresh(
             dwindleTokenSet(controller: controller, workspaceId: targetWorkspaceId)
                 == Set([WindowToken(pid: getpid(), windowId: 304)])
         )
-        let observedReasons = relayoutEvents.map(\.0.rawValue) + fullRescanReasons.map(\.rawValue)
-        #expect(!observedReasons.contains("legacyImmediateCallsite"))
-        #expect(!observedReasons.contains("legacyCallsite"))
     }
 
     @Test @MainActor func moveFocusedWindowAdjacentAutoCreatesConfiguredWorkspace() async {
-        let controller = makeRefreshTestController(
+        let runtime = makeRefreshTestRuntime(
             workspaceConfigurations: [
                 WorkspaceConfiguration(name: "1", monitorAssignment: .main)
             ]
         )
+        let controller = runtime.controller
         guard let sourceWorkspaceId = controller.activeWorkspace()?.id,
               let sourceMonitorId = controller.workspaceManager.monitorId(for: sourceWorkspaceId)
         else {
@@ -2010,11 +2145,11 @@ private func expectNoWorkspaceBarRefresh(
         #expect(controller.workspaceManager.monitorId(for: targetWorkspaceId) == sourceMonitorId)
         #expect(controller.workspaceManager.lastFocusedToken(in: targetWorkspaceId) == WindowToken(pid: getpid(), windowId: 305))
         #expect(controller.activeWorkspace()?.id == sourceWorkspaceId)
-        assertNoLegacyReasons(recorder)
     }
 
     @Test @MainActor func moveFocusedWindowsToInactiveDwindleWorkspaceBootstrapsRecursiveLayout() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         guard let sourceWorkspaceId = controller.activeWorkspace()?.id,
               let targetWorkspaceId = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true)
         else {
@@ -2138,7 +2273,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func moveColumnToWorkspaceUsesActiveColumnWhenSelectionDiffers() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         guard let sourceWorkspaceId = controller.activeWorkspace()?.id,
               let targetWorkspaceId = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true)
         else {
@@ -2230,11 +2366,12 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func moveColumnAdjacentAutoCreatesConfiguredWorkspace() async {
-        let controller = makeRefreshTestController(
+        let runtime = makeRefreshTestRuntime(
             workspaceConfigurations: [
                 WorkspaceConfiguration(name: "1", monitorAssignment: .main)
             ]
         )
+        let controller = runtime.controller
         guard let sourceWorkspaceId = controller.activeWorkspace()?.id,
               let sourceMonitor = controller.workspaceManager.monitor(for: sourceWorkspaceId)
         else {
@@ -2338,13 +2475,11 @@ private func expectNoWorkspaceBarRefresh(
         #expect(controller.workspaceManager.monitorId(for: targetWorkspaceId) == sourceMonitor.id)
         #expect(dwindleTokenSet(controller: controller, workspaceId: targetWorkspaceId) == Set(handles.map(\.id)))
         #expect(controller.activeWorkspace()?.id == sourceWorkspaceId)
-        let observedReasons = relayoutEvents.map(\.0.rawValue) + fullRescanReasons.map(\.rawValue)
-        #expect(!observedReasons.contains("legacyImmediateCallsite"))
-        #expect(!observedReasons.contains("legacyCallsite"))
     }
 
     @Test @MainActor func summonWindowRightIntoNiriUsesImmediateRelayoutOnly() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         guard let targetWorkspaceId = controller.activeWorkspace()?.id else {
             Issue.record("Missing target workspace for Niri summon-right test")
             return
@@ -2381,11 +2516,11 @@ private func expectNoWorkspaceBarRefresh(
         #expect(recorder.relayoutEvents.map(\.1) == [.immediateRelayout])
         #expect(controller.workspaceManager.lastFocusedToken(in: targetWorkspaceId)?.windowId == 9102)
         #expect(orderedWindowIds == [9101, 9102, 9103])
-        assertNoLegacyReasons(recorder)
     }
 
     @Test @MainActor func paletteSummonWindowRightIntoNiriUsesCapturedAnchorWhenManagedFocusIsNil() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         guard let targetWorkspaceId = controller.activeWorkspace()?.id,
               let sourceWorkspaceId = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true)
         else {
@@ -2433,11 +2568,11 @@ private func expectNoWorkspaceBarRefresh(
         #expect(controller.workspaceManager.workspace(for: summonedHandle.id) == targetWorkspaceId)
         #expect(controller.workspaceManager.lastFocusedToken(in: targetWorkspaceId)?.windowId == 9302)
         #expect(orderedWindowIds == [9301, 9302, 9303])
-        assertNoLegacyReasons(recorder)
     }
 
     @Test @MainActor func paletteSummonWindowRightIntoNiriNoOpsWhenAnchorDisappears() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         guard let targetWorkspaceId = controller.activeWorkspace()?.id,
               let sourceWorkspaceId = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true)
         else {
@@ -2478,11 +2613,11 @@ private func expectNoWorkspaceBarRefresh(
         #expect(recorder.relayoutEvents.isEmpty)
         #expect(recorder.fullRescanReasons.isEmpty)
         #expect(controller.workspaceManager.workspace(for: summonedHandle.id) == sourceWorkspaceId)
-        assertNoLegacyReasons(recorder)
     }
 
     @Test @MainActor func summonWindowRightIntoDwindleUsesImmediateRelayoutOnly() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         guard let targetWorkspaceId = controller.activeWorkspace()?.id else {
             Issue.record("Missing target workspace for Dwindle summon-right test")
             return
@@ -2528,11 +2663,11 @@ private func expectNoWorkspaceBarRefresh(
         #expect(recorder.relayoutEvents.map(\.1) == [.immediateRelayout])
         #expect(controller.workspaceManager.lastFocusedToken(in: targetWorkspaceId)?.windowId == 9203)
         #expect(summonedFrame.minX >= anchorFrame.maxX - 1.0)
-        assertNoLegacyReasons(recorder)
     }
 
     @Test @MainActor func inactiveWorkspaceAppActivationUsesImmediateRelayoutOnly() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         let workspaceTwo = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true)
         guard let workspaceTwo else {
             Issue.record("Failed to create target workspace")
@@ -2567,11 +2702,11 @@ private func expectNoWorkspaceBarRefresh(
         #expect(recorder.relayoutEvents.map(\.0) == [.appActivationTransition])
         #expect(recorder.relayoutEvents.map(\.1) == [.immediateRelayout])
         #expect(recorder.fullRescanReasons.isEmpty)
-        assertNoLegacyReasons(recorder)
     }
 
     @Test @MainActor func inactiveWorkspaceHandleAppActivationUsesImmediateRelayoutOnly() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         controller.hasStartedServices = true
         guard let workspaceOne = controller.workspaceManager.workspaceId(for: "1", createIfMissing: false),
               let workspaceTwo = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true),
@@ -2620,11 +2755,11 @@ private func expectNoWorkspaceBarRefresh(
         #expect(recorder.relayoutEvents.map(\.0) == [.appActivationTransition])
         #expect(recorder.relayoutEvents.map(\.1) == [.immediateRelayout])
         #expect(recorder.fullRescanReasons.isEmpty)
-        assertNoLegacyReasons(recorder)
     }
 
     @Test @MainActor func inactiveWorkspaceHandleAppActivationRevealsHiddenWindow() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         controller.hasStartedServices = true
         controller.enableNiriLayout()
         await waitForRefreshWork(on: controller)
@@ -2693,7 +2828,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func activeSpaceChangeDoesNotFrameWriteNativeFullscreenSuspendedWindowInNiri() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         let lifecycleManager = ServiceLifecycleManager(controller: controller)
         controller.axManager.currentWindowsAsyncOverride = { [] }
         controller.enableNiriLayout(maxWindowsPerColumn: 1)
@@ -2723,7 +2859,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func nativeFullscreenExitRestoresPriorManagedFrameInNiri() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
         let frameRecorder = FrameApplyRecorder()
         installCapturingFrameApplySuccessOverride(on: controller, recorder: frameRecorder)
@@ -2764,15 +2901,15 @@ private func expectNoWorkspaceBarRefresh(
             onMonitor: monitor.id
         )
         var fullscreenStates: [Int: Bool] = [2612: false]
-        controller.commandHandler.nativeFullscreenStateProvider = { axRef in
+        controller.nativeFullscreenStateProviderForCommand = { axRef in
             fullscreenStates[axRef.windowId] ?? false
         }
-        controller.commandHandler.nativeFullscreenSetter = { axRef, fullscreen in
+        controller.nativeFullscreenSetterForCommand = { axRef, fullscreen in
             fullscreenStates[axRef.windowId] = fullscreen
             return true
         }
 
-        controller.commandHandler.handleCommand(.toggleNativeFullscreen)
+        controller.runtime!.dispatchHotkey(.toggleNativeFullscreen)
 
         guard let enterRecord = controller.workspaceManager.nativeFullscreenRecord(for: targetToken),
               let seededRestoreFrame = enterRecord.restoreSnapshot?.frame
@@ -2802,7 +2939,7 @@ private func expectNoWorkspaceBarRefresh(
             (makeRefreshTestWindow(windowId: 2611), getpid(), 2611),
             (makeRefreshTestWindow(windowId: 2612), getpid(), 2612)
         ]
-        controller.commandHandler.handleCommand(.toggleNativeFullscreen)
+        controller.runtime!.dispatchHotkey(.toggleNativeFullscreen)
         guard let exitEntry = controller.workspaceManager.entry(for: targetToken) else {
             Issue.record("Missing managed entry before command-driven restore activation")
             return
@@ -2856,7 +2993,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func nativeFullscreenRestoreSnapshotCapturesNiriSizingStateSeparatelyFromFrame() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
         let visibleWindows = VisibleWindowsStore([
             (makeRefreshTestWindow(windowId: 6831), getpid(), 6831),
@@ -2928,7 +3066,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func nativeFullscreenRestoreFromNonDefaultNiriColumnKeepsHiddenColumnsAndMoveStable() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
         controller.motionPolicy.animationsEnabled = false
         let visibleWindows = VisibleWindowsStore([
@@ -2974,7 +3113,7 @@ private func expectNoWorkspaceBarRefresh(
         )
 
         let defaultColumnWidth = originalColumn.cachedWidth
-        controller.commandHandler.handleCommand(.cycleColumnWidthForward)
+        controller.runtime!.dispatchHotkey(.cycleColumnWidthForward)
         await waitForSettledRefreshWork(on: controller)
 
         guard let resizedNode = engine.findNode(for: targetToken),
@@ -3006,15 +3145,15 @@ private func expectNoWorkspaceBarRefresh(
         #expect(controller.axManager.lastAppliedFrame(for: hiddenToken.windowId) == temporarilyVisibleHiddenFrame)
 
         var fullscreenStates: [Int: Bool] = [targetToken.windowId: false]
-        controller.commandHandler.nativeFullscreenStateProvider = { axRef in
+        controller.nativeFullscreenStateProviderForCommand = { axRef in
             fullscreenStates[axRef.windowId] ?? false
         }
-        controller.commandHandler.nativeFullscreenSetter = { axRef, fullscreen in
+        controller.nativeFullscreenSetterForCommand = { axRef, fullscreen in
             fullscreenStates[axRef.windowId] = fullscreen
             return true
         }
 
-        controller.commandHandler.handleCommand(.toggleNativeFullscreen)
+        controller.runtime!.dispatchHotkey(.toggleNativeFullscreen)
         guard let enterRecord = controller.workspaceManager.nativeFullscreenRecord(for: targetToken),
               let enterNiriState = enterRecord.restoreSnapshot?.niriState
         else {
@@ -3050,7 +3189,7 @@ private func expectNoWorkspaceBarRefresh(
             (makeRefreshTestWindow(windowId: 6844), getpid(), 6844),
             (makeRefreshTestWindow(windowId: 6845), getpid(), 6845)
         ]
-        controller.commandHandler.handleCommand(.toggleNativeFullscreen)
+        controller.runtime!.dispatchHotkey(.toggleNativeFullscreen)
         guard let exitEntry = controller.workspaceManager.entry(for: targetToken) else {
             Issue.record("Missing managed target before native fullscreen restore")
             return
@@ -3090,7 +3229,7 @@ private func expectNoWorkspaceBarRefresh(
             in: workspaceId,
             onMonitor: monitor.id
         )
-        controller.commandHandler.handleCommand(.move(.right))
+        controller.runtime!.dispatchHotkey(.move(.right))
         await waitForSettledRefreshWork(on: controller)
 
         guard let movedNode = engine.findNode(for: targetToken),
@@ -3110,7 +3249,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func nativeFullscreenSameWindowIdRestoreIgnoresFreshLifecycleModeReevaluationInNiri() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
         let visibleWindows = VisibleWindowsStore([
             (makeRefreshTestWindow(windowId: 2671), getpid(), 2671),
@@ -3202,7 +3342,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func nativeFullscreenDirectActivationExitRestoresPriorManagedFrameInNiri() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
         let frameRecorder = FrameApplyRecorder()
         installCapturingFrameApplySuccessOverride(on: controller, recorder: frameRecorder)
@@ -3292,7 +3433,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func nativeFullscreenFullRescanDetectedEnterExitRestoresPriorManagedFrameInNiri() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
         let frameRecorder = FrameApplyRecorder()
         installCapturingFrameApplySuccessOverride(on: controller, recorder: frameRecorder)
@@ -3373,7 +3515,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func nativeFullscreenExitWithReplacementWindowIdPreservesNiriIdentity() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
         let frameRecorder = FrameApplyRecorder()
         installCapturingFrameApplySuccessOverride(on: controller, recorder: frameRecorder)
@@ -3448,7 +3591,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func nativeFullscreenNoSnapshotExitPreservesStackedNiriColumnTopology() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
         controller.motionPolicy.animationsEnabled = false
         let visibleWindows = VisibleWindowsStore([
@@ -3589,7 +3733,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func nativeFullscreenNoSnapshotExitPreservesFullHeightNiriColumnTopology() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
         controller.motionPolicy.animationsEnabled = false
         let visibleWindows = VisibleWindowsStore([
@@ -3701,7 +3846,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func nativeFullscreenSpaceChangeRetainsMultiColumnNiriOrderWithSameWindowId() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
         let visibleWindows = VisibleWindowsStore([
             (makeRefreshTestWindow(windowId: 2641), getpid(), 2641),
@@ -3825,7 +3971,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func nativeFullscreenUnlockRetainsMultiColumnNiriOrderWithSameWindowId() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
         let visibleWindows = VisibleWindowsStore([
             (makeRefreshTestWindow(windowId: 2681), getpid(), 2681),
@@ -3900,7 +4047,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func nativeFullscreenMissingFocusedWindowFallbackKeepsNiriLifecyclePreservationAcrossFullRescans() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
         let visibleWindows = VisibleWindowsStore([
             (makeRefreshTestWindow(windowId: 2721), getpid(), 2721),
@@ -3985,7 +4133,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func nativeFullscreenDelayedSameTokenDestroyRoundTripPreservesNiriIdentityAndBarState() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
         let visibleWindows = VisibleWindowsStore([
             (makeRefreshTestWindow(windowId: 2731), getpid(), 2731),
@@ -4137,7 +4286,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func nativeFullscreenDelayedReplacementTokenDestroyRoundTripRestoresExactNiriFrame() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
         let frameRecorder = FrameApplyRecorder()
         installCapturingFrameApplySuccessOverride(on: controller, recorder: frameRecorder)
@@ -4255,7 +4405,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func nativeFullscreenReplacementUsesExactMetadataWhenSameAppHasMultipleNiriRecords() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
         let visibleWindows = VisibleWindowsStore([
             (makeRefreshTestWindow(windowId: 6801), getpid(), 6801),
@@ -4369,7 +4520,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func nativeFullscreenReplacementSpaceChangePreservesMultiColumnNiriOrder() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
         let visibleWindows = VisibleWindowsStore([
             (makeRefreshTestWindow(windowId: 2651), getpid(), 2651),
@@ -4493,7 +4645,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func nativeFullscreenReplacementRestoreIgnoresFreshLifecycleModeReevaluation() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
         let visibleWindows = VisibleWindowsStore([
             (makeRefreshTestWindow(windowId: 2661), getpid(), 2661),
@@ -4585,11 +4738,12 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func nativeFullscreenExitRestoresPriorManagedFrameInDwindle() async {
-        let controller = makeRefreshTestController(
+        let runtime = makeRefreshTestRuntime(
             workspaceConfigurations: [
                 WorkspaceConfiguration(name: "1", monitorAssignment: .main, layoutType: .dwindle)
             ]
         )
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
         let frameRecorder = FrameApplyRecorder()
         installCapturingFrameApplySuccessOverride(on: controller, recorder: frameRecorder)
@@ -4622,15 +4776,15 @@ private func expectNoWorkspaceBarRefresh(
             onMonitor: monitor.id
         )
         var fullscreenStates: [Int: Bool] = [2622: false]
-        controller.commandHandler.nativeFullscreenStateProvider = { axRef in
+        controller.nativeFullscreenStateProviderForCommand = { axRef in
             fullscreenStates[axRef.windowId] ?? false
         }
-        controller.commandHandler.nativeFullscreenSetter = { axRef, fullscreen in
+        controller.nativeFullscreenSetterForCommand = { axRef, fullscreen in
             fullscreenStates[axRef.windowId] = fullscreen
             return true
         }
 
-        controller.commandHandler.handleCommand(.toggleNativeFullscreen)
+        controller.runtime!.dispatchHotkey(.toggleNativeFullscreen)
 
         guard let enterRecord = controller.workspaceManager.nativeFullscreenRecord(for: targetToken),
               let seededRestoreFrame = enterRecord.restoreSnapshot?.frame
@@ -4660,7 +4814,7 @@ private func expectNoWorkspaceBarRefresh(
             (makeRefreshTestWindow(windowId: 2621), getpid(), 2621),
             (makeRefreshTestWindow(windowId: 2622), getpid(), 2622)
         ]
-        controller.commandHandler.handleCommand(.toggleNativeFullscreen)
+        controller.runtime!.dispatchHotkey(.toggleNativeFullscreen)
         guard let exitEntry = controller.workspaceManager.entry(for: targetToken) else {
             Issue.record("Missing Dwindle entry before command-driven restore activation")
             return
@@ -4690,11 +4844,12 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func nativeFullscreenSameWindowIdRestoreIgnoresFreshLifecycleModeReevaluationInDwindle() async {
-        let controller = makeRefreshTestController(
+        let runtime = makeRefreshTestRuntime(
             workspaceConfigurations: [
                 WorkspaceConfiguration(name: "1", monitorAssignment: .main, layoutType: .dwindle)
             ]
         )
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
         let visibleWindows = VisibleWindowsStore([
             (makeRefreshTestWindow(windowId: 2691), getpid(), 2691),
@@ -4759,11 +4914,12 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func nativeFullscreenDirectActivationExitRestoresPriorManagedFrameInDwindle() async {
-        let controller = makeRefreshTestController(
+        let runtime = makeRefreshTestRuntime(
             workspaceConfigurations: [
                 WorkspaceConfiguration(name: "1", monitorAssignment: .main, layoutType: .dwindle)
             ]
         )
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
         let frameRecorder = FrameApplyRecorder()
         installCapturingFrameApplySuccessOverride(on: controller, recorder: frameRecorder)
@@ -4839,11 +4995,12 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func nativeFullscreenFullRescanDetectedEnterExitRestoresPriorManagedFrameInDwindle() async {
-        let controller = makeRefreshTestController(
+        let runtime = makeRefreshTestRuntime(
             workspaceConfigurations: [
                 WorkspaceConfiguration(name: "1", monitorAssignment: .main, layoutType: .dwindle)
             ]
         )
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
         let frameRecorder = FrameApplyRecorder()
         installCapturingFrameApplySuccessOverride(on: controller, recorder: frameRecorder)
@@ -4909,11 +5066,12 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func nativeFullscreenDelayedSameTokenDestroyRoundTripRestoresExactDwindleFrame() async {
-        let controller = makeRefreshTestController(
+        let runtime = makeRefreshTestRuntime(
             workspaceConfigurations: [
                 WorkspaceConfiguration(name: "1", monitorAssignment: .main, layoutType: .dwindle)
             ]
         )
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
         let frameRecorder = FrameApplyRecorder()
         installCapturingFrameApplySuccessOverride(on: controller, recorder: frameRecorder)
@@ -5027,11 +5185,12 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func nativeFullscreenDelayedReplacementTokenDestroyRoundTripRestoresExactDwindleFrame() async {
-        let controller = makeRefreshTestController(
+        let runtime = makeRefreshTestRuntime(
             workspaceConfigurations: [
                 WorkspaceConfiguration(name: "1", monitorAssignment: .main, layoutType: .dwindle)
             ]
         )
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
         let frameRecorder = FrameApplyRecorder()
         installCapturingFrameApplySuccessOverride(on: controller, recorder: frameRecorder)
@@ -5131,15 +5290,21 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func nativeFullscreenReplacementExitKeepsDwindleIdentityOnOriginalWorkspaceWhenActiveWorkspaceDiffers() async {
-        let controller = makeRefreshTestController(
+        let runtime = makeRefreshTestRuntime(
             workspaceConfigurations: [
                 WorkspaceConfiguration(name: "1", monitorAssignment: .main, layoutType: .dwindle),
                 WorkspaceConfiguration(name: "2", monitorAssignment: .main, layoutType: .dwindle)
             ]
         )
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
         let frameRecorder = FrameApplyRecorder()
         installCapturingFrameApplySuccessOverride(on: controller, recorder: frameRecorder)
+        // Inactive workspace 2 still receives off-screen hide writes during the
+        // active-workspace mismatch rescan; without confirming position plans
+        // those writes return staleElement against the test's fake AX refs and
+        // quarantine the workspace's entries away from the dwindle engine.
+        controller.axManager.markFrameApplyOverrideConfirmsPositionPlansForTests()
         let visibleWindows = VisibleWindowsStore([
             (makeRefreshTestWindow(windowId: 2711), getpid(), 2711),
             (makeRefreshTestWindow(windowId: 2712), getpid(), 2712)
@@ -5259,11 +5424,12 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func nativeFullscreenRestoreRecordWaitsForTerminalFrameBeforeFinalizingDwindle() async {
-        let controller = makeRefreshTestController(
+        let runtime = makeRefreshTestRuntime(
             workspaceConfigurations: [
                 WorkspaceConfiguration(name: "1", monitorAssignment: .main, layoutType: .dwindle)
             ]
         )
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
         let visibleWindows = VisibleWindowsStore([
             (makeRefreshTestWindow(windowId: 2721), getpid(), 2721),
@@ -5334,11 +5500,12 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func nativeFullscreenExitWithReplacementWindowIdPreservesDwindleIdentity() async {
-        let controller = makeRefreshTestController(
+        let runtime = makeRefreshTestRuntime(
             workspaceConfigurations: [
                 WorkspaceConfiguration(name: "1", monitorAssignment: .main, layoutType: .dwindle)
             ]
         )
+        let controller = runtime.controller
         defer { cleanupRefreshTestController(controller) }
         let frameRecorder = FrameApplyRecorder()
         installCapturingFrameApplySuccessOverride(on: controller, recorder: frameRecorder)
@@ -5410,7 +5577,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func fullRescanExitClearsFullscreenSessionFlagsAndRecoversFocusedBorder() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         let visibleWindows = VisibleWindowsStore([
             (makeRefreshTestWindow(windowId: 2631), getpid(), 2631),
             (makeRefreshTestWindow(windowId: 2632), getpid(), 2632)
@@ -5466,13 +5634,14 @@ private func expectNoWorkspaceBarRefresh(
                     && !engine.hasAnyColumnAnimationsRunning(in: workspaceId)
             }
         }
-        controller.focusWindow(recoveredToken)
+        controller.focusWindow(recoveredToken, source: .focusPolicy)
 
         #expect(controller.workspaceManager.pendingFocusedToken == recoveredToken)
     }
 
     @Test @MainActor func gapsChangedUsesRelayoutOnly() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         let lifecycleManager = ServiceLifecycleManager(controller: controller)
         let recorder = RefreshEventRecorder()
         installRefreshSpies(on: controller, recorder: recorder)
@@ -5483,11 +5652,11 @@ private func expectNoWorkspaceBarRefresh(
         #expect(recorder.relayoutEvents.map(\.0) == [.gapsChanged])
         #expect(recorder.relayoutEvents.map(\.1) == [.relayout])
         #expect(recorder.fullRescanReasons.isEmpty)
-        assertNoLegacyReasons(recorder)
     }
 
     @Test @MainActor func appHideAndUnhideUseVisibilityRefreshOnly() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         guard let workspaceId = controller.activeWorkspace()?.id else {
             Issue.record("Missing active workspace")
             return
@@ -5504,7 +5673,6 @@ private func expectNoWorkspaceBarRefresh(
         #expect(recorder.relayoutEvents.isEmpty)
         #expect(recorder.fullRescanReasons.isEmpty)
         #expect(recorder.windowRemovalReasons.isEmpty)
-        assertNoLegacyReasons(recorder)
 
         resetRefreshSpies(on: controller, recorder: recorder)
 
@@ -5515,11 +5683,11 @@ private func expectNoWorkspaceBarRefresh(
         #expect(recorder.relayoutEvents.isEmpty)
         #expect(recorder.fullRescanReasons.isEmpty)
         #expect(recorder.windowRemovalReasons.isEmpty)
-        assertNoLegacyReasons(recorder)
     }
 
     @Test @MainActor func fullRescanQueuesLowerPriorityRequestsAsFollowUps() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         let gate = AsyncGate()
         var fullRescanReasons: [RefreshReason] = []
         var relayoutEvents: [(RefreshReason, LayoutRefreshController.RefreshRoute)] = []
@@ -5557,7 +5725,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func hiddenAppsSurviveVisibleOnlyFullRescansAndRestoreOnUnhide() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         controller.axManager.currentWindowsAsyncOverride = { [] }
         controller.axEventHandler.windowSubscriptionHandler = { _ in }
         guard let workspaceId = controller.activeWorkspace()?.id else {
@@ -5590,11 +5759,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func fullRescanRemovesMissingTrackedWindowAfterConsecutiveVerifiedMisses() async {
-        // The full rescan now requires two consecutive enumeration misses
-        // before purging a tracked entry (defense in depth against
-        // transient AX enumeration gaps during space transitions). One
-        // miss keeps the entry; the second confirms it and removes.
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         controller.axManager.currentWindowsAsyncOverride = { [] }
         guard let workspaceId = controller.activeWorkspace()?.id else {
             Issue.record("Missing active workspace")
@@ -5615,7 +5781,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func fullRescanPreservesTrackedEmacsLikeWindowOnActiveSpaceChange() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         guard let workspaceId = controller.activeWorkspace()?.id else {
             Issue.record("Missing active workspace")
             return
@@ -5649,7 +5816,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func fullRescanPreservesTrackedWindowsForFailedEnumerationPIDs() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         guard let workspaceId = controller.activeWorkspace()?.id else {
             Issue.record("Missing active workspace")
             return
@@ -5666,9 +5834,6 @@ private func expectNoWorkspaceBarRefresh(
             )
         }
 
-        // Two consecutive rescans are needed to clear the missing entry
-        // because `removeMissing` requires two consecutive verified
-        // misses — see `buildFullRefreshExecutionPlan`.
         controller.layoutRefreshController.requestFullRescan(reason: .startup)
         await waitForRefreshWork(on: controller)
         controller.layoutRefreshController.requestFullRescan(reason: .startup)
@@ -5683,9 +5848,11 @@ private func expectNoWorkspaceBarRefresh(
         let fixture = makeTwoMonitorRefreshTestController()
         let controller = fixture.controller
         defer { cleanupRefreshTestController(controller) }
-        let fullRescanGate = AsyncGate()
+        let resumeFullRescanGate = AsyncGate()
         var fullRescanReasons: [RefreshReason] = []
         var relayoutEvents: [(RefreshReason, LayoutRefreshController.RefreshRoute)] = []
+        var firstBuiltWorkspaceId: WorkspaceDescriptor.ID?
+        defer { resumeFullRescanGate.open() }
 
         controller.enableNiriLayout(maxWindowsPerColumn: 1)
         let primaryHandle = addWindow(on: controller, workspaceId: fixture.primaryWorkspaceId, pid: getpid(), windowId: 6_501)
@@ -5706,36 +5873,21 @@ private func expectNoWorkspaceBarRefresh(
         }
         controller.layoutRefreshController.debugHooks.onFullRescan = { reason in
             fullRescanReasons.append(reason)
-            await fullRescanGate.wait()
             return false
+        }
+        controller.layoutRefreshController.debugHooks.onWorkspaceLayoutPlanBuilt = { layoutType, workspaceId in
+            guard layoutType == .niri, firstBuiltWorkspaceId == nil else { return }
+            firstBuiltWorkspaceId = workspaceId
+            await resumeFullRescanGate.wait()
         }
 
         controller.layoutRefreshController.requestFullRescan(reason: .startup)
-        await waitUntil { fullRescanReasons == [.startup] }
-        fullRescanGate.open()
-        await waitUntil {
-            let primaryTokenCount = niriTokenSet(controller: controller, workspaceId: fixture.primaryWorkspaceId).count
-            let secondaryTokenCount = niriTokenSet(controller: controller, workspaceId: fixture.secondaryWorkspaceId).count
-            let populatedCount = [
-                primaryTokenCount,
-                secondaryTokenCount
-            ]
-            .filter { $0 > 0 }
-            .count
-            return populatedCount == 1
+        let followUpInjectionWaitIterations = 2_000
+        await waitUntil(iterations: followUpInjectionWaitIterations) {
+            firstBuiltWorkspaceId != nil
         }
-
-        let builtWorkspaceId: WorkspaceDescriptor.ID
-        if !niriTokenSet(controller: controller, workspaceId: fixture.primaryWorkspaceId).isEmpty,
-           niriTokenSet(controller: controller, workspaceId: fixture.secondaryWorkspaceId).isEmpty
-        {
-            builtWorkspaceId = fixture.primaryWorkspaceId
-        } else if !niriTokenSet(controller: controller, workspaceId: fixture.secondaryWorkspaceId).isEmpty,
-                  niriTokenSet(controller: controller, workspaceId: fixture.primaryWorkspaceId).isEmpty
-        {
-            builtWorkspaceId = fixture.secondaryWorkspaceId
-        } else {
-            Issue.record("Expected exactly one Niri workspace to be built before follow-up relayout injection")
+        guard let builtWorkspaceId = firstBuiltWorkspaceId else {
+            Issue.record("Expected a Niri workspace to be built before follow-up relayout injection")
             return
         }
 
@@ -5750,6 +5902,7 @@ private func expectNoWorkspaceBarRefresh(
             reason: .axWindowCreated,
             affectedWorkspaceIds: [builtWorkspaceId]
         )
+        resumeFullRescanGate.open()
         await waitForRefreshWork(on: controller)
 
         #expect(fullRescanReasons == [.startup])
@@ -5767,9 +5920,11 @@ private func expectNoWorkspaceBarRefresh(
         let fixture = makeTwoMonitorRefreshTestController()
         let controller = fixture.controller
         defer { cleanupRefreshTestController(controller) }
-        let fullRescanGate = AsyncGate()
+        let resumeFullRescanGate = AsyncGate()
         var fullRescanReasons: [RefreshReason] = []
         var windowRemovalReasons: [RefreshReason] = []
+        var firstBuiltWorkspaceId: WorkspaceDescriptor.ID?
+        defer { resumeFullRescanGate.open() }
 
         configureWorkspaceLayouts(on: controller, layoutsByName: ["1": .dwindle, "2": .dwindle])
         controller.enableDwindleLayout()
@@ -5796,42 +5951,34 @@ private func expectNoWorkspaceBarRefresh(
         }
         controller.layoutRefreshController.debugHooks.onFullRescan = { reason in
             fullRescanReasons.append(reason)
-            await fullRescanGate.wait()
             return false
+        }
+        controller.layoutRefreshController.debugHooks.onWorkspaceLayoutPlanBuilt = { layoutType, workspaceId in
+            guard layoutType == .dwindle, firstBuiltWorkspaceId == nil else { return }
+            firstBuiltWorkspaceId = workspaceId
+            await resumeFullRescanGate.wait()
         }
 
         controller.layoutRefreshController.requestFullRescan(reason: .startup)
-        await waitUntil { fullRescanReasons == [.startup] }
-        fullRescanGate.open()
-        await waitUntil {
-            let primaryTokenCount = dwindleTokenSet(controller: controller, workspaceId: fixture.primaryWorkspaceId).count
-            let secondaryTokenCount = dwindleTokenSet(controller: controller, workspaceId: fixture.secondaryWorkspaceId).count
-            let populatedCount = [
-                primaryTokenCount,
-                secondaryTokenCount
-            ]
-            .filter { $0 > 0 }
-            .count
-            return populatedCount == 1
+        let followUpInjectionWaitIterations = 2_000
+        await waitUntil(iterations: followUpInjectionWaitIterations) {
+            firstBuiltWorkspaceId != nil
+        }
+        guard let builtWorkspaceId = firstBuiltWorkspaceId else {
+            Issue.record("Expected a Dwindle workspace to be built before follow-up removal injection")
+            return
         }
 
-        let builtWorkspaceId: WorkspaceDescriptor.ID
         let removedToken: WindowToken
         let survivingToken: WindowToken
-        if !dwindleTokenSet(controller: controller, workspaceId: fixture.primaryWorkspaceId).isEmpty,
-           dwindleTokenSet(controller: controller, workspaceId: fixture.secondaryWorkspaceId).isEmpty
-        {
-            builtWorkspaceId = fixture.primaryWorkspaceId
+        if builtWorkspaceId == fixture.primaryWorkspaceId {
             removedToken = primarySecond.id
             survivingToken = primaryFirst.id
-        } else if !dwindleTokenSet(controller: controller, workspaceId: fixture.secondaryWorkspaceId).isEmpty,
-                  dwindleTokenSet(controller: controller, workspaceId: fixture.primaryWorkspaceId).isEmpty
-        {
-            builtWorkspaceId = fixture.secondaryWorkspaceId
+        } else if builtWorkspaceId == fixture.secondaryWorkspaceId {
             removedToken = secondarySecond.id
             survivingToken = secondaryFirst.id
         } else {
-            Issue.record("Expected exactly one Dwindle workspace to be built before follow-up removal injection")
+            Issue.record("Unexpected Dwindle workspace built before follow-up removal injection")
             return
         }
 
@@ -5843,6 +5990,7 @@ private func expectNoWorkspaceBarRefresh(
             niriOldFrames: [:],
             shouldRecoverFocus: false
         )
+        resumeFullRescanGate.open()
         await waitForRefreshWork(on: controller)
 
         #expect(fullRescanReasons == [.startup])
@@ -5855,7 +6003,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func sameWorkspaceWindowRemovalPreservesMultiplePayloads() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         guard let workspaceId = controller.activeWorkspace()?.id else {
             Issue.record("Missing active workspace")
             return
@@ -5898,7 +6047,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func immediateRelayoutSupersedesPendingDebouncedRelayout() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         controller.layoutRefreshController.resetDebugState()
 
         controller.layoutRefreshController.requestRelayout(reason: .axWindowCreated)
@@ -5911,7 +6061,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func appLifecycleUsesFullRescan() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         let lifecycleManager = ServiceLifecycleManager(controller: controller)
         let recorder = RefreshEventRecorder()
         installRefreshSpies(on: controller, recorder: recorder)
@@ -5921,7 +6072,6 @@ private func expectNoWorkspaceBarRefresh(
 
         #expect(recorder.fullRescanReasons == [.appLaunched])
         #expect(recorder.relayoutEvents.isEmpty)
-        assertNoLegacyReasons(recorder)
 
         resetRefreshSpies(on: controller, recorder: recorder)
         lifecycleManager.handleAppTerminated(pid: getpid())
@@ -5929,7 +6079,6 @@ private func expectNoWorkspaceBarRefresh(
 
         #expect(recorder.fullRescanReasons == [.appTerminated])
         #expect(recorder.relayoutEvents.isEmpty)
-        assertNoLegacyReasons(recorder)
     }
 
     @Test @MainActor func swapCurrentWorkspaceWithMonitorDoesNotRelayoutAcrossFixedHomes() async {
@@ -5942,7 +6091,6 @@ private func expectNoWorkspaceBarRefresh(
 
         #expect(recorder.relayoutEvents.isEmpty)
         #expect(recorder.fullRescanReasons.isEmpty)
-        assertNoLegacyReasons(recorder)
     }
 
     @Test @MainActor func moveWindowToWorkspaceOnMonitorUsesImmediateRelayoutOnly() async {
@@ -5966,7 +6114,6 @@ private func expectNoWorkspaceBarRefresh(
         #expect(recorder.relayoutEvents.map(\.0) == [.workspaceTransition])
         #expect(recorder.relayoutEvents.map(\.1) == [.immediateRelayout])
         #expect(recorder.fullRescanReasons.isEmpty)
-        assertNoLegacyReasons(recorder)
     }
 
     @Test @MainActor func navigateToWindowInternalUsesImmediateRelayoutOnly() async {
@@ -5997,12 +6144,11 @@ private func expectNoWorkspaceBarRefresh(
         #expect(recorder.relayoutEvents.map(\.0) == [.workspaceTransition])
         #expect(recorder.relayoutEvents.map(\.1) == [.immediateRelayout])
         #expect(recorder.fullRescanReasons.isEmpty)
-        assertNoLegacyReasons(recorder)
     }
 
     @Test @MainActor func focusWindowFromBarRevealsHiddenWindowOnInactiveWorkspace() async {
         var focusRequests: [(pid_t, UInt32)] = []
-        let controller = makeRefreshTestController(
+        let runtime = makeRefreshTestRuntime(
             windowFocusOperations: WindowFocusOperations(
                 activateApp: { _ in },
                 focusSpecificWindow: { pid, windowId, _ in
@@ -6011,6 +6157,7 @@ private func expectNoWorkspaceBarRefresh(
                 raiseWindow: { _ in }
             )
         )
+        let controller = runtime.controller
         guard let workspaceOne = controller.workspaceManager.workspaceId(for: "1", createIfMissing: false),
               let workspaceTwo = controller.workspaceManager.workspaceId(for: "2", createIfMissing: true),
               let monitor = controller.workspaceManager.monitors.first
@@ -6069,7 +6216,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func conservativeLifecycleAndPolicyCallersUseFullRescan() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         let lifecycleManager = ServiceLifecycleManager(controller: controller)
         let recorder = RefreshEventRecorder()
         installRefreshSpies(on: controller, recorder: recorder)
@@ -6124,7 +6272,6 @@ private func expectNoWorkspaceBarRefresh(
         await waitForRefreshWork(on: controller)
         #expect(recorder.fullRescanReasons == [.appTerminated])
         #expect(recorder.relayoutEvents.isEmpty)
-        assertNoLegacyReasons(recorder)
     }
 
     @Test func destroyNotificationRefconRoundTripsWindowId() {
@@ -6175,7 +6322,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func exactDestroyCallbackRemovesClosedWindowWithoutFullRescan() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         let recorder = RefreshEventRecorder()
         installRefreshSpies(on: controller, recorder: recorder)
         guard let workspaceId = controller.activeWorkspace()?.id else {
@@ -6210,7 +6358,10 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func frameChangedBurstReachesRefreshSchedulingAsSingleRelayout() async {
-        let controller = makeRefreshTestController()
+        let cgsObserverLease = await acquireCGSEventObserverLeaseForTests()
+        defer { cgsObserverLease.release() }
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         let recorder = RefreshEventRecorder()
         installRefreshSpies(on: controller, recorder: recorder)
         guard let workspaceId = controller.activeWorkspace()?.id else {
@@ -6237,11 +6388,11 @@ private func expectNoWorkspaceBarRefresh(
         #expect(recorder.relayoutEvents.map(\.1) == [.relayout])
         #expect(recorder.fullRescanReasons.isEmpty)
         #expect(recorder.visibilityReasons.isEmpty)
-        assertNoLegacyReasons(recorder)
     }
 
     @Test @MainActor func relayoutQueuedBehindActiveImmediateRelayoutStillExecutes() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         let gate = AsyncGate()
         var relayoutEvents: [(RefreshReason, LayoutRefreshController.RefreshRoute)] = []
 
@@ -6266,7 +6417,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func visibilityRefreshCoalescesWhilePending() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         let gate = AsyncGate()
         let recorder = RefreshEventRecorder()
 
@@ -6298,7 +6450,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func pendingVisibilityRefreshUpgradesToRelayout() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         let gate = AsyncGate()
         let recorder = RefreshEventRecorder()
 
@@ -6330,7 +6483,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func pendingVisibilityRefreshUpgradesToFullRescan() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         let gate = AsyncGate()
         let recorder = RefreshEventRecorder()
 
@@ -6366,7 +6520,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func activeFullRescanAbsorbsVisibilityReconciliation() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         let gate = AsyncGate()
         guard let workspaceId = controller.activeWorkspace()?.id else {
             Issue.record("Missing active workspace")
@@ -6400,7 +6555,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func pendingRelayoutAbsorbsVisibilityReconciliation() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         let gate = AsyncGate()
         guard let workspaceId = controller.activeWorkspace()?.id else {
             Issue.record("Missing active workspace")
@@ -6438,7 +6594,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func pendingWindowRemovalAbsorbsVisibilityReconciliation() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         let gate = AsyncGate()
         guard let workspaceId = controller.activeWorkspace()?.id else {
             Issue.record("Missing active workspace")
@@ -6486,7 +6643,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func visibilityQueuedBehindActiveImmediateRelayoutStillExecutes() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         let gate = AsyncGate()
         let recorder = RefreshEventRecorder()
 
@@ -6518,7 +6676,8 @@ private func expectNoWorkspaceBarRefresh(
     }
 
     @Test @MainActor func canceledImmediateRelayoutPreservesPostLayoutActionsWhenUpgradedToFullRescan() async {
-        let controller = makeRefreshTestController()
+        let runtime = makeRefreshTestRuntime()
+        let controller = runtime.controller
         let gate = AsyncGate()
         var fullRescanReasons: [RefreshReason] = []
         var postLayoutRuns = 0

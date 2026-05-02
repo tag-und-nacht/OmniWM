@@ -74,7 +74,8 @@ private func makeReconcileKernelSnapshot(monitors: [Monitor]) -> ReconcileSnapsh
             interactionMonitorId: nil,
             previousInteractionMonitorId: nil
         ),
-        windows: []
+        windows: [],
+        workspaceGraph: .empty
     )
 }
 
@@ -275,6 +276,53 @@ private func makeReconcileKernelSnapshot(monitors: [Monitor]) -> ReconcileSnapsh
         #expect(controller.workspaceManager.resolvedFloatingFrame(for: token, preferredMonitor: monitor) == appliedFrame)
         #expect(raiseCount == 1)
         #expect(controller.rescueOffscreenWindows() == 0)
+        #expect(raiseCount == 1)
+    }
+
+    @Test func rescueOffscreenWindowsClearsWorkspaceInactiveStateForVisibleFloatingWindow() throws {
+        var raiseCount = 0
+        let operations = WindowFocusOperations(
+            activateApp: { _ in },
+            focusSpecificWindow: { _, _, _ in },
+            raiseWindow: { _ in
+                raiseCount += 1
+            }
+        )
+        let controller = makeLayoutPlanTestController(
+            workspaceConfigurations: [
+                WorkspaceConfiguration(name: "1", monitorAssignment: .main)
+            ],
+            windowFocusOperations: operations
+        )
+        let workspaceId = try #require(controller.workspaceManager.workspaceId(for: "1", createIfMissing: false))
+        let monitor = try #require(controller.workspaceManager.monitor(for: workspaceId))
+
+        let token = controller.workspaceManager.addWindow(
+            makeLayoutPlanTestWindow(windowId: 9203),
+            pid: 9203,
+            windowId: 9203,
+            to: workspaceId,
+            mode: .floating
+        )
+        controller.workspaceManager.updateFloatingGeometry(
+            frame: CGRect(x: monitor.visibleFrame.maxX + 1800, y: monitor.visibleFrame.maxY + 900, width: 320, height: 200),
+            for: token,
+            referenceMonitor: monitor
+        )
+        setWorkspaceInactiveHiddenStateForLayoutPlanTests(
+            on: controller,
+            token: token,
+            monitor: monitor
+        )
+        controller.axManager.markWindowInactive(token.windowId)
+
+        let rescued = controller.rescueOffscreenWindows()
+        let appliedFrame = try #require(controller.axManager.lastAppliedFrame(for: token.windowId))
+
+        #expect(rescued == 1)
+        #expect(controller.workspaceManager.hiddenState(for: token) == nil)
+        #expect(!controller.axManager.inactiveWorkspaceWindowIds.contains(token.windowId))
+        #expect(monitor.visibleFrame.contains(appliedFrame))
         #expect(raiseCount == 1)
     }
 
@@ -498,8 +546,8 @@ private func makeReconcileKernelSnapshot(monitors: [Monitor]) -> ReconcileSnapsh
             to: workspaceId
         )
 
-        let txn = manager.recordReconcileEvent(
-            .windowModeChanged(
+        let txn = manager.recordTransaction(
+            for: .windowModeChanged(
                 token: token,
                 workspaceId: workspaceId,
                 monitorId: nil,

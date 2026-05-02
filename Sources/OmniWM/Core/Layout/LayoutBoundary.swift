@@ -2,7 +2,54 @@
 import AppKit
 import Foundation
 
+struct LayoutConstraintRuleEffects: Equatable {
+    let minWidth: CGFloat?
+    let minHeight: CGFloat?
+
+    static let none = LayoutConstraintRuleEffects()
+
+    init(minWidth: CGFloat? = nil, minHeight: CGFloat? = nil) {
+        self.minWidth = minWidth
+        self.minHeight = minHeight
+    }
+
+    init(ruleEffects: ManagedWindowRuleEffects) {
+        self.init(
+            minWidth: ruleEffects.minWidth.map { CGFloat($0) },
+            minHeight: ruleEffects.minHeight.map { CGFloat($0) }
+        )
+    }
+}
+
+extension WindowSizeConstraints {
+    func applyingRuleMinimumSizeEffects(_ effects: LayoutConstraintRuleEffects) -> WindowSizeConstraints {
+        var resolved = self
+        if let minWidth = effects.minWidth {
+            resolved.minSize.width = max(resolved.minSize.width, minWidth)
+        }
+        if let minHeight = effects.minHeight {
+            resolved.minSize.height = max(resolved.minSize.height, minHeight)
+        }
+        return resolved.normalized()
+    }
+}
+
+@MainActor
+protocol LayoutLifecycleProvider {
+    func hiddenState(for token: WindowToken) -> WindowModel.HiddenState?
+    func layoutReason(for token: WindowToken) -> LayoutReason
+    func nativeFullscreenRestoreContext(for token: WindowToken) -> NativeFullscreenRestoreContext?
+    func sizeConstraints(for token: WindowToken) -> WindowSizeConstraints
+}
+
+extension WorkspaceManager: LayoutLifecycleProvider {
+    func sizeConstraints(for token: WindowToken) -> WindowSizeConstraints {
+        cachedConstraints(for: token) ?? .unconstrained
+    }
+}
+
 struct LayoutWindowSnapshot {
+    let logicalId: LogicalWindowId
     let token: WindowToken
     let constraints: WindowSizeConstraints
     let hiddenState: WindowModel.HiddenState?
@@ -19,6 +66,67 @@ struct LayoutWindowSnapshot {
 
     var restoreFrame: CGRect? {
         nativeFullscreenRestore?.restoreFrame
+    }
+
+    @MainActor
+    static func projected(
+        from entry: WorkspaceGraph.WindowEntry,
+        lifecycle: LayoutLifecycleProvider
+    ) -> LayoutWindowSnapshot {
+        let constraints = lifecycle.sizeConstraints(for: entry.token)
+            .applyingRuleMinimumSizeEffects(entry.constraintRuleEffects)
+
+        return LayoutWindowSnapshot(
+            logicalId: entry.logicalId,
+            token: entry.token,
+            constraints: constraints,
+            hiddenState: lifecycle.hiddenState(for: entry.token),
+            layoutReason: lifecycle.layoutReason(for: entry.token),
+            nativeFullscreenRestore: lifecycle.nativeFullscreenRestoreContext(for: entry.token)
+        )
+    }
+}
+
+@MainActor
+struct LayoutProjectionContext {
+    let graph: WorkspaceGraph
+    let topology: MonitorTopologyState
+    let interactionMonitorId: Monitor.ID?
+
+    static func project(controller: WMController) -> LayoutProjectionContext {
+        let manager = controller.workspaceManager
+        return LayoutProjectionContext(
+            graph: manager.workspaceGraphSnapshot(),
+            topology: MonitorTopologyState.project(
+                manager: manager,
+                settings: controller.settings,
+                epoch: controller.runtime?.currentTopologyEpoch ?? .invalid,
+                insetWorkingFrame: { mon in
+                    controller.insetWorkingFrame(for: mon)
+                }
+            ),
+            interactionMonitorId: controller.monitorForInteraction()?.id
+        )
+    }
+
+    func monitorNode(
+        for workspaceId: WorkspaceDescriptor.ID
+    ) -> MonitorTopologyState.DisplayNode? {
+        guard let monitorId = topology.workspaceMonitor[workspaceId] else { return nil }
+        return topology.node(monitorId)
+    }
+
+    func monitor(for workspaceId: WorkspaceDescriptor.ID) -> Monitor? {
+        monitorNode(for: workspaceId)?.monitor
+    }
+
+    func activeWorkspaceId(on monitorId: Monitor.ID) -> WorkspaceDescriptor.ID? {
+        topology.node(monitorId)?.activeWorkspaceId
+    }
+
+    var activeWorkspaceIdForInteraction: WorkspaceDescriptor.ID? {
+        guard let interactionMonitorId else { return nil }
+        return activeWorkspaceId(on: interactionMonitorId)
     }
 }
 
@@ -248,6 +356,7 @@ struct LayoutFocusedFrame {
 enum BorderUpdateMode {
     case coordinated
     case direct
+    case hidden
     case none
 }
 

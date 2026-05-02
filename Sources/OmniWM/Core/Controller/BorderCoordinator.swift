@@ -19,45 +19,36 @@ enum ManagedBorderReapplyPhase: String, Equatable {
 
 enum BorderOwner: Equatable {
     case none
-    case managed(token: WindowToken, wid: Int, workspaceId: WorkspaceDescriptor.ID)
+    case managed(
+        logicalId: LogicalWindowId,
+        replacementEpoch: ReplacementEpoch,
+        workspaceId: WorkspaceDescriptor.ID
+    )
     case fallback(pid: pid_t, wid: Int)
-
-    var token: WindowToken? {
-        switch self {
-        case let .managed(token, _, _):
-            token
-        case .none, .fallback:
-            nil
-        }
-    }
-
-    var pid: pid_t? {
-        switch self {
-        case let .managed(token, _, _):
-            token.pid
-        case let .fallback(pid, _):
-            pid
-        case .none:
-            nil
-        }
-    }
-
-    var wid: Int? {
-        switch self {
-        case let .managed(_, wid, _):
-            wid
-        case let .fallback(_, wid):
-            wid
-        case .none:
-            nil
-        }
-    }
 
     var workspaceId: WorkspaceDescriptor.ID? {
         switch self {
         case let .managed(_, _, workspaceId):
             workspaceId
         case .none, .fallback:
+            nil
+        }
+    }
+
+    var managedLogicalBinding: (logicalId: LogicalWindowId, replacementEpoch: ReplacementEpoch)? {
+        switch self {
+        case let .managed(logicalId, epoch, _):
+            (logicalId, epoch)
+        case .none, .fallback:
+            nil
+        }
+    }
+
+    var fallbackAddress: (pid: pid_t, windowId: Int)? {
+        switch self {
+        case let .fallback(pid, wid):
+            (pid, wid)
+        case .none, .managed:
             nil
         }
     }
@@ -75,11 +66,6 @@ enum BorderOwner: Equatable {
         }
         return false
     }
-
-    var windowIdUInt32: UInt32? {
-        guard let wid else { return nil }
-        return UInt32(exactly: wid)
-    }
 }
 
 extension BorderOwner: CustomStringConvertible {
@@ -87,12 +73,22 @@ extension BorderOwner: CustomStringConvertible {
         switch self {
         case .none:
             return "none"
-        case let .managed(token, wid, workspaceId):
-            return "managed(token=\(token), wid=\(wid), ws=\(workspaceId))"
+        case let .managed(logicalId, epoch, workspaceId):
+            return "managed(\(logicalId), \(epoch), ws=\(workspaceId))"
         case let .fallback(pid, wid):
             return "fallback(pid=\(pid), wid=\(wid))"
         }
     }
+}
+
+struct ResolvedBorderAddress: Equatable {
+    let token: WindowToken
+    let workspaceId: WorkspaceDescriptor.ID?
+    let isManaged: Bool
+
+    var pid: pid_t { token.pid }
+    var windowId: Int { token.windowId }
+    var windowIdUInt32: UInt32? { UInt32(exactly: windowId) }
 }
 
 struct BorderOwnerState: Equatable {
@@ -254,8 +250,9 @@ enum BorderReconcileEvent {
     case cgsClosed(windowId: UInt32)
     case cgsDestroyed(windowId: UInt32)
     case managedRekey(
-        from: WindowToken,
-        to: WindowToken,
+        logicalId: LogicalWindowId,
+        replacementEpoch: ReplacementEpoch,
+        newToken: WindowToken,
         workspaceId: WorkspaceDescriptor.ID?,
         axRef: AXWindowRef?,
         preferredFrame: CGRect?,
@@ -331,7 +328,6 @@ private extension Duration {
 
 @MainActor
 final class BorderCoordinator {
-    private static let ghosttyBundleId = "com.mitchellh.ghostty"
     private static let fallbackLeaseDuration: Duration = .milliseconds(500)
     private static let liveMotionIdleDuration: Duration = .milliseconds(150)
     private static let managedFastPathFrameTolerance: CGFloat = 1.0
@@ -446,10 +442,11 @@ final class BorderCoordinator {
             invalidateCornerRadiusCache(for: windowId)
             return reconcileOwnerTeardown(windowId: windowId, source: .cgsDestroyed, reason: "window destroyed")
 
-        case let .managedRekey(from, to, workspaceId, axRef, preferredFrame, policy):
+        case let .managedRekey(logicalId, replacementEpoch, newToken, workspaceId, axRef, preferredFrame, policy):
             return reconcileManagedRekey(
-                from: from,
-                to: to,
+                logicalId: logicalId,
+                replacementEpoch: replacementEpoch,
+                newToken: newToken,
                 workspaceId: workspaceId,
                 axRef: axRef,
                 preferredFrame: preferredFrame,
@@ -544,7 +541,8 @@ final class BorderCoordinator {
 
     private func reconcileCurrentOwnerFrameChange(windowId: UInt32) -> Bool {
         let target: KeyboardFocusTarget?
-        if ownerState.owner.windowIdUInt32 == windowId {
+        let currentOwnerWindowId = resolveOwnerAddress(ownerState.owner)?.windowIdUInt32
+        if currentOwnerWindowId == windowId {
             let generation = ownerState.generation
             if ownerState.owner.isFallback {
                 noteLiveMotion(for: generation)
@@ -554,9 +552,11 @@ final class BorderCoordinator {
                   rawTarget.windowId == Int(windowId)
         {
             let candidateOwner = owner(for: rawTarget)
+            let candidatePid = resolveOwnerAddress(candidateOwner)?.pid
             if let windowInfo = resolveWindowInfo(windowId) {
                 guard windowInfo.id == windowId,
-                      pid_t(windowInfo.pid) == candidateOwner.pid
+                      let candidatePid,
+                      pid_t(windowInfo.pid) == candidatePid
                 else {
                     return false
                 }
@@ -599,7 +599,7 @@ final class BorderCoordinator {
         source: BorderReconcileSource,
         reason: String
     ) -> Bool {
-        guard ownerState.owner.windowIdUInt32 == windowId else {
+        guard resolveOwnerAddress(ownerState.owner)?.windowIdUInt32 == windowId else {
             return false
         }
 
@@ -608,38 +608,49 @@ final class BorderCoordinator {
     }
 
     private func reconcileManagedRekey(
-        from oldToken: WindowToken,
-        to newToken: WindowToken,
+        logicalId: LogicalWindowId,
+        replacementEpoch: ReplacementEpoch,
+        newToken: WindowToken,
         workspaceId: WorkspaceDescriptor.ID?,
         axRef: AXWindowRef?,
         preferredFrame: CGRect?,
         policy: KeyboardFocusBorderRenderPolicy
     ) -> Bool {
+        guard let controller else { return false }
+
         let currentOwner = ownerState.owner
-        let currentWorkspaceId: WorkspaceDescriptor.ID?
-        if case let .managed(token, _, workspaceIdFromOwner) = currentOwner,
-           token == oldToken || token == newToken
-        {
-            currentWorkspaceId = workspaceIdFromOwner
-        } else {
-            let currentFocusToken = controller?.currentKeyboardFocusTargetForRendering()?.token
-                ?? controller?.workspaceManager.focusedToken
-                ?? controller?.workspaceManager.pendingFocusedToken
-            guard currentFocusToken == oldToken || currentFocusToken == newToken else {
+        let currentOwnerLogicalId: LogicalWindowId? = currentOwner.managedLogicalBinding?.logicalId
+        let currentOwnerWorkspaceId: WorkspaceDescriptor.ID? = currentOwner.workspaceId
+
+        let isRelevantToCurrentOwner = currentOwnerLogicalId == logicalId
+        if !isRelevantToCurrentOwner {
+            let focusStateObserved = controller.runtime?.focusState.observedToken
+            let currentFocusToken = focusStateObserved
+                ?? controller.workspaceManager.focusedToken
+                ?? controller.workspaceManager.pendingFocusedToken
+                ?? controller.currentKeyboardFocusTargetForRendering()?.token
+            guard currentFocusToken == newToken else {
                 return false
             }
-            currentWorkspaceId = controller?.workspaceManager.entry(for: newToken)?.workspaceId
-                ?? controller?.workspaceManager.entry(for: oldToken)?.workspaceId
         }
 
-        guard let resolvedWorkspaceId = workspaceId ?? currentWorkspaceId else {
+        let resolvedWorkspaceId = workspaceId
+            ?? currentOwnerWorkspaceId
+            ?? controller.workspaceManager.entry(for: newToken)?.workspaceId
+        guard let resolvedWorkspaceId else {
             return false
         }
 
-        adoptOwnerIfNeeded(.managed(token: newToken, wid: newToken.windowId, workspaceId: resolvedWorkspaceId))
+        adoptOwnerIfNeeded(
+            .managed(
+                logicalId: logicalId,
+                replacementEpoch: replacementEpoch,
+                workspaceId: resolvedWorkspaceId
+            )
+        )
         ownerState.cachedAXRef = axRef
 
-        let target = controller?.managedKeyboardFocusTarget(for: newToken)
+        let target = controller.managedKeyboardFocusTarget(for: newToken)
             ?? axRef.map {
                 KeyboardFocusTarget(
                     token: newToken,
@@ -717,16 +728,23 @@ final class BorderCoordinator {
             windowInfo: orderingWindowInfo
         )
 
-        if owner.isManaged,
-           let token = owner.token
-        {
-            guard let entry = controller.workspaceManager.entry(for: token) else {
+        if owner.isManaged {
+            guard let resolved = resolveOwnerAddress(owner) else {
+                return .hide(reason: "managed owner unresolved")
+            }
+            guard let entry = controller.workspaceManager.entry(for: resolved.token) else {
                 return .hide(reason: "managed entry missing")
             }
-            guard controller.isManagedWindowDisplayable(entry.handle) else {
+            guard controller.isManagedWindowDisplayable(entry.handle)
+                || shouldPreserveManagedBorderDuringPendingActivation(
+                    target: target,
+                    resolved: resolved,
+                    controller: controller
+                )
+            else {
                 return .hide(reason: "managed target not displayable")
             }
-            if controller.workspaceManager.isAppFullscreenActive || isManagedWindowFullscreen(token) {
+            if controller.workspaceManager.isAppFullscreenActive || isManagedWindowFullscreen(resolved.token) {
                 return .hide(reason: "fullscreen target")
             }
         }
@@ -840,13 +858,14 @@ final class BorderCoordinator {
     ) -> BorderResolutionDecision? {
         guard let controller else { return .hide(reason: "controller unavailable") }
 
-        if owner.isManaged,
-           let token = owner.token,
-           (controller.workspaceManager.isAppFullscreenActive
-               || isManagedWindowFullscreen(token)
-               || isFullscreen)
-        {
-            return .hide(reason: "fullscreen target")
+        if owner.isManaged {
+            let resolvedToken = resolveOwnerAddress(owner)?.token
+            if controller.workspaceManager.isAppFullscreenActive
+                || (resolvedToken.map { isManagedWindowFullscreen($0) } ?? false)
+                || isFullscreen
+            {
+                return .hide(reason: "fullscreen target")
+            }
         }
 
         if isMinimized {
@@ -948,7 +967,7 @@ final class BorderCoordinator {
         windowInfo: WindowServerInfo?
     ) -> CGRect? {
         guard let controller else { return nil }
-        let prefersGhosttyObservedFrame = controller.appInfoCache.bundleId(for: target.pid) == Self.ghosttyBundleId
+        let prefersGhosttyObservedFrame = capabilityPreferObservedFrame(forToken: target.token) ?? false
 
         if owner.isManaged,
            let entry = controller.workspaceManager.entry(for: target.token)
@@ -987,8 +1006,42 @@ final class BorderCoordinator {
             return false
         }
 
+        let capabilityPrefersObserved = capabilityPreferObservedFrame(forToken: target.token) ?? false
         return controller.axManager.shouldPreferObservedFrame(for: entry.windowId)
-            || controller.appInfoCache.bundleId(for: target.pid) == Self.ghosttyBundleId
+            || capabilityPrefersObserved
+    }
+
+    private func capabilityPreferObservedFrame(forToken token: WindowToken) -> Bool? {
+        guard let controller, let runtime = controller.runtime else { return nil }
+        guard let bundleId = controller.appInfoCache.bundleId(for: token.pid) else { return nil }
+        let level: Int?
+        if let windowIdU32 = UInt32(exactly: token.windowId),
+           let info = SkyLight.shared.queryWindowInfo(windowIdU32)
+        {
+            level = Int(info.level)
+        } else {
+            level = nil
+        }
+        let facts = WindowRuleFacts(
+            appName: controller.appInfoCache.name(for: token.pid),
+            ax: AXWindowFacts(
+                role: nil,
+                subrole: nil,
+                title: nil,
+                hasCloseButton: false,
+                hasFullscreenButton: false,
+                fullscreenButtonEnabled: nil,
+                hasZoomButton: false,
+                hasMinimizeButton: false,
+                appPolicy: nil,
+                bundleId: bundleId,
+                attributeFetchSucceeded: false
+            ),
+            sizeConstraints: nil,
+            windowServer: nil
+        )
+        let resolved = runtime.capabilityProfileResolver.resolve(for: facts, level: level)
+        return resolved.profile.frameWrite == .prefersObservedFrame
     }
 
     private func cachedManagedRenderContext(
@@ -1244,7 +1297,7 @@ final class BorderCoordinator {
     }
 
     private func fetchValidatedWindowInfo(for owner: BorderOwner) -> WindowServerInfo? {
-        guard let windowId = owner.windowIdUInt32 else { return nil }
+        guard let windowId = resolveOwnerAddress(owner)?.windowIdUInt32 else { return nil }
         return validatedWindowInfo(
             for: owner,
             candidate: resolveWindowInfo(windowId)
@@ -1255,11 +1308,11 @@ final class BorderCoordinator {
         for owner: BorderOwner,
         candidate: WindowServerInfo?
     ) -> WindowServerInfo? {
-        guard let windowId = owner.windowIdUInt32,
-              let pid = owner.pid,
+        guard let resolved = resolveOwnerAddress(owner),
+              let windowId = resolved.windowIdUInt32,
               let candidate,
               candidate.id == windowId,
-              pid_t(candidate.pid) == pid
+              pid_t(candidate.pid) == resolved.pid
         else {
             return nil
         }
@@ -1290,33 +1343,34 @@ final class BorderCoordinator {
         for owner: BorderOwner,
         target: KeyboardFocusTarget?
     ) -> AXWindowRef? {
+        guard let resolved = resolveOwnerAddress(owner) else {
+            return nil
+        }
+
         if let target,
-           target.windowId == owner.wid,
-           target.pid == owner.pid
+           target.windowId == resolved.windowId,
+           target.pid == resolved.pid
         {
             return target.axRef
         }
 
         if let cachedAXRef = ownerState.cachedAXRef,
-           cachedAXRef.windowId == owner.wid
+           cachedAXRef.windowId == resolved.windowId
         {
             return cachedAXRef
         }
 
-        guard let windowId = owner.windowIdUInt32,
-              let pid = owner.pid
-        else {
+        guard let windowIdUInt32 = resolved.windowIdUInt32 else {
             return nil
         }
 
-        if owner.isManaged,
-           let token = owner.token,
-           let entry = controller?.workspaceManager.entry(for: token)
+        if resolved.isManaged,
+           let entry = controller?.workspaceManager.entry(for: resolved.token)
         {
             return entry.axRef
         }
 
-        return AXWindowService.axWindowRef(for: windowId, pid: pid)
+        return AXWindowService.axWindowRef(for: windowIdUInt32, pid: resolved.pid)
     }
 
     private func isAXWindowMinimized(_ axRef: AXWindowRef) -> Bool {
@@ -1353,18 +1407,86 @@ final class BorderCoordinator {
         }
 
         let owner = ownerState.owner
-        let matchesToken = token.map { owner.token == $0 } ?? true
-        let matchesPid = pid.map { owner.pid == $0 } ?? true
-        let matchesWindowId = windowId.map { owner.wid == $0 } ?? true
+        guard let resolved = resolveOwnerAddress(owner) else {
+            return false
+        }
+
+        let matchesToken: Bool
+        if let token {
+            if resolved.isManaged,
+               let controller,
+               let ownerLogicalId = owner.managedLogicalBinding?.logicalId
+            {
+                let tokenLogicalId = controller.workspaceManager.logicalWindowRegistry
+                    .resolveForRead(token: token)
+                matchesToken = tokenLogicalId == ownerLogicalId
+            } else {
+                matchesToken = resolved.token == token
+            }
+        } else {
+            matchesToken = true
+        }
+
+        let matchesPid = pid.map { resolved.pid == $0 } ?? true
+        let matchesWindowId = windowId.map { resolved.windowId == $0 } ?? true
         return matchesToken && matchesPid && matchesWindowId
     }
 
     private func owner(for target: KeyboardFocusTarget) -> BorderOwner {
-        if target.isManaged, let workspaceId = target.workspaceId {
-            return .managed(token: target.token, wid: target.windowId, workspaceId: workspaceId)
+        if target.isManaged,
+           let workspaceId = target.workspaceId,
+           let binding = logicalBindingForManagedTarget(target)
+        {
+            return .managed(
+                logicalId: binding.logicalId,
+                replacementEpoch: binding.replacementEpoch,
+                workspaceId: workspaceId
+            )
         }
 
         return .fallback(pid: target.pid, wid: target.windowId)
+    }
+
+    private func logicalBindingForManagedTarget(
+        _ target: KeyboardFocusTarget
+    ) -> (logicalId: LogicalWindowId, replacementEpoch: ReplacementEpoch)? {
+        guard let controller else { return nil }
+        let registry = controller.workspaceManager.logicalWindowRegistry
+        guard let logicalId = registry.resolveForWrite(token: target.token),
+              let record = registry.record(for: logicalId),
+              record.primaryPhase != .retired
+        else {
+            return nil
+        }
+        return (logicalId, record.replacementEpoch)
+    }
+
+    fileprivate func resolveOwnerAddress(_ owner: BorderOwner) -> ResolvedBorderAddress? {
+        switch owner {
+        case .none:
+            return nil
+
+        case let .managed(logicalId, _, workspaceId):
+            guard let controller,
+                  let record = controller.workspaceManager.logicalWindowRegistry.record(for: logicalId),
+                  record.primaryPhase != .retired,
+                  let currentToken = record.currentToken
+            else {
+                return nil
+            }
+            return ResolvedBorderAddress(
+                token: currentToken,
+                workspaceId: workspaceId,
+                isManaged: true
+            )
+
+        case let .fallback(pid, wid):
+            return ResolvedBorderAddress(
+                token: WindowToken(pid: pid, windowId: wid),
+                workspaceId: nil,
+                isManaged: false
+            )
+        }
     }
 
     private func adoptOwnerIfNeeded(_ owner: BorderOwner) {
@@ -1394,6 +1516,19 @@ final class BorderCoordinator {
         releaseFallbackSubscription(for: previousOwner)
         clearTransientState(clearFallbackBookkeeping: true)
         ownerState.owner = .none
+    }
+
+    private func shouldPreserveManagedBorderDuringPendingActivation(
+        target: KeyboardFocusTarget,
+        resolved: ResolvedBorderAddress,
+        controller: WMController
+    ) -> Bool {
+        guard target.isManaged,
+              controller.workspaceManager.pendingFocusedToken != nil
+        else {
+            return false
+        }
+        return controller.workspaceManager.focusedToken == resolved.token
     }
 
     private func clearTransientState(clearFallbackBookkeeping _: Bool) {
@@ -1532,8 +1667,11 @@ final class BorderCoordinator {
         guard let controller else { return nil }
 
         switch ownerState.owner {
-        case let .managed(token, _, _):
-            return controller.managedKeyboardFocusTarget(for: token)
+        case .managed:
+            guard let resolved = resolveOwnerAddress(ownerState.owner) else {
+                return nil
+            }
+            return controller.managedKeyboardFocusTarget(for: resolved.token)
 
         case let .fallback(pid, wid):
             if let currentTarget = controller.currentKeyboardFocusTargetForRendering(),

@@ -62,7 +62,8 @@ private func makeRestorePlannerSnapshot(
             interactionMonitorId: interactionMonitorId,
             previousInteractionMonitorId: previousInteractionMonitorId
         ),
-        windows: windows
+        windows: windows,
+        workspaceGraph: .empty
     )
 }
 

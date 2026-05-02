@@ -87,6 +87,13 @@
       <br>
       <a href="https://github.com/zicochaos"><strong>Zicochaos</strong></a>
     </td>
+    <td align="center">
+      <a href="https://github.com/mkdir700" title="mkdir700">
+        <img src="https://github.com/mkdir700.png?size=96" width="96" alt="mkdir700">
+      </a>
+      <br>
+      <a href="https://github.com/mkdir700"><strong>mkdir700</strong></a>
+    </td>
   </tr>
 </table>
 
@@ -100,28 +107,7 @@
   <a href="https://trendshift.io/repositories/16758" target="_blank"><img src="https://trendshift.io/api/badge/repositories/16758" alt="BarutSRB%2FOmniWM | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
 </p>
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/BarutSRB/OmniWM/main/assets/semidemo.gif" alt="OmniWM demo">
-  <img src="https://raw.githubusercontent.com/BarutSRB/OmniWM/main/assets/semidemo1.gif" alt="OmniWM demo">
-</p>
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/BarutSRB/OmniWM/main/assets/demo1.gif" alt="OmniWM demo" width="100%">
-</p>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/BarutSRB/OmniWM/main/assets/demo2.gif" alt="OmniWM demo" width="100%">
-</p>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/BarutSRB/OmniWM/main/assets/demo3.gif" alt="OmniWM demo" width="100%">
-</p>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/BarutSRB/OmniWM/main/assets/demo4.gif" alt="OmniWM demo" width="100%">
-</p>
-<p align="center">
-  <img src="https://raw.githubusercontent.com/BarutSRB/OmniWM/main/assets/demo5.gif" alt="OmniWM demo" width="100%">
-</p>
-
-Small demo, not fully showing everything, gif recorded at 30fps due to size, some stuff is now more refined and better as soem gifs might be outdated, features shown:
+Some of the features:
 - Real quake/sticky terminal using ghostty's libghostty
 - Best-effort macOS native-tab replacement support
 - IPC/CLI
@@ -135,10 +121,6 @@ Small demo, not fully showing everything, gif recorded at 30fps due to size, som
 - Keep awake (Similar to Caffeine)
 - Interactive workspace/app icon bar
 - A lot more features not show in the video.
-
-## Known Limitations
-
-- **Gestures/Trackpad** - Magic Mouse and trackpad gestures are untested (no hardware available for testing but haven't heard complaints so it works)
 
 ## Performance & Trust
 
@@ -210,7 +192,7 @@ For setup, installation options, commands, queries, rules, subscriptions, and se
 6. Use the default shortcuts in `Keyboard Shortcuts` to navigate between windows
 7. Click the menu bar icon to access Settings, including `Settings > General > Updates`
 8. Use `Check for Updates...` from the status bar menu whenever you want to run a manual update check
-9. In case you freak out and don't see all your status bar icons, relax, right click on OmniWM's status bar icon and drag the icons to the left of it's "/" by holding CMD + drag as OmniWM hides status bar icons like **Ice Bar**.
+9. If other status bar icons are hidden, right-click OmniWM's menu bar icon to reveal Hidden Bar, then hold Command and drag icons to the left of the separator.
 
 
 ## User Guide
@@ -385,6 +367,27 @@ Hide or reveal status bar icons using a separator item:
 - Right-click the OmniWM menu bar icon to toggle
 - An optional global hotkey is available and starts unassigned
 
+#### Menu Bar Icon Recovery
+
+OmniWM repairs its owned menu bar icon and Hidden Bar separator on launch when AppKit restores them as hidden or off screen. If you are recovering from an older build where OmniWM's own icon is already gone, quit OmniWM and remove only the AppKit status-item restore keys:
+
+```sh
+for key in \
+  "NSStatusItem Preferred Position omniwm_main" \
+  "NSStatusItem Preferred Position omniwm_hiddenbar_separator" \
+  "NSStatusItem Visible omniwm_main" \
+  "NSStatusItem Visible omniwm_hiddenbar_separator" \
+  "NSStatusItem Visible Preference omniwm_main" \
+  "NSStatusItem Visible Preference omniwm_hiddenbar_separator" \
+  "NSStatusItem Visibility omniwm_main" \
+  "NSStatusItem Visibility omniwm_hiddenbar_separator"
+do
+  defaults delete com.barut.OmniWM "$key" 2>/dev/null || true
+done
+```
+
+Relaunch OmniWM after that targeted cleanup. This does not edit `~/.config/omniwm/settings.toml`; it only clears private AppKit/UserDefaults restore state for OmniWM's two status items. Use a broader `defaults delete com.barut.OmniWM` only when you intentionally want to reset all private runtime defaults, and remove or edit `settings.toml` separately only when you want to reset exported user settings.
+
 ### Tips
 
 - **Workspaces** - Create named workspaces in Settings to organize by project or context (You can use emojis 🥳)
@@ -413,7 +416,7 @@ OmniWM stores its editable config at `~/.config/omniwm/settings.toml`, while pri
 Configure per-application behavior in Settings > App Rules:
 
 - **Always Float** - Force specific apps to always float (e.g., calculators, preferences windows)
-- **Assign to Workspace** - Automatically move app windows to a specific workspace
+- **Assign to Workspace** - Open first matching app windows on a specific workspace; later windows follow the app's current workspace unless rules are explicitly applied
 - **Minimum Size** - Prevent the layout engine from sizing windows below a threshold
 
 ## Building from Source

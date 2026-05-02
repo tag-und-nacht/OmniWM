@@ -98,16 +98,18 @@ Sources/
 │   │   ├── Menu/                    Menu extraction for MenuAnywhere (3 files)
 │   │   ├── Monitor/                 Display detection, OutputId, restore assignments (5 files)
 │   │   ├── Overview/                Bird's-eye workspace overview mode (9 files)
-│   │   ├── Reconcile/               Runtime snapshot/trace, restore planning,
-│   │   │                            and persisted restore models (14 files)
+│   │   ├── Reconcile/               Snapshot models, invariants, and pure
+│   │   │                            reducers
+│   │   ├── Runtime/                 Transaction owner, command promotion,
+│   │   │                            domain runtimes, and mutation coordinator
 │   │   ├── Rules/                   Window rule evaluation engine (1 file)
 │   │   ├── SkyLight/                Private macOS API wrappers (2 files)
 │   │   ├── Sleep/                   Sleep prevention manager (1 file)
 │   │   ├── Support/                 Utility types & extensions (3 files)
 │   │   ├── Surface/                 Shared surface policy, hit-testing,
 │   │   │                            and capture eligibility (2 files)
-│   │   └── Workspace/               Workspace model, session state,
-│   │                                and runtime coordination (6 files)
+│   │   └── Workspace/               Workspace graph, window/session storage,
+│   │                                restore state, and workspace substores
 │   ├── IPC/                         IPC server, connections, routing (9 files)
 │   ├── QuakeTerminal/               Drop-down terminal, Ghostty integration (9 files)
 │   └── UI/                          SwiftUI settings, status bar, workspace bar,
@@ -262,7 +264,7 @@ OmniWM is fundamentally **reactive**. It responds to two categories of events, p
          │                         │
          v                         v
 ┌──────────────────┐    ┌──────────────────┐
-│ AXEventHandler   │    │ CommandHandler   │
+│ AXEventHandler   │    │ WMRuntime        │
 │ (window lifecycle│    │ (command routing │
 │  & focus)        │    │  & execution)    │
 └────────┬─────────┘    └────────┬─────────┘
@@ -437,7 +439,6 @@ This separation means layout logic can be unit-tested without any macOS UI or ac
 
 | Handler | Responsibility |
 |---------|---------------|
-| `commandHandler` | Routes `HotkeyCommand` cases to appropriate handler methods |
 | `axEventHandler` | Processes window create/destroy events, manages replacement correlation |
 | `mouseEventHandler` | CGEvent tap for mouse events, gestures, focus-follows-mouse |
 | `mouseWarpHandler` | Warps cursor to focused window when configured |
@@ -468,7 +469,7 @@ This separation means layout logic can be unit-tested without any macOS UI or ac
 
 **WorkspaceManager** (`Sources/OmniWM/Core/Workspace/WorkspaceManager.swift`)
 
-Owns workspace definitions, the window model, session state, monitor tracking, and relaunch restore behavior.
+Owns workspace definitions, the window model, session state, monitor tracking, and relaunch restore behavior. Durable state mutation enters through `WMRuntime` or a domain runtime (`FocusRuntime`, `WorkspaceRuntime`, `WindowAdmissionRuntime`, etc.), which share `RuntimeMutationCoordinator` for epoch stamping, transaction recording, and snapshot publication.
 
 ```
 WorkspaceManager
@@ -504,9 +505,11 @@ Workspace/session reconciliation now uses the same leaf-kernel boundary. `Worksp
 
 Restore/relaunch planning now uses the same seam. `RestorePlanner` is a thin Swift marshalling layer over the restore event, persisted-hydration, and floating-rescue kernel entry points. Swift still owns `WorkspaceManager`, `PersistedWindowRestoreCatalog`, runtime monitor/workspace identity, restore execution, rescue execution, and refresh/orchestration, while Zig owns the deterministic symbolic solve for restore-refresh notes, persisted hydration matching/preferred-monitor resolution, floating-frame normalization/clamping, and floating rescue filtering. The monitor restore assignment kernel remains the single assignment authority and is composed inside the workspace/session topology planner and restore topology kernel rather than duplicated in Swift.
 
+`WorkspaceGraph` is authoritative for logical workspace membership, tiled order, floating/suppressed membership, and workspace focus pointers. The accepted closure deviation is that `WindowModel.Entry.workspaceId` remains as OS-facing per-window state because AX/window-server operations still start from a token. It is a mirror, not a parallel membership authority: reassignment, rekey, quarantine, removal, and mode-switch paths update the graph and the `WindowModel` entry in the same serialized `WorkspaceManager` mutation. `Tests/OmniWMTests/WorkspaceGraphProjectionTests.swift` has a focused invariant that compares `WindowModel.workspace(for:)` with `WorkspaceGraph.workspaceId(containing:)` for every live logical id across those paths.
+
 **WindowModel** (`Sources/OmniWM/Core/Workspace/WindowModel.swift`)
 
-The single source of truth for all tracked windows. Each `Entry` contains:
+The token-indexed store for tracked OS windows. It is the source of truth for per-window AX identity and OS-facing attributes; `WorkspaceGraph` owns membership/order/focus structure. Each `Entry` contains:
 
 ```swift
 struct Entry {
@@ -642,7 +645,7 @@ Focus management is split between a deterministic reducer and Swift-side effect 
 
 ```
 1. User presses focus-left
-2. CommandHandler identifies target window
+2. `WMRuntime.dispatchHotkey` promotes the trigger to a typed focus command
 3. Swift flattens the current focus/refresh snapshot plus one normalized focus event
 4. `omniwm_orchestration_step` returns the next managed-focus state and ordered actions
 5. Swift mirrors the returned managed-request snapshot into `FocusBridgeCoordinator` / `WorkspaceManager`
@@ -672,9 +675,9 @@ Focus management is split between a deterministic reducer and Swift-side effect 
 - `.niri` — Niri-only (moveColumn, toggleColumnTabbed, focusPrevious, cycleColumnWidth)
 - `.dwindle` — Dwindle-only (moveToRoot, toggleSplit, swapSplit, preselect, resizeInDirection)
 
-**Command routing** (`Sources/OmniWM/Core/Controller/CommandHandler.swift`)
+**Command routing** (`Sources/OmniWM/Core/Runtime/WMRuntime.swift`, domain runtimes)
 
-`CommandHandler.performCommand()` is a switch statement over all 67 `HotkeyCommand` cases, delegating to the appropriate handler. It first checks layout compatibility — a Niri command is ignored when Dwindle is active, and vice versa.
+`InputBindingTrigger` is the input-binding and IPC payload. `WMRuntime.dispatchHotkey(_:source:)` applies the enabled, overview, and layout-compatibility gates, promotes the trigger through `WMRuntime.typedCommand(for:source:)`, and submits the resulting typed `WMCommand`. `WMEffectRunner` then invokes runtime-owned per-family entrypoints (`ControllerActionRuntime.perform`, `FocusRuntime.perform`, `WindowAdmissionRuntime.perform`, `WorkspaceRuntime.perform`, or `UIActionRuntime.perform`).
 
 **Mouse events** (`Sources/OmniWM/Core/Controller/MouseEventHandler.swift`)
 
@@ -758,8 +761,8 @@ IPCClient ──── Unix Socket ────► IPCConnection (per client)
                               └───────┼───────┘
                                       │  @MainActor
                                       v
-                                 CommandHandler /
-                                 WorkspaceManager /
+                                 WMRuntime /
+                                 IPC routers /
                                  WindowRuleEngine
 ```
 
@@ -874,10 +877,16 @@ Carbon EventHandler callback
     │
     v
 HotkeyCenter.dispatch(id)
-    │ lookup HotkeyCommand by registration ID
+    │ lookup InputBindingTrigger by registration ID
     v
-CommandHandler.handleCommand(.focus(.left))
+WMRuntime.dispatchHotkey(.focus(.left), source: .keyboard)
     │ check: isEnabled? layout compatible? overview open?
+    v
+WMRuntime.typedCommand(for: .focus(.left), source: .keyboard)
+    │ produces WMCommand.focusAction(.focusNeighbor(.left, source: .keyboard))
+    v
+WMEffectRunner.apply(...)
+    │ invokes FocusRuntime.perform(...)
     v
 layoutHandler(as: LayoutFocusable.self)?.focusNeighbor(direction: .left)
     │ e.g., NiriLayoutHandler.focusNeighbor()
@@ -951,7 +960,7 @@ CLIParser.parse(["command", "focus", "left"])
     │ produces IPCRequest { kind: .command, payload: .command(.focus(direction: .left)) }
     v
 IPCClient connects to Unix socket (~/.../ipc.sock)
-    │ sends NDJSON: {"version":3,"id":"...","kind":"command","authorizationToken":"...","payload":{"name":"focus","arguments":{"direction":"left"}}}\n
+    │ sends NDJSON: {"version":5,"id":"...","kind":"command","authorizationToken":"...","payload":{"name":"focus","arguments":{"direction":"left"}}}\n
     v
 IPCServer accepts connection → IPCConnection reads line
     │ deserializes to IPCRequest
@@ -961,9 +970,9 @@ IPCApplicationBridge.response(request) [actor]
     │ checks protocol version
     v
 IPCCommandRouter.handle(.focus(direction: .left)) [@MainActor]
-    │ maps to HotkeyCommand.focus(.left)
+    │ maps to InputBindingTrigger.focus(.left)
     v
-CommandHandler.performCommand(.focus(.left))
+WMRuntime.dispatchHotkey(.focus(.left), source: .ipc)
     │ (same flow as hotkey from here — see 5.1)
     │ returns ExternalCommandResult
     v
@@ -978,17 +987,18 @@ CLIRenderer displays result
 
 ### 6.1 Adding a New Hotkey Command
 
-1. **Add the enum case** in `Sources/OmniWM/Core/Input/HotkeyCommand.swift`:
+1. **Add the enum case** in `Sources/OmniWM/Core/Input/InputBindingTrigger.swift`:
    ```swift
    case myNewCommand
    ```
    Set `layoutCompatibility` (`.shared`, `.niri`, or `.dwindle`).
 
-2. **Handle it** in `Sources/OmniWM/Core/Controller/CommandHandler.swift`:
+2. **Promote and handle it** through the typed command path:
    ```swift
    case .myNewCommand:
-       // implementation or delegation to a handler
+       return .uiAction(.myNewCommand(source: source))
    ```
+   Add the matching `WMCommand` case in `Sources/OmniWM/Core/Runtime/WMCommand.swift` and route it in the relevant runtime-owned `perform` entrypoint.
 
 3. **Add the action spec** in `Sources/OmniWM/Core/Input/ActionCatalog.swift` so the command has its title, category, search metadata, and default or alternate bindings. `DefaultHotkeyBindings.swift` is only a thin wrapper over this catalog.
 
@@ -1029,7 +1039,7 @@ Actions can carry multiple persisted bindings, so any extra default shortcuts sh
 
 5. **Check config-file touchpoints** when the change affects config discoverability or UX. `Sources/OmniWM/UI/ConfigFileWorkflow.swift` is the generic workflow layer, and the `Config File` section in `Sources/OmniWM/UI/SettingsView.swift` is the main user-facing entry point; most new settings do not need workflow code changes, but contributor-facing config behavior and copy should remain accurate.
 
-6. **Handle migration** if needed in `Sources/OmniWM/Core/Config/SettingsMigration.swift`.
+6. **Handle migration** if needed through the current config load/import/export touchpoints in `Sources/OmniWM/Core/Config/SettingsStore.swift` and `Sources/OmniWM/Core/Config/SettingsExport.swift`.
 
 7. **Add round-trip coverage** in tests: verify the setting survives store load/save and config export/import so it cannot silently disappear from `~/.config/omniwm/settings.toml`.
 
@@ -1111,7 +1121,7 @@ OmniWM uses SkyLight (private macOS framework) for low-latency window operations
 | `ManagedFocusRequest` | In-flight focus request with status (`.pending`/`.confirmed`) and retry tracking. |
 | `FocusBridgeCoordinator` | Focus state machine coordinating OmniWM's focus intent with macOS confirmation. |
 | `CGSEventObserver` | SkyLight event listener for window create/destroy/frame-change/front-app-change. |
-| `HotkeyCommand` | Enum of all 67 commands that can be triggered by hotkeys or IPC. |
+| `InputBindingTrigger` | Enum of all 67 commands that can be triggered by hotkeys or IPC. |
 | `IPCApplicationBridge` | Swift actor routing IPC requests to `@MainActor` command/query/rule handlers. |
 | `IPCEventBroker` | Swift actor managing real-time event subscriptions for IPC clients. |
 | `ProportionalSize` | `.proportion(CGFloat)` or `.fixed(CGFloat)` — Niri column width specification. |

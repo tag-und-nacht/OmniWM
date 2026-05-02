@@ -53,10 +53,10 @@ private func makeWorkspaceSessionInput(
         pending_tiled_workspace_id: omniwm_uuid(),
         confirmed_tiled_workspace_id: confirmedTiledWorkspaceId ?? omniwm_uuid(),
         confirmed_floating_workspace_id: omniwm_uuid(),
-        pending_tiled_focus_token: omniwm_window_token(),
-        confirmed_tiled_focus_token: omniwm_window_token(),
-        confirmed_floating_focus_token: omniwm_window_token(),
-        remembered_focus_token: omniwm_window_token(),
+        pending_tiled_focus_logical_id: omniwm_logical_window_id(),
+        confirmed_tiled_focus_logical_id: omniwm_logical_window_id(),
+        confirmed_floating_focus_logical_id: omniwm_logical_window_id(),
+        remembered_focus_logical_id: omniwm_logical_window_id(),
         interaction_monitor_id: interactionMonitorId ?? 0,
         previous_interaction_monitor_id: previousInteractionMonitorId ?? 0,
         current_viewport_kind: currentViewportKind,
@@ -69,10 +69,10 @@ private func makeWorkspaceSessionInput(
         has_pending_tiled_workspace_id: 0,
         has_confirmed_tiled_workspace_id: confirmedTiledWorkspaceId == nil ? 0 : 1,
         has_confirmed_floating_workspace_id: 0,
-        has_pending_tiled_focus_token: 0,
-        has_confirmed_tiled_focus_token: 0,
-        has_confirmed_floating_focus_token: 0,
-        has_remembered_focus_token: 0,
+        has_pending_tiled_focus_logical_id: 0,
+        has_confirmed_tiled_focus_logical_id: 0,
+        has_confirmed_floating_focus_logical_id: 0,
+        has_remembered_focus_logical_id: 0,
         has_interaction_monitor_id: interactionMonitorId == nil ? 0 : 1,
         has_previous_interaction_monitor_id: previousInteractionMonitorId == nil ? 0 : 1,
         has_current_viewport_state: hasCurrentViewportState ? 1 : 0,
@@ -201,12 +201,14 @@ private func makeWorkspaceSessionCandidate(
     token: omniwm_window_token,
     mode: UInt32,
     orderIndex: UInt32,
+    logicalId: omniwm_logical_window_id = omniwm_logical_window_id(),
     hasHiddenProportionalPosition: Bool = false,
     hiddenReasonIsWorkspaceInactive: Bool = false
 ) -> omniwm_workspace_session_window_candidate {
     omniwm_workspace_session_window_candidate(
         workspace_id: workspaceId,
         token: token,
+        logical_id: logicalId,
         mode: mode,
         order_index: orderIndex,
         has_hidden_proportional_position: hasHiddenProportionalPosition ? 1 : 0,
@@ -287,6 +289,7 @@ private func withWorkspaceSessionOutput<Result>(
                     interaction_monitor_id: 0,
                     previous_interaction_monitor_id: 0,
                     resolved_focus_token: omniwm_window_token(),
+                    resolved_focus_logical_id: omniwm_logical_window_id(),
                     monitor_results: monitorBuffer.baseAddress,
                     monitor_result_capacity: monitorBuffer.count,
                     monitor_result_count: 0,
@@ -299,6 +302,7 @@ private func withWorkspaceSessionOutput<Result>(
                     has_interaction_monitor_id: 0,
                     has_previous_interaction_monitor_id: 0,
                     has_resolved_focus_token: 0,
+                    has_resolved_focus_logical_id: 0,
                     should_remember_focus: 0,
                     refresh_restore_intents: 0
                 )
@@ -342,6 +346,7 @@ private func withWorkspaceSessionOutputBuffers<Result>(
                     interaction_monitor_id: 0,
                     previous_interaction_monitor_id: 0,
                     resolved_focus_token: omniwm_window_token(),
+                    resolved_focus_logical_id: omniwm_logical_window_id(),
                     monitor_results: monitorBuffer.baseAddress,
                     monitor_result_capacity: monitorBuffer.count,
                     monitor_result_count: 0,
@@ -354,6 +359,7 @@ private func withWorkspaceSessionOutputBuffers<Result>(
                     has_interaction_monitor_id: 0,
                     has_previous_interaction_monitor_id: 0,
                     has_resolved_focus_token: 0,
+                    has_resolved_focus_logical_id: 0,
                     should_remember_focus: 0,
                     refresh_restore_intents: 0
                 )
@@ -410,6 +416,7 @@ struct WorkspaceSessionKernelABITests {
             interaction_monitor_id: 0,
             previous_interaction_monitor_id: 0,
             resolved_focus_token: omniwm_window_token(),
+            resolved_focus_logical_id: omniwm_logical_window_id(),
             monitor_results: nil,
             monitor_result_capacity: 1,
             monitor_result_count: 0,
@@ -422,6 +429,7 @@ struct WorkspaceSessionKernelABITests {
             has_interaction_monitor_id: 0,
             has_previous_interaction_monitor_id: 0,
             has_resolved_focus_token: 0,
+            has_resolved_focus_logical_id: 0,
             should_remember_focus: 0,
             refresh_restore_intents: 0
         )
@@ -908,6 +916,8 @@ struct WorkspaceSessionKernelABITests {
         let workspaceId = makeWorkspaceSessionUUID(high: 35, low: 35)
         let hiddenPending = makeWorkspaceSessionToken(pid: 11, windowId: 1101)
         let firstEligible = makeWorkspaceSessionToken(pid: 11, windowId: 1102)
+        let hiddenPendingLogicalId = omniwm_logical_window_id(value: 1)
+        let firstEligibleLogicalId = omniwm_logical_window_id(value: 2)
         var strings = WorkspaceSessionKernelStringTable()
         let workspace = [
             makeWorkspaceSessionWorkspace(
@@ -922,6 +932,7 @@ struct WorkspaceSessionKernelABITests {
                 token: hiddenPending,
                 mode: UInt32(OMNIWM_WORKSPACE_SESSION_WINDOW_MODE_TILING),
                 orderIndex: 0,
+                logicalId: hiddenPendingLogicalId,
                 hasHiddenProportionalPosition: true,
                 hiddenReasonIsWorkspaceInactive: false
             ),
@@ -929,7 +940,8 @@ struct WorkspaceSessionKernelABITests {
                 workspaceId: workspaceId,
                 token: firstEligible,
                 mode: UInt32(OMNIWM_WORKSPACE_SESSION_WINDOW_MODE_TILING),
-                orderIndex: 1
+                orderIndex: 1,
+                logicalId: firstEligibleLogicalId
             )
         ]
         var input = makeWorkspaceSessionInput(
@@ -937,9 +949,9 @@ struct WorkspaceSessionKernelABITests {
             workspaceId: workspaceId
         )
         input.pending_tiled_workspace_id = workspaceId
-        input.pending_tiled_focus_token = hiddenPending
+        input.pending_tiled_focus_logical_id = hiddenPendingLogicalId
         input.has_pending_tiled_workspace_id = 1
-        input.has_pending_tiled_focus_token = 1
+        input.has_pending_tiled_focus_logical_id = 1
 
         let status: Int32 = withWorkspaceSessionOutput(monitorCapacity: 0, projectionCapacity: 0) { output, _, _ in
             let status = callWorkspaceSessionKernel(

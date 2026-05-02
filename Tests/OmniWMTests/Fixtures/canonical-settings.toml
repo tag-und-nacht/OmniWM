@@ -2,7 +2,6 @@ monitorBarOverrides = []
 monitorDwindleOverrides = []
 monitorNiriOverrides = []
 monitorOrientationOverrides = []
-version = 5
 
 [appearance]
 mode = "dark"

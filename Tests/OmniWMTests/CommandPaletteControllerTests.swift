@@ -12,8 +12,8 @@ private func makeCommandPaletteTestDefaults() -> UserDefaults {
 }
 
 @MainActor
-private func makeCommandPaletteTestWMController() -> WMController {
-    WMController(settings: SettingsStore(defaults: makeCommandPaletteTestDefaults()))
+private func makeCommandPaletteTestRuntime() -> WMRuntime {
+    WMRuntime(settings: SettingsStore(defaults: makeCommandPaletteTestDefaults()))
 }
 
 private func makeCommandPaletteWindowItem(windowId: Int) -> CommandPaletteWindowItem {
@@ -61,7 +61,8 @@ private func makeCommandPaletteAppSnapshot(
         var environment = CommandPaletteEnvironment()
         environment.activateOmniWM = {}
         let controller = CommandPaletteController(environment: environment)
-        let wmController = makeCommandPaletteTestWMController()
+        let runtime = makeCommandPaletteTestRuntime()
+        let wmController = runtime.controller
 
         defer {
             if controller.isVisible {
@@ -78,7 +79,8 @@ private func makeCommandPaletteAppSnapshot(
         var environment = CommandPaletteEnvironment()
         environment.activateOmniWM = {}
         let controller = CommandPaletteController(environment: environment)
-        let wmController = makeCommandPaletteTestWMController()
+        let runtime = makeCommandPaletteTestRuntime()
+        let wmController = runtime.controller
 
         guard let workspaceId = wmController.activeWorkspace()?.id else {
             Issue.record("Missing active workspace for command palette toggle test")
@@ -118,7 +120,8 @@ private func makeCommandPaletteAppSnapshot(
         environment.activateOmniWM = {}
         let motionPolicy = MotionPolicy()
         let controller = CommandPaletteController(motionPolicy: motionPolicy, environment: environment)
-        let wmController = makeCommandPaletteTestWMController()
+        let runtime = makeCommandPaletteTestRuntime()
+        let wmController = runtime.controller
 
         guard let workspaceId = wmController.activeWorkspace()?.id else {
             Issue.record("Missing active workspace for command palette motion test")
@@ -165,7 +168,8 @@ private func makeCommandPaletteAppSnapshot(
         }
 
         let controller = CommandPaletteController(environment: environment)
-        let wmController = makeCommandPaletteTestWMController()
+        let runtime = makeCommandPaletteTestRuntime()
+        let wmController = runtime.controller
         let item = makeCommandPaletteWindowItem(windowId: 101)
 
         controller.setWindowSelectionStateForTests(
@@ -189,7 +193,8 @@ private func makeCommandPaletteAppSnapshot(
         }
 
         let controller = CommandPaletteController(environment: environment)
-        let wmController = makeCommandPaletteTestWMController()
+        let runtime = makeCommandPaletteTestRuntime()
+        let wmController = runtime.controller
         let first = makeCommandPaletteWindowItem(windowId: 101)
         let second = makeCommandPaletteWindowItem(windowId: 202)
 
@@ -216,7 +221,8 @@ private func makeCommandPaletteAppSnapshot(
         }
 
         let controller = CommandPaletteController(environment: environment)
-        let wmController = makeCommandPaletteTestWMController()
+        let runtime = makeCommandPaletteTestRuntime()
+        let wmController = runtime.controller
         let item = makeCommandPaletteWindowItem(windowId: 303)
         let summonAnchor = makeCommandPaletteSummonAnchor(wmController: wmController)
 
@@ -244,7 +250,8 @@ private func makeCommandPaletteAppSnapshot(
         }
 
         let controller = CommandPaletteController(environment: environment)
-        let wmController = makeCommandPaletteTestWMController()
+        let runtime = makeCommandPaletteTestRuntime()
+        let wmController = runtime.controller
         let item = makeCommandPaletteWindowItem(windowId: 404)
 
         controller.setWindowSelectionStateForTests(
@@ -341,7 +348,8 @@ private func makeCommandPaletteAppSnapshot(
         }
 
         let controller = CommandPaletteController(environment: environment)
-        let wmController = makeCommandPaletteTestWMController()
+        let runtime = makeCommandPaletteTestRuntime()
+        let wmController = runtime.controller
         let target = makeCommandPaletteAppSnapshot(
             pid: 410,
             bundleIdentifier: "com.apple.Safari",
@@ -433,7 +441,8 @@ private func makeCommandPaletteAppSnapshot(
     }
 
     @Test func resolveSummonAnchorFallsBackToLastFocusedMemory() {
-        let wmController = makeCommandPaletteTestWMController()
+        let runtime = makeCommandPaletteTestRuntime()
+        let wmController = runtime.controller
         guard let workspaceId = wmController.activeWorkspace()?.id else {
             Issue.record("Missing active workspace for summon-anchor test")
             return

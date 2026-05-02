@@ -1425,7 +1425,7 @@ fn planFloatingRescueInternal(
 
     var rescue_count: usize = 0;
     for (candidates) |candidate| {
-        if (candidate.is_scratchpad_hidden != 0 or candidate.is_workspace_inactive_hidden != 0) {
+        if (candidate.is_scratchpad_hidden != 0) {
             continue;
         }
 
@@ -1460,7 +1460,7 @@ fn planFloatingRescueInternal(
 
     var rescue_index: usize = 0;
     for (candidates, 0..) |candidate, candidate_index| {
-        if (candidate.is_scratchpad_hidden != 0 or candidate.is_workspace_inactive_hidden != 0) {
+        if (candidate.is_scratchpad_hidden != 0) {
             continue;
         }
 
@@ -1552,7 +1552,7 @@ test "restore event planner keeps sleep as note-only and refreshes on wake" {
     try std.testing.expectEqual(restore_note_system_wake, output.note_code);
 }
 
-test "floating rescue resolves normalized origin and skips approximate frames" {
+test "floating rescue resolves normalized origin and includes workspace inactive visible candidates" {
     const candidates = [_]RestoreFloatingRescueCandidate{
         .{
             .token = .{ .pid = 1, .window_id = 1 },
@@ -1584,11 +1584,26 @@ test "floating rescue resolves normalized origin and skips approximate frames" {
             .is_scratchpad_hidden = 0,
             .is_workspace_inactive_hidden = 0,
         },
+        .{
+            .token = .{ .pid = 3, .window_id = 3 },
+            .workspace_id = zeroUUID(),
+            .target_monitor_id = 11,
+            .target_monitor_visible_frame = .{ .x = 1920, .y = 0, .width = 1440, .height = 900 },
+            .current_frame = .{ .x = 0, .y = 0, .width = 300, .height = 200 },
+            .floating_frame = .{ .x = 5000, .y = 1200, .width = 300, .height = 200 },
+            .normalized_origin = .{ .x = 0, .y = 0 },
+            .reference_monitor_id = 0,
+            .has_current_frame = 0,
+            .has_normalized_origin = 0,
+            .has_reference_monitor_id = 0,
+            .is_scratchpad_hidden = 0,
+            .is_workspace_inactive_hidden = 1,
+        },
     };
     var operations = [_]RestoreFloatingRescueOperation{.{
         .candidate_index = 0,
         .target_frame = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
-    }} ** 2;
+    }} ** 3;
     var output = RestoreFloatingRescueOutput{
         .operations = &operations,
         .operation_capacity = operations.len,
@@ -1599,10 +1614,13 @@ test "floating rescue resolves normalized origin and skips approximate frames" {
         kernel_ok,
         omniwm_restore_plan_floating_rescue(&candidates, candidates.len, &output),
     );
-    try std.testing.expectEqual(@as(usize, 1), output.operation_count);
+    try std.testing.expectEqual(@as(usize, 2), output.operation_count);
     try std.testing.expectEqual(@as(usize, 1), operations[0].candidate_index);
     try std.testing.expectEqual(@as(f64, 2775), operations[0].target_frame.x);
     try std.testing.expectEqual(@as(f64, 350), operations[0].target_frame.y);
+    try std.testing.expectEqual(@as(usize, 2), operations[1].candidate_index);
+    try std.testing.expectEqual(@as(f64, 3060), operations[1].target_frame.x);
+    try std.testing.expectEqual(@as(f64, 700), operations[1].target_frame.y);
 }
 
 test "floating rescue orders operations by stable window identity" {

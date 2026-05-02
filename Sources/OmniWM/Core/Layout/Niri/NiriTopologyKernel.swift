@@ -424,6 +424,9 @@ extension NiriLayoutEngine {
         for window in existingWindows where !outputWindowIds.contains(plan.snapshot.windowIdByNodeId[window.id] ?? 0) {
             closingTokens.remove(window.token)
             tokenToNode.removeValue(forKey: window.token)
+            if window.logicalId.isValid {
+                logicalIdToNode.removeValue(forKey: window.logicalId)
+            }
         }
 
         var windowById = plan.snapshot.windowById
@@ -549,6 +552,11 @@ extension NiriLayoutEngine {
         {
             state.selectedNodeId = selected.id
             activateWindow(selected.id)
+            if let selectedColumn = column(of: selected),
+               let selectedColumnIndex = columnIndex(of: selectedColumn, in: workspaceId)
+            {
+                state.activeColumnIndex = selectedColumnIndex
+            }
             return selected
         }
         return nil

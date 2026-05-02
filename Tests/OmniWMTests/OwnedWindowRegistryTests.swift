@@ -11,13 +11,13 @@ private func makeOwnedWindowTestDefaults() -> UserDefaults {
 }
 
 @MainActor
-private func makeOwnedWindowTestController() -> WMController {
+private func makeOwnedWindowTestRuntime() -> WMRuntime {
     let operations = WindowFocusOperations(
         activateApp: { _ in },
         focusSpecificWindow: { _, _, _ in },
         raiseWindow: { _ in }
     )
-    return WMController(
+    return WMRuntime(
         settings: SettingsStore(defaults: makeOwnedWindowTestDefaults()),
         windowFocusOperations: operations
     )
@@ -40,7 +40,8 @@ private func closeOwnedUtilityWindowsForTests() async {
             registry.resetForTests()
         }
 
-        let controller = makeOwnedWindowTestController()
+        let runtime = makeOwnedWindowTestRuntime()
+        let controller = runtime.controller
         let settings = controller.settings
 
         SettingsWindowController.shared.show(settings: settings, controller: controller)

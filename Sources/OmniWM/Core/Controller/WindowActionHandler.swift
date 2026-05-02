@@ -150,9 +150,12 @@ final class WindowActionHandler {
     private func makeRaiseAllFloatingPlan() -> FloatingWindowRaisePlan? {
         guard let controller else { return nil }
 
+        let graph = controller.workspaceManager.workspaceGraphSnapshot()
         let managedSurfaces = controller.workspaceManager.visibleWorkspaceIds()
             .flatMap { workspaceId in
-                controller.workspaceManager.floatingEntries(in: workspaceId)
+                graph.floatingMembership(in: workspaceId).compactMap {
+                    controller.workspaceManager.entry(for: $0.token)
+                }
             }
             .filter { entry in
                 entry.layoutReason == .standard && !controller.workspaceManager.isHiddenInCorner(entry.token)
@@ -292,14 +295,20 @@ final class WindowActionHandler {
     }
 
     @discardableResult
-    func navigateToWindow(handle: WindowHandle) -> Bool {
+    func navigateToWindow(
+        handle: WindowHandle,
+        source: WMEventSource = .command
+    ) -> Bool {
         guard let controller else { return false }
         guard let entry = controller.workspaceManager.entry(for: handle) else { return false }
-        return navigateToWindowInternal(token: handle.id, workspaceId: entry.workspaceId)
+        return navigateToWindowInternal(token: handle.id, workspaceId: entry.workspaceId, source: source)
     }
 
     @discardableResult
-    func summonWindowRight(handle: WindowHandle) -> Bool {
+    func summonWindowRight(
+        handle: WindowHandle,
+        source: WMEventSource = .command
+    ) -> Bool {
         guard let controller,
               let currentWorkspace = controller.activeWorkspace(),
               let focusedToken = controller.workspaceManager.focusedToken,
@@ -312,7 +321,8 @@ final class WindowActionHandler {
         return summonWindowRight(
             handle: handle,
             anchorToken: focusedToken,
-            anchorWorkspaceId: currentWorkspace.id
+            anchorWorkspaceId: currentWorkspace.id,
+            source: source
         )
     }
 
@@ -320,7 +330,8 @@ final class WindowActionHandler {
     func summonWindowRight(
         handle: WindowHandle,
         anchorToken: WindowToken,
-        anchorWorkspaceId: WorkspaceDescriptor.ID
+        anchorWorkspaceId: WorkspaceDescriptor.ID,
+        source: WMEventSource = .command
     ) -> Bool {
         guard let controller,
               let anchorEntry = controller.workspaceManager.entry(for: anchorToken),
@@ -340,20 +351,26 @@ final class WindowActionHandler {
                 token: token,
                 sourceWorkspaceId: targetEntry.workspaceId,
                 targetWorkspaceId: targetWorkspaceId,
-                focusedToken: anchorToken
+                focusedToken: anchorToken,
+                source: source
             )
         case .niri, .defaultLayout:
             return summonWindowRightInNiri(
                 token: token,
                 sourceWorkspaceId: targetEntry.workspaceId,
                 targetWorkspaceId: targetWorkspaceId,
-                focusedToken: anchorToken
+                focusedToken: anchorToken,
+                source: source
             )
         }
     }
 
     @discardableResult
-    func navigateToWindowInternal(token: WindowToken, workspaceId: WorkspaceDescriptor.ID) -> Bool {
+    func navigateToWindowInternal(
+        token: WindowToken,
+        workspaceId: WorkspaceDescriptor.ID,
+        source: WMEventSource = .command
+    ) -> Bool {
         guard let controller else { return false }
         guard let engine = controller.niriEngine else { return false }
         guard !controller.isManagedWindowSuspendedForNativeFullscreen(token) else { return false }
@@ -362,8 +379,11 @@ final class WindowActionHandler {
 
         if workspaceId != currentWsId {
             let wsName = controller.workspaceManager.descriptor(for: workspaceId)?.name ?? ""
-            if let result = controller.workspaceManager.focusWorkspace(named: wsName) {
-                _ = controller.workspaceManager.setInteractionMonitor(result.monitor.id)
+            guard let runtime = controller.runtime else {
+                preconditionFailure("WindowActionHandler.focusWindowInWorkspace requires WMRuntime to be attached")
+            }
+            let result = runtime.focusWorkspace(named: wsName, source: source)
+            if result != nil {
                 controller.syncMonitorsToNiriEngine()
             }
         }
@@ -389,19 +409,20 @@ final class WindowActionHandler {
             }
         }
 
-        _ = controller.workspaceManager.applySessionPatch(
-            .init(
-                workspaceId: workspaceId,
-                viewportState: targetState,
-                rememberedFocusToken: token
-            )
+        let patch = WorkspaceSessionPatch(
+            workspaceId: workspaceId,
+            viewportState: targetState,
+            rememberedFocusToken: token
         )
-        controller.layoutRefreshController.commitWorkspaceTransition(
-            affectedWorkspaces: [workspaceId],
-            reason: .workspaceTransition
-        ) { [weak controller] in
-            controller?.focusWindow(token)
+        guard let runtimeForPatch = controller.runtime else {
+            preconditionFailure("WindowActionHandler.focusWindowInWorkspace requires WMRuntime to be attached")
         }
+        _ = runtimeForPatch.applySessionPatch(patch, source: source)
+        _ = runtimeForPatch.commitWorkspaceTransition(
+            affectedWorkspaceIds: [workspaceId],
+            postAction: .focusWindow(token),
+            source: source
+        )
         return true
     }
 
@@ -410,7 +431,8 @@ final class WindowActionHandler {
         token: WindowToken,
         sourceWorkspaceId: WorkspaceDescriptor.ID,
         targetWorkspaceId: WorkspaceDescriptor.ID,
-        focusedToken: WindowToken
+        focusedToken: WindowToken,
+        source: WMEventSource = .command
     ) -> Bool {
         guard let controller,
               let engine = controller.niriEngine,
@@ -432,13 +454,19 @@ final class WindowActionHandler {
             ) else {
                 return false
             }
-            commitSummonedWindowFocus(token: token, workspaceId: targetWorkspaceId, startNiriScrollAnimation: true)
+            commitSummonedWindowFocus(
+                token: token,
+                workspaceId: targetWorkspaceId,
+                startNiriScrollAnimation: true,
+                source: source
+            )
             return true
         }
 
         guard controller.workspaceNavigationHandler.moveWindow(
             handle: WindowHandle(id: token),
-            toWorkspaceId: targetWorkspaceId
+            toWorkspaceId: targetWorkspaceId,
+            source: source
         ) else {
             return false
         }
@@ -448,7 +476,8 @@ final class WindowActionHandler {
                 token: token,
                 workspaceId: targetWorkspaceId,
                 rememberedFocusToken: focusedToken,
-                startNiriScrollAnimation: true
+                startNiriScrollAnimation: true,
+                source: source
             )
             return true
         }
@@ -460,7 +489,12 @@ final class WindowActionHandler {
         ) else {
             return false
         }
-        commitSummonedWindowFocus(token: token, workspaceId: targetWorkspaceId, startNiriScrollAnimation: true)
+        commitSummonedWindowFocus(
+            token: token,
+            workspaceId: targetWorkspaceId,
+            startNiriScrollAnimation: true,
+            source: source
+        )
         return true
     }
 
@@ -469,7 +503,8 @@ final class WindowActionHandler {
         token: WindowToken,
         sourceWorkspaceId: WorkspaceDescriptor.ID,
         targetWorkspaceId: WorkspaceDescriptor.ID,
-        focusedToken: WindowToken
+        focusedToken: WindowToken,
+        source: WMEventSource = .command
     ) -> Bool {
         guard let controller,
               let engine = controller.dwindleEngine,
@@ -487,7 +522,7 @@ final class WindowActionHandler {
             ) else {
                 return false
             }
-            commitSummonedWindowFocus(token: token, workspaceId: targetWorkspaceId)
+            commitSummonedWindowFocus(token: token, workspaceId: targetWorkspaceId, source: source)
             return true
         }
 
@@ -496,12 +531,13 @@ final class WindowActionHandler {
 
         guard controller.workspaceNavigationHandler.moveWindow(
             handle: WindowHandle(id: token),
-            toWorkspaceId: targetWorkspaceId
+            toWorkspaceId: targetWorkspaceId,
+            source: source
         ) else {
             return false
         }
 
-        commitSummonedWindowFocus(token: token, workspaceId: targetWorkspaceId)
+        commitSummonedWindowFocus(token: token, workspaceId: targetWorkspaceId, source: source)
         return true
     }
 
@@ -509,22 +545,25 @@ final class WindowActionHandler {
         token: WindowToken,
         workspaceId: WorkspaceDescriptor.ID,
         rememberedFocusToken: WindowToken? = nil,
-        startNiriScrollAnimation: Bool = false
+        startNiriScrollAnimation: Bool = false,
+        source: WMEventSource = .command
     ) {
         guard let controller else { return }
 
-        _ = controller.workspaceManager.applySessionPatch(
-            .init(
-                workspaceId: workspaceId,
-                viewportState: nil,
-                rememberedFocusToken: rememberedFocusToken ?? token
-            )
+        let patch = WorkspaceSessionPatch(
+            workspaceId: workspaceId,
+            viewportState: nil,
+            rememberedFocusToken: rememberedFocusToken ?? token
         )
+        guard let runtime = controller.runtime else {
+            preconditionFailure("WindowActionHandler.summonWindowRightInNiri requires WMRuntime to be attached")
+        }
+        _ = runtime.applySessionPatch(patch, source: source)
         controller.layoutRefreshController.requestImmediateRelayout(
             reason: .layoutCommand,
             affectedWorkspaceIds: [workspaceId]
         ) { [weak controller] in
-            controller?.focusWindow(token)
+            controller?.focusWindow(token, source: source)
         }
         if startNiriScrollAnimation {
             controller.layoutRefreshController.startScrollAnimation(for: workspaceId)
@@ -541,31 +580,49 @@ final class WindowActionHandler {
     }
 
     @discardableResult
-    func focusWorkspaceFromBar(named name: String) -> Bool {
+    func focusWorkspaceFromBar(
+        named name: String,
+        source: WMEventSource = .command
+    ) -> Bool {
         guard let controller else { return false }
         if let currentWorkspace = controller.activeWorkspace() {
-            controller.workspaceNavigationHandler.saveNiriViewportState(for: currentWorkspace.id)
+            controller.workspaceNavigationHandler.saveNiriViewportState(
+                for: currentWorkspace.id,
+                source: source
+            )
         }
 
-        guard let result = controller.workspaceManager.focusWorkspace(named: name) else { return false }
-
-        let focusedToken = controller.resolveAndSetWorkspaceFocusToken(for: result.workspace.id)
-        controller.layoutRefreshController.commitWorkspaceTransition(
-            affectedWorkspaces: [result.workspace.id],
-            reason: .workspaceTransition
-        ) { [weak controller] in
-            if let focusedToken {
-                controller?.focusWindow(focusedToken)
-            }
+        guard let runtime = controller.runtime else {
+            preconditionFailure("WindowActionHandler.focusWorkspaceFromBar requires WMRuntime to be attached")
         }
+        guard let result = runtime.focusWorkspace(named: name, source: source) else { return false }
+
+        let focusedToken = controller.resolveAndSetWorkspaceFocusToken(
+            for: result.workspace.id,
+            source: source
+        )
+        let postAction: WMEffect.PostWorkspaceTransitionAction
+        if let focusedToken {
+            postAction = .focusWindow(focusedToken)
+        } else {
+            postAction = .none
+        }
+        _ = runtime.commitWorkspaceTransition(
+            affectedWorkspaceIds: [result.workspace.id],
+            postAction: postAction,
+            source: source
+        )
         return true
     }
 
     @discardableResult
-    func focusWindowFromBar(token: WindowToken) -> Bool {
+    func focusWindowFromBar(
+        token: WindowToken,
+        source: WMEventSource = .command
+    ) -> Bool {
         guard let controller else { return false }
         guard let entry = controller.workspaceManager.entry(for: token) else { return false }
-        return navigateToWindowInternal(token: token, workspaceId: entry.workspaceId)
+        return navigateToWindowInternal(token: token, workspaceId: entry.workspaceId, source: source)
     }
 
     func runningAppsWithWindows() -> [RunningAppInfo] {

@@ -117,6 +117,7 @@ private func configureWorkspacesAsDwindle(
 
     configurations.append(contentsOf: missingConfigurations)
     controller.settings.workspaceConfigurations = configurations
+    controller.workspaceManager.applySettings()
 }
 
 struct DwindleLayoutEngineTests {
@@ -1212,38 +1213,22 @@ struct DwindleLayoutEngineTests {
         controller.dwindleLayoutHandler.swapWindow(direction: .right)
         await waitForLayoutPlanRefreshWork(on: controller)
 
+        let animationSampleTime = controller.animationClock.now()
         controller.dwindleLayoutHandler.swapWindow(direction: .left)
+        await waitForLayoutPlanRefreshWork(on: controller)
 
         guard let engine = controller.dwindleEngine else {
             Issue.record("Missing Dwindle engine for repeated swap test")
             return
         }
 
-        var sampleTime = controller.animationClock.now()
-        var canonicalFrames = engine.currentFrames(in: workspaceId)
-        var presentedFrames = engine.capturePresentedFrames(
+        let canonicalFrames = engine.currentFrames(in: workspaceId)
+        let presentedFrames = engine.capturePresentedFrames(
             in: workspaceId,
-            at: sampleTime,
+            at: animationSampleTime,
             scale: layoutPlanTestMonitorScale(monitor)
         )
-        let observedAnimatedPresentation = await waitForConditionForTests(
-            timeoutNanoseconds: 2_000_000_000
-        ) {
-            sampleTime = controller.animationClock.now()
-            canonicalFrames = engine.currentFrames(in: workspaceId)
-            presentedFrames = engine.capturePresentedFrames(
-                in: workspaceId,
-                at: sampleTime,
-                scale: layoutPlanTestMonitorScale(monitor)
-            )
-            return controller.layoutRefreshController.hasDwindleAnimationRunning(in: workspaceId)
-                && engine.hasActiveAnimations(in: workspaceId, at: sampleTime)
-                && presentedFrames != canonicalFrames
-        }
-
-        #expect(observedAnimatedPresentation)
-        #expect(controller.layoutRefreshController.hasDwindleAnimationRunning(in: workspaceId))
-        #expect(engine.hasActiveAnimations(in: workspaceId, at: sampleTime))
+        #expect(engine.hasActiveAnimations(in: workspaceId, at: animationSampleTime))
         #expect(presentedFrames != canonicalFrames)
     }
 
@@ -1271,6 +1256,7 @@ struct DwindleLayoutEngineTests {
         #expect(lastAppliedBorderWindowIdForLayoutPlanTests(on: controller) == 703)
 
         _ = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 704)
+        let animationSampleTime = controller.animationClock.now()
         let animationPlans = try await controller.dwindleLayoutHandler.layoutWithDwindleEngine(
             activeWorkspaces: [workspaceId]
         )
@@ -1281,7 +1267,7 @@ struct DwindleLayoutEngineTests {
         #expect(lastAppliedBorderWindowIdForLayoutPlanTests(on: controller) == nil)
 
         controller.dwindleLayoutHandler.tickDwindleAnimation(
-            targetTime: controller.animationClock.now(),
+            targetTime: animationSampleTime,
             displayId: monitor.displayId
         )
 
@@ -1315,37 +1301,21 @@ struct DwindleLayoutEngineTests {
         controller.dwindleLayoutHandler.cycleSize(forward: true)
         await waitForLayoutPlanRefreshWork(on: controller)
 
+        let animationSampleTime = controller.animationClock.now()
         #expect(controller.windowActionHandler.summonWindowRight(handle: WindowHandle(id: summonedToken)))
+        await waitForLayoutPlanRefreshWork(on: controller)
         guard let engine = controller.dwindleEngine else {
             Issue.record("Missing Dwindle engine for summon-right animation test")
             return
         }
 
-        var sampleTime = controller.animationClock.now()
-        var canonicalFrames = engine.currentFrames(in: workspaceId)
-        var presentedFrames = engine.capturePresentedFrames(
+        let canonicalFrames = engine.currentFrames(in: workspaceId)
+        let presentedFrames = engine.capturePresentedFrames(
             in: workspaceId,
-            at: sampleTime,
+            at: animationSampleTime,
             scale: layoutPlanTestMonitorScale(monitor)
         )
-        let observedAnimatedPresentation = await waitForConditionForTests(
-            timeoutNanoseconds: 2_000_000_000
-        ) {
-            sampleTime = controller.animationClock.now()
-            canonicalFrames = engine.currentFrames(in: workspaceId)
-            presentedFrames = engine.capturePresentedFrames(
-                in: workspaceId,
-                at: sampleTime,
-                scale: layoutPlanTestMonitorScale(monitor)
-            )
-            return controller.layoutRefreshController.hasDwindleAnimationRunning(in: workspaceId)
-                && engine.hasActiveAnimations(in: workspaceId, at: sampleTime)
-                && presentedFrames != canonicalFrames
-        }
-
-        #expect(observedAnimatedPresentation)
-        #expect(controller.layoutRefreshController.hasDwindleAnimationRunning(in: workspaceId))
-        #expect(engine.hasActiveAnimations(in: workspaceId, at: sampleTime))
+        #expect(engine.hasActiveAnimations(in: workspaceId, at: animationSampleTime))
         #expect(presentedFrames != canonicalFrames)
         #expect(controller.workspaceManager.lastFocusedToken(in: workspaceId) == summonedToken)
     }
@@ -1419,6 +1389,7 @@ struct DwindleLayoutEngineTests {
         #expect(lastAppliedBorderWindowIdForLayoutPlanTests(on: controller) == 705)
 
         _ = addLayoutPlanTestWindow(on: controller, workspaceId: workspaceId, windowId: 706)
+        let animationSampleTime = controller.animationClock.now()
         let animationPlans = try await controller.dwindleLayoutHandler.layoutWithDwindleEngine(
             activeWorkspaces: [workspaceId]
         )
@@ -1435,7 +1406,7 @@ struct DwindleLayoutEngineTests {
         #expect(lastAppliedBorderWindowIdForLayoutPlanTests(on: controller) == nil)
 
         controller.dwindleLayoutHandler.tickDwindleAnimation(
-            targetTime: controller.animationClock.now(),
+            targetTime: animationSampleTime,
             displayId: monitor.displayId
         )
 

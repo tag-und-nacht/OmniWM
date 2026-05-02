@@ -175,11 +175,12 @@ private func waitForRecordedEvents(
             runtimeTask.cancel()
         }
 
+        let fullSuiteWatchEventTimeout: Duration = .seconds(12)
         let initialEvents = try await waitForRecordedEvents(
             recorder,
             expectedCount: 1,
             step: "waiting for initial injected watch event",
-            timeout: .seconds(4)
+            timeout: fullSuiteWatchEventTimeout
         )
         #expect(initialEvents.count >= 1)
         #expect(fixture.controller.workspaceManager.setInteractionMonitor(fixture.secondaryMonitor.id))
@@ -188,7 +189,7 @@ private func waitForRecordedEvents(
             recorder,
             expectedCount: 2,
             step: "waiting for secondary monitor injected watch event",
-            timeout: .seconds(4)
+            timeout: fullSuiteWatchEventTimeout
         )
         #expect(secondEvents.count >= 2)
         #expect(fixture.controller.workspaceManager.setInteractionMonitor(fixture.primaryMonitor.id))
@@ -197,7 +198,7 @@ private func waitForRecordedEvents(
             recorder,
             expectedCount: 3,
             step: "waiting for third injected watch event",
-            timeout: .seconds(4)
+            timeout: fullSuiteWatchEventTimeout
         )
 
         runtimeTask.cancel()

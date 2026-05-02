@@ -15,6 +15,37 @@ enum WindowLifecyclePhase: String, Codable, Equatable {
     case destroyed
 }
 
+extension WindowLifecyclePhase {
+    var facetProjection: (
+        primary: PrimaryLifecyclePhase,
+        visibility: LifecycleVisibility,
+        fullscreen: FullscreenSessionState
+    ) {
+        switch self {
+        case .discovered:
+            (.candidate, .unknown, .none)
+        case .admitted:
+            (.admitted, .unknown, .none)
+        case .tiled:
+            (.managed, .visible, .none)
+        case .floating:
+            (.managed, .visible, .none)
+        case .hidden:
+            (.managed, .hidden, .none)
+        case .offscreen:
+            (.managed, .visible, .none)
+        case .restoring:
+            (.managed, .unknown, .none)
+        case .replacing:
+            (.managed, .unknown, .none)
+        case .nativeFullscreen:
+            (.managed, .visible, .nativeFullscreen)
+        case .destroyed:
+            (.retired, .unknown, .none)
+        }
+    }
+}
+
 struct ObservedWindowState: Equatable {
     var frame: CGRect?
     var workspaceId: WorkspaceDescriptor.ID?
@@ -81,12 +112,16 @@ struct DisplayFingerprint: Hashable, Equatable, Codable {
     let name: String
     let anchorPoint: CGPoint
     let frameSize: CGSize
+    let visibleFrame: CGRect
+    let hasNotch: Bool
 
     init(monitor: Monitor) {
         displayId = monitor.displayId
         name = monitor.name
         anchorPoint = monitor.workspaceAnchorPoint
         frameSize = monitor.frame.size
+        visibleFrame = monitor.visibleFrame
+        hasNotch = monitor.hasNotch
     }
 }
 
@@ -158,6 +193,19 @@ struct ReconcileSnapshot: Equatable {
     let topologyProfile: TopologyProfile
     let focusSession: FocusSessionSnapshot
     let windows: [ReconcileWindowSnapshot]
+    let workspaceGraph: WorkspaceGraphStateSnapshot
+
+    init(
+        topologyProfile: TopologyProfile,
+        focusSession: FocusSessionSnapshot,
+        windows: [ReconcileWindowSnapshot],
+        workspaceGraph: WorkspaceGraphStateSnapshot
+    ) {
+        self.topologyProfile = topologyProfile
+        self.focusSession = focusSession
+        self.windows = windows
+        self.workspaceGraph = workspaceGraph
+    }
 
     var focusedToken: WindowToken? { focusSession.focusedToken }
     var interactionMonitorId: Monitor.ID? { focusSession.interactionMonitorId }

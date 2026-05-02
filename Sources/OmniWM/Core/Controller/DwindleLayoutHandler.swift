@@ -3,6 +3,7 @@ import AppKit
 import Foundation
 import QuartzCore
 
+
 @MainActor final class DwindleLayoutHandler {
     weak var controller: WMController?
 
@@ -26,15 +27,15 @@ import QuartzCore
     }
 
     func applyFramesOnDemand(workspaceId wsId: WorkspaceDescriptor.ID, monitor: Monitor) {
-        guard let controller,
-              let activeWorkspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id,
-              let engine = controller.dwindleEngine,
-              let snapshot = makeWorkspaceSnapshot(
-                  workspaceId: wsId,
-                  monitor: monitor,
-                  resolveConstraints: false,
-                  isActiveWorkspace: activeWorkspaceId == wsId
-              )
+        guard let controller, let engine = controller.dwindleEngine else { return }
+        let topology = LayoutProjectionContext.project(controller: controller).topology
+        let activeWorkspaceId = topology.node(monitor.id)?.activeWorkspaceId
+        guard let snapshot = makeWorkspaceSnapshot(
+            workspaceId: wsId,
+            monitor: monitor,
+            resolveConstraints: false,
+            isActiveWorkspace: activeWorkspaceId == wsId
+        )
         else {
             return
         }
@@ -53,12 +54,15 @@ import QuartzCore
             return
         }
 
-        guard let monitor = controller.workspaceManager.monitors.first(where: { $0.displayId == displayId }) else {
+        let topology = LayoutProjectionContext.project(controller: controller).topology
+
+        guard let monitorNode = topology.node(forDisplay: displayId) else {
             controller.layoutRefreshController.stopDwindleAnimation(for: displayId)
             return
         }
+        let monitor = monitorNode.monitor
 
-        guard controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id == wsId else {
+        guard monitorNode.activeWorkspaceId == wsId else {
             controller.layoutRefreshController.stopDwindleAnimation(for: displayId)
             return
         }
@@ -87,32 +91,34 @@ import QuartzCore
 
     func layoutWithDwindleEngine(activeWorkspaces: Set<WorkspaceDescriptor.ID>) async throws -> [WorkspaceLayoutPlan] {
         guard let controller, let engine = controller.dwindleEngine else { return [] }
+        let projectionContext = LayoutProjectionContext.project(controller: controller)
         var plans: [WorkspaceLayoutPlan] = []
         for wsId in activeWorkspaces.sorted(by: { $0.uuidString < $1.uuidString }) {
             try Task.checkCancellation()
-            guard let workspace = controller.workspaceManager.descriptor(for: wsId),
-                  let monitor = controller.workspaceManager.monitor(for: wsId)
+            guard let workspaceNode = projectionContext.graph.node(for: wsId),
+                  let monitorNode = projectionContext.monitorNode(for: wsId)
             else { continue }
 
-            let wsName = workspace.name
-            let layoutType = controller.settings.layoutType(for: wsName)
-            guard layoutType == .dwindle else { continue }
-            let isActiveWorkspace = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id == wsId
+            guard workspaceNode.layoutType == .dwindle else { continue }
+            let monitor = monitorNode.monitor
+            let isActiveWorkspace = monitorNode.activeWorkspaceId == wsId
 
             guard let snapshot = makeWorkspaceSnapshot(
                 workspaceId: wsId,
                 monitor: monitor,
                 resolveConstraints: true,
-                isActiveWorkspace: isActiveWorkspace
+                isActiveWorkspace: isActiveWorkspace,
+                projectionContext: projectionContext
             ) else { continue }
 
-            plans.append(
-                buildRelayoutPlan(
-                    snapshot: snapshot,
-                    engine: engine
-                )
+            let plan = buildRelayoutPlan(
+                snapshot: snapshot,
+                engine: engine
             )
+            plans.append(plan)
 
+            try Task.checkCancellation()
+            await controller.layoutRefreshController.debugHooks.onWorkspaceLayoutPlanBuilt?(.dwindle, wsId)
             try Task.checkCancellation()
             await Task.yield()
         }
@@ -123,22 +129,27 @@ import QuartzCore
 
 
 
-    func focusNeighbor(direction: Direction) {
+    func focusNeighbor(
+        direction: Direction,
+        source: WMEventSource = .command
+    ) {
         guard let controller else { return }
         withDwindleContext { engine, wsId in
             if let token = engine.moveFocus(direction: direction, in: wsId) {
-                _ = controller.workspaceManager.applySessionPatch(
-                    .init(
-                        workspaceId: wsId,
-                        viewportState: nil,
-                        rememberedFocusToken: token
-                    )
+                let patch = WorkspaceSessionPatch(
+                    workspaceId: wsId,
+                    viewportState: nil,
+                    rememberedFocusToken: token
                 )
+                guard let runtime = controller.runtime else {
+                    preconditionFailure("DwindleLayoutHandler requires WMRuntime to be attached")
+                }
+                _ = runtime.applySessionPatch(patch, source: source)
                 controller.layoutRefreshController.requestImmediateRelayout(
                     reason: .layoutCommand,
                     affectedWorkspaceIds: [wsId]
                 ) { [weak controller] in
-                    controller?.focusWindow(token)
+                    controller?.focusWindow(token, source: source)
                 }
             }
         }
@@ -155,48 +166,85 @@ import QuartzCore
         }
 
         engine.setSelectedNode(node, in: workspaceId)
-        _ = controller.workspaceManager.applySessionPatch(
-            .init(
-                workspaceId: workspaceId,
-                viewportState: nil,
-                rememberedFocusToken: token
-            )
+        let patch = WorkspaceSessionPatch(
+            workspaceId: workspaceId,
+            viewportState: nil,
+            rememberedFocusToken: token
         )
+        guard let runtime = controller.runtime else {
+            preconditionFailure("DwindleLayoutHandler.activateWindow requires WMRuntime to be attached")
+        }
+        _ = runtime.applySessionPatch(patch, source: .command)
         controller.layoutRefreshController.requestImmediateRelayout(
             reason: .layoutCommand,
             affectedWorkspaceIds: [workspaceId]
         ) { [weak controller] in
-            controller?.focusWindow(token)
+            controller?.focusWindow(token, source: .command)
         }
     }
 
-    func swapWindow(direction: Direction) {
+    func swapWindow(
+        direction: Direction,
+        source: WMEventSource = .command
+    ) {
         guard let controller else { return }
         withDwindleContext { engine, wsId in
+            let graph = LayoutProjectionContext.project(controller: controller).graph
+            let layoutEligibleIds = Set(
+                graph.tiledMembership(in: wsId).map(\.logicalId)
+            )
+            guard let target = engine.swapTarget(direction: direction, in: wsId),
+                  layoutEligibleIds.contains(target.currentLogicalId),
+                  layoutEligibleIds.contains(target.neighborLogicalId)
+            else {
+                return
+            }
+
             capturePresentationForNextRelayout(workspaceId: wsId)
-            if engine.swapWindows(direction: direction, in: wsId) {
+            guard let runtime = controller.runtime else {
+                preconditionFailure("DwindleLayoutHandler.swapWindow requires WMRuntime to be attached")
+            }
+            guard runtime.swapTiledWindowOrder(
+                target.currentToken,
+                target.neighborToken,
+                in: wsId,
+                source: source
+            ) else {
+                discardPresentationForNextRelayout(workspaceId: wsId)
+                return
+            }
+
+            if engine.swapWindows(target: target, in: wsId) {
                 controller.layoutRefreshController.requestImmediateRelayout(
                     reason: .layoutCommand,
                     affectedWorkspaceIds: [wsId]
                 )
             } else {
+                _ = runtime.swapTiledWindowOrder(
+                    target.neighborToken,
+                    target.currentToken,
+                    in: wsId,
+                    source: source
+                )
                 discardPresentationForNextRelayout(workspaceId: wsId)
             }
         }
     }
 
-    func toggleFullscreen() {
+    func toggleFullscreen(source: WMEventSource = .command) {
         guard let controller else { return }
         withDwindleContext { engine, wsId in
             capturePresentationForNextRelayout(workspaceId: wsId)
             if let token = engine.toggleFullscreen(in: wsId) {
-                _ = controller.workspaceManager.applySessionPatch(
-                    .init(
-                        workspaceId: wsId,
-                        viewportState: nil,
-                        rememberedFocusToken: token
-                    )
+                let patch = WorkspaceSessionPatch(
+                    workspaceId: wsId,
+                    viewportState: nil,
+                    rememberedFocusToken: token
                 )
+                guard let runtime = controller.runtime else {
+                    preconditionFailure("DwindleLayoutHandler requires WMRuntime to be attached")
+                }
+                _ = runtime.applySessionPatch(patch, source: source)
                 controller.layoutRefreshController.requestImmediateRelayout(
                     reason: .layoutCommand,
                     affectedWorkspaceIds: [wsId]
@@ -207,7 +255,10 @@ import QuartzCore
         }
     }
 
-    func cycleSize(forward: Bool) {
+    func cycleSize(
+        forward: Bool,
+        source _: WMEventSource = .command
+    ) {
         guard let controller else { return }
         withDwindleContext { engine, wsId in
             capturePresentationForNextRelayout(workspaceId: wsId)
@@ -219,7 +270,7 @@ import QuartzCore
         }
     }
 
-    func balanceSizes() {
+    func balanceSizes(source _: WMEventSource = .command) {
         guard let controller else { return }
         withDwindleContext { engine, wsId in
             capturePresentationForNextRelayout(workspaceId: wsId)
@@ -332,19 +383,22 @@ import QuartzCore
         perform: (DwindleLayoutEngine, WorkspaceDescriptor.ID) -> Void
     ) {
         guard let controller,
-              let engine = controller.dwindleEngine,
-              let wsId = controller.activeWorkspace()?.id
+              let engine = controller.dwindleEngine
+        else { return }
+        guard let wsId = LayoutProjectionContext.project(controller: controller)
+            .activeWorkspaceIdForInteraction
         else { return }
         perform(engine, wsId)
     }
 
     func capturePresentationForNextRelayout(workspaceId wsId: WorkspaceDescriptor.ID) {
         guard let controller,
-              let engine = controller.dwindleEngine,
-              let monitor = controller.workspaceManager.monitor(for: wsId)
+              let engine = controller.dwindleEngine
         else {
             return
         }
+        let projectionContext = LayoutProjectionContext.project(controller: controller)
+        guard let monitor = projectionContext.monitor(for: wsId) else { return }
 
         let sampleTime = engine.animationClock?.now() ?? CACurrentMediaTime()
         pendingAnimationStartFrames[wsId] = engine.capturePresentedFrames(
@@ -365,9 +419,11 @@ import QuartzCore
     }
 
     private func monitorScale(for displayId: CGDirectDisplayID) -> CGFloat {
-        guard let monitor = controller?.workspaceManager.monitors.first(where: { $0.displayId == displayId }),
-              let controller
-        else {
+        guard let controller else {
+            return ScreenLookupCache.shared.backingScale(for: displayId)
+        }
+        let topology = LayoutProjectionContext.project(controller: controller).topology
+        guard let monitor = topology.node(forDisplay: displayId)?.monitor else {
             return ScreenLookupCache.shared.backingScale(for: displayId)
         }
         return controller.layoutRefreshController.backingScale(for: monitor)
@@ -377,15 +433,15 @@ import QuartzCore
         workspaceId wsId: WorkspaceDescriptor.ID,
         monitor: Monitor,
         resolveConstraints: Bool,
-        isActiveWorkspace: Bool
+        isActiveWorkspace: Bool,
+        projectionContext: LayoutProjectionContext? = nil
     ) -> DwindleWorkspaceSnapshot? {
         guard let controller else { return nil }
+        let context = projectionContext ?? LayoutProjectionContext.project(controller: controller)
 
-        guard let refreshInput = controller.layoutRefreshController.buildRefreshInput(
-            workspaceId: wsId,
-            monitor: monitor,
-            resolveConstraints: resolveConstraints,
-            isActiveWorkspace: isActiveWorkspace
+        guard controller.layoutRefreshController.warmWindowConstraints(
+            for: context.graph.tiledMembership(in: wsId),
+            resolveConstraints: resolveConstraints
         ) else {
             return nil
         }
@@ -398,16 +454,42 @@ import QuartzCore
             selectedToken = nil
         }
 
-        return DwindleWorkspaceSnapshot(
+        return makeProjectionSnapshot(
             workspaceId: wsId,
-            monitor: refreshInput.monitor,
-            windows: refreshInput.windows,
-            preferredFocusToken: controller.workspaceManager.preferredFocusToken(in: wsId),
-            confirmedFocusedToken: controller.workspaceManager.focusedToken,
+            monitor: monitor,
             selectedToken: selectedToken,
-            settings: controller.settings.resolvedDwindleSettings(for: monitor),
-            displayRefreshRate: controller.layoutRefreshController.layoutState.refreshRateByDisplay[monitor.displayId] ?? 60.0,
-            isActiveWorkspace: refreshInput.isActiveWorkspace
+            isActiveWorkspace: isActiveWorkspace,
+            projectionContext: context
+        )
+    }
+
+    @MainActor
+    private func makeProjectionSnapshot(
+        workspaceId wsId: WorkspaceDescriptor.ID,
+        monitor _: Monitor,
+        selectedToken: WindowToken?,
+        isActiveWorkspace: Bool,
+        projectionContext: LayoutProjectionContext? = nil
+    ) -> DwindleWorkspaceSnapshot? {
+        guard let controller else { return nil }
+        let manager = controller.workspaceManager
+        let context = projectionContext ?? LayoutProjectionContext.project(controller: controller)
+        guard let monitorNode = context.monitorNode(for: wsId) else { return nil }
+        let topologyMonitor = monitorNode.monitor
+
+        return DwindleProjectionBuilder(
+            graph: context.graph,
+            topology: context.topology,
+            lifecycle: manager
+        ).buildSnapshot(
+            for: wsId,
+            monitorId: monitorNode.monitorId,
+            preferredFocusToken: manager.preferredFocusToken(in: wsId),
+            confirmedFocusedToken: manager.focusedToken,
+            selectedToken: selectedToken,
+            settings: controller.settings.resolvedDwindleSettings(for: topologyMonitor),
+            displayRefreshRate: controller.layoutRefreshController.layoutState.refreshRateByDisplay[monitorNode.displayId] ?? 60.0,
+            isActiveWorkspace: isActiveWorkspace
         )
     }
 
@@ -432,13 +514,17 @@ import QuartzCore
                     at: sampleTime,
                     scale: snapshot.monitor.scale
                 )
-        let windowTokens = snapshot.windows.map(\.token)
         _ = engine.syncWindows(
-            windowTokens,
+            snapshot.windows,
             in: snapshot.workspaceId,
             focusedToken: snapshot.preferredFocusToken,
             bootstrapScreen: snapshot.monitor.workingFrame
         )
+        if let selectedToken = snapshot.selectedToken ?? snapshot.preferredFocusToken,
+           let selectedNode = engine.findNode(for: selectedToken)
+        {
+            engine.setSelectedNode(selectedNode, in: snapshot.workspaceId)
+        }
 
         for window in snapshot.windows {
             engine.updateWindowConstraints(for: window.token, constraints: window.constraints)
@@ -450,8 +536,15 @@ import QuartzCore
             scale: snapshot.monitor.scale
         )
 
+        let preferredFocusWindow = snapshot.preferredFocusToken.flatMap { preferredFocusToken in
+            snapshot.windows.first { $0.token == preferredFocusToken }
+        }
         let rememberedFocusToken: WindowToken?
-        if let selected = engine.selectedNode(in: snapshot.workspaceId),
+        if let preferredFocusWindow,
+           preferredFocusWindow.isNativeFullscreenSuspended
+        {
+            rememberedFocusToken = preferredFocusWindow.token
+        } else if let selected = engine.selectedNode(in: snapshot.workspaceId),
            case let .leaf(handle, _) = selected.kind
         {
             rememberedFocusToken = handle
@@ -489,7 +582,9 @@ import QuartzCore
             windows: snapshot.windows,
             frames: frames,
             confirmedFocusedToken: snapshot.confirmedFocusedToken,
+            focusedBorderSuppressedTokens: engine.fullscreenWindowTokens(in: snapshot.workspaceId),
             directBorderUpdate: animationsActive,
+            suppressFocusedBorder: controller?.workspaceManager.isNonManagedFocusActive == true,
             canRestoreHiddenWorkspaceWindows: snapshot.isActiveWorkspace
         )
         let directives: [AnimationDirective] = animationsActive
@@ -534,7 +629,9 @@ import QuartzCore
             windows: snapshot.windows,
             frames: frames,
             confirmedFocusedToken: snapshot.confirmedFocusedToken,
+            focusedBorderSuppressedTokens: engine.fullscreenWindowTokens(in: snapshot.workspaceId),
             directBorderUpdate: true,
+            suppressFocusedBorder: controller?.workspaceManager.isNonManagedFocusActive == true,
             canRestoreHiddenWorkspaceWindows: snapshot.isActiveWorkspace
         )
 
@@ -570,8 +667,10 @@ import QuartzCore
             windows: snapshot.windows,
             frames: animationFrames.frames,
             confirmedFocusedToken: snapshot.confirmedFocusedToken,
+            focusedBorderSuppressedTokens: engine.fullscreenWindowTokens(in: snapshot.workspaceId),
             directBorderUpdate: animationFrames.animationsActive,
             borderMode: animationFrames.animationsActive ? .direct : .coordinated,
+            suppressFocusedBorder: controller?.workspaceManager.isNonManagedFocusActive == true,
             canRestoreHiddenWorkspaceWindows: snapshot.isActiveWorkspace
         )
 
@@ -589,8 +688,10 @@ import QuartzCore
         windows: [LayoutWindowSnapshot],
         frames: [WindowToken: CGRect],
         confirmedFocusedToken: WindowToken?,
+        focusedBorderSuppressedTokens: Set<WindowToken> = [],
         directBorderUpdate: Bool,
         borderMode: BorderUpdateMode? = nil,
+        suppressFocusedBorder: Bool = false,
         canRestoreHiddenWorkspaceWindows: Bool
     ) -> WorkspaceLayoutDiff {
         var diff = WorkspaceLayoutDiff()
@@ -599,13 +700,20 @@ import QuartzCore
                 .filter(\.isNativeFullscreenSuspended)
                 .map(\.token)
         )
-        if let confirmedFocusedToken {
-            let ownsFocusedToken = windows.contains {
-                $0.token == confirmedFocusedToken && !$0.isNativeFullscreenSuspended
+        if suppressFocusedBorder {
+            diff.borderMode = .none
+        } else if let confirmedFocusedToken {
+            if focusedBorderSuppressedTokens.contains(confirmedFocusedToken) {
+                diff.borderMode = .hidden
+            } else {
+                let ownsFocusedToken = windows.contains {
+                    $0.token == confirmedFocusedToken
+                        && !$0.isNativeFullscreenSuspended
+                }
+                diff.borderMode = ownsFocusedToken
+                    ? (borderMode ?? (directBorderUpdate ? .direct : .coordinated))
+                    : .none
             }
-            diff.borderMode = ownsFocusedToken
-                ? (borderMode ?? (directBorderUpdate ? .direct : .coordinated))
-                : .none
         } else {
             diff.borderMode = borderMode ?? (directBorderUpdate ? .direct : .coordinated)
         }
@@ -633,7 +741,9 @@ import QuartzCore
         }
 
         if let confirmedFocusedToken,
+           !suppressFocusedBorder,
            !suspendedTokens.contains(confirmedFocusedToken),
+           !focusedBorderSuppressedTokens.contains(confirmedFocusedToken),
            let frame = frames[confirmedFocusedToken]
         {
             diff.focusedFrame = LayoutFocusedFrame(

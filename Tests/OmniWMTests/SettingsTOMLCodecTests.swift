@@ -96,7 +96,11 @@ import Testing
 
     @Test func roundTripsWorkspaceWithSpecificDisplayAssignment() throws {
         var export = SettingsExport.defaults()
-        let output = OutputId(displayId: 42, name: "Studio Display")
+        let output = OutputId(
+            displayUUID: "42424242-4242-4242-4242-424242424242",
+            displayId: 42,
+            name: "Studio Display"
+        )
         export.workspaceConfigurations = [
             WorkspaceConfiguration(
                 name: "2",
@@ -107,6 +111,9 @@ import Testing
         ]
 
         let data = try SettingsTOMLCodec.encode(export)
+        let toml = try #require(String(data: data, encoding: .utf8))
+        #expect(toml.contains("displayUUID"))
+        #expect(toml.contains("displayId") == false)
         let decoded = try SettingsTOMLCodec.decode(data)
         #expect(decoded.workspaceConfigurations == export.workspaceConfigurations)
     }
@@ -114,14 +121,49 @@ import Testing
     @Test func roundTripsNonEmptyMouseWarpMonitorOrder() throws {
         var export = SettingsExport.defaults()
         export.mouseWarpMonitorOrder = [
-            OutputId(displayId: 11, name: "Studio Display"),
-            OutputId(displayId: 22, name: "LG UltraFine")
+            OutputId(
+                displayUUID: "11111111-1111-1111-1111-111111111111",
+                displayId: 11,
+                name: "Studio Display"
+            ),
+            OutputId(
+                displayUUID: "22222222-2222-2222-2222-222222222222",
+                displayId: 22,
+                name: "LG UltraFine"
+            )
         ]
 
         let data = try SettingsTOMLCodec.encode(export)
+        let output = try #require(String(data: data, encoding: .utf8))
+        #expect(output.contains("displayUUID"))
+        #expect(output.contains("displayId") == false)
         let decoded = try SettingsTOMLCodec.decode(data)
 
         #expect(decoded.mouseWarpMonitorOrder == export.mouseWarpMonitorOrder)
+    }
+
+    @Test func decodesLegacyOutputDisplayIdButReencodesStableShape() throws {
+        var export = SettingsExport.defaults()
+        export.mouseWarpMonitorOrder = [
+            OutputId(
+                displayUUID: "11111111-1111-1111-1111-111111111111",
+                displayId: 11,
+                name: "Studio Display"
+            )
+        ]
+
+        let encoded = try #require(String(data: SettingsTOMLCodec.encode(export), encoding: .utf8))
+        let legacy = encoded.replacing(
+            "displayUUID = \"11111111-1111-1111-1111-111111111111\"",
+            with: "displayId = 11"
+        )
+
+        let decoded = try SettingsTOMLCodec.decode(Data(legacy.utf8))
+        #expect(decoded.mouseWarpMonitorOrder == [OutputId(displayId: 11, name: "Studio Display")])
+
+        let reencoded = try #require(String(data: SettingsTOMLCodec.encode(decoded), encoding: .utf8))
+        #expect(reencoded.contains("displayId") == false)
+        #expect(reencoded.contains("name = \"Studio Display\""))
     }
 
     @Test func roundTripsAppRulesWithMixedOptionalFields() throws {
@@ -135,7 +177,6 @@ import Testing
                 titleRegex: "^Main.*$",
                 axRole: "AXWindow",
                 axSubrole: "AXStandardWindow",
-                manage: .auto,
                 layout: .tile,
                 assignToWorkspace: "1",
                 minWidth: 400,
@@ -157,7 +198,7 @@ import Testing
         export.monitorBarSettings = [
             MonitorBarSettings(
                 monitorName: "Display A",
-                monitorDisplayId: 1,
+                monitorDisplayUUID: "AAAAAAAA-0000-0000-0000-000000000001",
                 enabled: false,
                 height: 30
             )
@@ -165,32 +206,60 @@ import Testing
         export.monitorOrientationSettings = [
             MonitorOrientationSettings(
                 monitorName: "Display B",
-                monitorDisplayId: 2,
+                monitorDisplayUUID: "AAAAAAAA-0000-0000-0000-000000000002",
                 orientation: .vertical
             )
         ]
         export.monitorNiriSettings = [
             MonitorNiriSettings(
                 monitorName: "Display C",
-                monitorDisplayId: 3,
+                monitorDisplayUUID: "AAAAAAAA-0000-0000-0000-000000000003",
                 maxVisibleColumns: 4
             )
         ]
         export.monitorDwindleSettings = [
             MonitorDwindleSettings(
                 monitorName: "Display D",
-                monitorDisplayId: 4,
+                monitorDisplayUUID: "AAAAAAAA-0000-0000-0000-000000000004",
                 smartSplit: true,
                 defaultSplitRatio: 0.75
             )
         ]
 
         let data = try SettingsTOMLCodec.encode(export)
+        let output = try #require(String(data: data, encoding: .utf8))
+        #expect(output.contains("monitorDisplayUUID"))
+        #expect(output.contains("monitorDisplayId") == false)
         let decoded = try SettingsTOMLCodec.decode(data)
         #expect(decoded.monitorBarSettings == export.monitorBarSettings)
         #expect(decoded.monitorOrientationSettings == export.monitorOrientationSettings)
         #expect(decoded.monitorNiriSettings == export.monitorNiriSettings)
         #expect(decoded.monitorDwindleSettings == export.monitorDwindleSettings)
+    }
+
+    @Test func decodesLegacyMonitorDisplayIdButReencodesStableOverrideShape() throws {
+        var export = SettingsExport.defaults()
+        export.monitorBarSettings = [
+            MonitorBarSettings(
+                monitorName: "Display A",
+                monitorDisplayUUID: "AAAAAAAA-0000-0000-0000-000000000001",
+                monitorDisplayId: 1,
+                enabled: false
+            )
+        ]
+
+        let encoded = try #require(String(data: SettingsTOMLCodec.encode(export), encoding: .utf8))
+        let legacy = encoded.replacing(
+            "monitorDisplayUUID = \"AAAAAAAA-0000-0000-0000-000000000001\"",
+            with: "monitorDisplayId = 1"
+        )
+
+        let decoded = try SettingsTOMLCodec.decode(Data(legacy.utf8))
+        #expect(decoded.monitorBarSettings.first?.monitorDisplayId == 1)
+        #expect(decoded.monitorBarSettings.first?.monitorDisplayUUID == nil)
+
+        let reencoded = try #require(String(data: SettingsTOMLCodec.encode(decoded), encoding: .utf8))
+        #expect(reencoded.contains("monitorDisplayId") == false)
     }
 
     @Test func roundTripsNestedColorQuartets() throws {
@@ -267,17 +336,6 @@ import Testing
         #expect(decoded.quakeTerminalOpacity == nil)
         #expect(decoded.quakeTerminalMonitorMode == nil)
         #expect(decoded.niriDefaultColumnWidth == nil)
-    }
-
-    @Test func topLevelVersionPrecedesAllTables() throws {
-        let data = try SettingsTOMLCodec.encode(SettingsExport.defaults())
-        let output = try #require(String(data: data, encoding: .utf8))
-
-
-
-        let versionRange = try #require(output.range(of: "version"))
-        let firstTableRange = try #require(output.range(of: "[general]"))
-        #expect(versionRange.lowerBound < firstTableRange.lowerBound)
     }
 
     @Test func canonicalDefaultsMatchGoldenFixture() throws {

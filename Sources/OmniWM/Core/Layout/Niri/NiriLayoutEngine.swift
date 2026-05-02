@@ -111,6 +111,8 @@ final class NiriLayoutEngine {
 
     var tokenToNode: [WindowToken: NiriWindow] = [:]
 
+    var logicalIdToNode: [LogicalWindowId: NiriWindow] = [:]
+
     var closingTokens: Set<WindowToken> = []
 
     var framePool: [WindowToken: CGRect] = [:]
@@ -298,6 +300,55 @@ final class NiriLayoutEngine {
 
     func findNode(for handle: WindowHandle) -> NiriWindow? {
         findNode(for: handle.id)
+    }
+
+    func findNode(forLogicalId logicalId: LogicalWindowId) -> NiriWindow? {
+        guard logicalId.isValid else { return nil }
+        return logicalIdToNode[logicalId]
+    }
+
+    func assignLogicalId(_ logicalId: LogicalWindowId, to node: NiriWindow) {
+        guard logicalId.isValid else { return }
+        if let existing = logicalIdToNode[logicalId], existing !== node {
+            existing.logicalId = .invalid
+        }
+        if node.logicalId.isValid, node.logicalId != logicalId {
+            logicalIdToNode.removeValue(forKey: node.logicalId)
+        }
+        node.logicalId = logicalId
+        logicalIdToNode[logicalId] = node
+    }
+
+    @MainActor
+    func syncLogicalIds(from registry: any LogicalWindowRegistryReading) {
+        var currentLogicalIds: Set<LogicalWindowId> = []
+        var currentNodes: Set<ObjectIdentifier> = []
+
+        for (token, node) in tokenToNode {
+            switch registry.lookup(token: token) {
+            case let .current(logicalId):
+                assignLogicalId(logicalId, to: node)
+                currentLogicalIds.insert(logicalId)
+                currentNodes.insert(ObjectIdentifier(node))
+            case .staleAlias, .retired, .unknown:
+                if node.logicalId.isValid {
+                    logicalIdToNode.removeValue(forKey: node.logicalId)
+                    node.logicalId = .invalid
+                }
+            }
+        }
+
+        let indexedEntries = Array(logicalIdToNode)
+        for (logicalId, node) in indexedEntries {
+            if !currentLogicalIds.contains(logicalId)
+                || !currentNodes.contains(ObjectIdentifier(node))
+            {
+                logicalIdToNode.removeValue(forKey: logicalId)
+                if node.logicalId == logicalId {
+                    node.logicalId = .invalid
+                }
+            }
+        }
     }
 
     func column(of node: NiriNode) -> NiriContainer? {

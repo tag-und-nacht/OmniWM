@@ -57,6 +57,8 @@ enum AXFrameWriteFailureReason: Equatable, Sendable {
 }
 
 struct AXFrameWriteResult: Equatable, Sendable {
+    private static let verifiedFrameTolerancePoints: CGFloat = 1.0
+
     let targetFrame: CGRect
     let observedFrame: CGRect?
     let writeOrder: AXFrameWriteOrder
@@ -65,7 +67,15 @@ struct AXFrameWriteResult: Equatable, Sendable {
     let failureReason: AXFrameWriteFailureReason?
 
     var isVerifiedSuccess: Bool {
-        failureReason == nil
+        if let observedFrame {
+            // Some apps report an AX attribute write error after applying the
+            // requested geometry. Readback is the authoritative success signal.
+            return observedFrame.approximatelyEqual(
+                to: targetFrame,
+                tolerance: Self.verifiedFrameTolerancePoints
+            )
+        }
+        return failureReason == nil
     }
 
     var shouldRetryAfterRefresh: Bool {
@@ -204,7 +214,11 @@ enum AXWindowService {
         {
             return cached.title
         }
-        let title = titleLookupProviderForTests?(windowId) ?? SkyLight.shared.getWindowTitle(windowId)
+        let title = if let titleLookupProviderForTests {
+            titleLookupProviderForTests(windowId)
+        } else {
+            SkyLight.shared.getWindowTitle(windowId)
+        }
         storeTitleCacheEntry(windowId: windowId, title: title, at: now)
         return title
     }
@@ -212,7 +226,11 @@ enum AXWindowService {
     @MainActor
     static func refreshCachedTitle(windowId: UInt32) {
         let now = timeSourceForTests?() ?? ProcessInfo.processInfo.systemUptime
-        let title = titleLookupProviderForTests?(windowId) ?? SkyLight.shared.getWindowTitle(windowId)
+        let title = if let titleLookupProviderForTests {
+            titleLookupProviderForTests(windowId)
+        } else {
+            SkyLight.shared.getWindowTitle(windowId)
+        }
         storeTitleCacheEntry(windowId: windowId, title: title, at: now)
     }
 
@@ -310,6 +328,18 @@ enum AXWindowService {
             return .positionThenSize
         }
         return .sizeThenPosition
+    }
+
+    static func setFrame(
+        _ window: AXWindowRef,
+        frame: FrameState.Frame,
+        currentFrameHint: CGRect? = nil
+    ) -> AXFrameWriteResult {
+        assert(
+            frame.space == .appKit && frame.isVisibleFrame,
+            "AXWindowService.setFrame requires AppKit visible-frame coordinates; got \(frame.space)/\(frame.isVisibleFrame ? "visible" : "full")"
+        )
+        return setFrame(window, frame: frame.rect, currentFrameHint: currentFrameHint)
     }
 
     static func setFrame(

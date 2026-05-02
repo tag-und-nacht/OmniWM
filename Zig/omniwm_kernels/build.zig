@@ -12,11 +12,14 @@ pub fn build(b: *std.Build) void {
     });
     module.linkSystemLibrary("c", .{});
 
+    module.addIncludePath(b.path("../../Sources/COmniWMKernels/include"));
+
     const lib = b.addLibrary(.{
         .name = "omniwm_kernels",
         .linkage = .static,
         .root_module = module,
     });
+    lib.bundle_compiler_rt = true;
     b.installArtifact(lib);
 
     const tests = b.addTest(.{

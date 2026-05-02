@@ -7,8 +7,12 @@ enum WMEventSource: String, Equatable {
     case workspaceManager
     case service
     case command
+    case keyboard
+    case config
+    case animation
     case mouse
     case focusPolicy
+    case ipc
 }
 
 enum WMEvent: Equatable {
@@ -94,12 +98,14 @@ enum WMEvent: Equatable {
         workspaceId: WorkspaceDescriptor.ID,
         monitorId: Monitor.ID?,
         appFullscreen: Bool,
-        source: WMEventSource
+        source: WMEventSource,
+        originatingTransactionEpoch: TransactionEpoch
     )
     case managedFocusCancelled(
         token: WindowToken?,
         workspaceId: WorkspaceDescriptor.ID?,
-        source: WMEventSource
+        source: WMEventSource,
+        originatingTransactionEpoch: TransactionEpoch
     )
     case nonManagedFocusChanged(
         active: Bool,
@@ -109,6 +115,7 @@ enum WMEvent: Equatable {
     )
     case systemSleep(source: WMEventSource)
     case systemWake(source: WMEventSource)
+    case commandIntent(kindForLog: String, source: WMEventSource)
 
     var token: WindowToken? {
         switch self {
@@ -121,14 +128,71 @@ enum WMEvent: Equatable {
              let .nativeFullscreenTransition(token, _, _, _, _),
              let .managedReplacementMetadataChanged(token, _, _, _),
              let .managedFocusRequested(token, _, _, _),
-             let .managedFocusConfirmed(token, _, _, _, _):
+             let .managedFocusConfirmed(token, _, _, _, _, _):
             token
         case let .windowRekeyed(_, to, _, _, _, _):
             to
-        case let .managedFocusCancelled(token, _, _):
+        case let .managedFocusCancelled(token, _, _, _):
             token
-        case .topologyChanged, .activeSpaceChanged, .focusLeaseChanged, .nonManagedFocusChanged, .systemSleep, .systemWake:
+        case .topologyChanged,
+             .activeSpaceChanged,
+             .focusLeaseChanged,
+             .nonManagedFocusChanged,
+             .systemSleep,
+             .systemWake,
+             .commandIntent:
             nil
+        }
+    }
+
+    var originatingTransactionEpoch: TransactionEpoch? {
+        switch self {
+        case let .managedFocusConfirmed(_, _, _, _, _, originatingTransactionEpoch),
+             let .managedFocusCancelled(_, _, _, originatingTransactionEpoch):
+            return originatingTransactionEpoch
+        case .windowAdmitted,
+             .windowRekeyed,
+             .windowRemoved,
+             .workspaceAssigned,
+             .windowModeChanged,
+             .floatingGeometryUpdated,
+             .hiddenStateChanged,
+             .nativeFullscreenTransition,
+             .managedReplacementMetadataChanged,
+             .topologyChanged,
+             .activeSpaceChanged,
+             .focusLeaseChanged,
+             .managedFocusRequested,
+             .nonManagedFocusChanged,
+             .systemSleep,
+             .systemWake,
+             .commandIntent:
+            return nil
+        }
+    }
+
+    var isConfirmationFlavored: Bool {
+        switch self {
+        case .managedFocusConfirmed, .managedFocusCancelled:
+            return true
+        case .windowAdmitted,
+             .windowRekeyed,
+             .windowRemoved,
+             .workspaceAssigned,
+             .windowModeChanged,
+             .floatingGeometryUpdated,
+             .hiddenStateChanged,
+             .nativeFullscreenTransition,
+             .managedReplacementMetadataChanged,
+             .topologyChanged,
+             .activeSpaceChanged,
+             .focusLeaseChanged,
+             .managedFocusRequested,
+             .nonManagedFocusChanged,
+             .systemSleep,
+             .systemWake,
+             .commandIntent:
+            return false
         }
     }
 
@@ -147,12 +211,37 @@ enum WMEvent: Equatable {
              let .activeSpaceChanged(source),
              let .focusLeaseChanged(_, source),
              let .managedFocusRequested(_, _, _, source),
-             let .managedFocusConfirmed(_, _, _, _, source),
-             let .managedFocusCancelled(_, _, source),
+             let .managedFocusConfirmed(_, _, _, _, source, _),
+             let .managedFocusCancelled(_, _, source, _),
              let .nonManagedFocusChanged(_, _, _, source),
              let .systemSleep(source),
-             let .systemWake(source):
+             let .systemWake(source),
+             let .commandIntent(_, source):
             source
+        }
+    }
+
+    var kindForLog: String {
+        switch self {
+        case .windowAdmitted: "window_admitted"
+        case .windowRekeyed: "window_rekeyed"
+        case .windowRemoved: "window_removed"
+        case .workspaceAssigned: "workspace_assigned"
+        case .windowModeChanged: "window_mode_changed"
+        case .floatingGeometryUpdated: "floating_geometry_updated"
+        case .hiddenStateChanged: "hidden_state_changed"
+        case .nativeFullscreenTransition: "native_fullscreen_transition"
+        case .managedReplacementMetadataChanged: "managed_replacement_metadata_changed"
+        case .topologyChanged: "topology_changed"
+        case .activeSpaceChanged: "active_space_changed"
+        case .focusLeaseChanged: "focus_lease_changed"
+        case .managedFocusRequested: "managed_focus_requested"
+        case .managedFocusConfirmed: "managed_focus_confirmed"
+        case .managedFocusCancelled: "managed_focus_cancelled"
+        case .nonManagedFocusChanged: "non_managed_focus_changed"
+        case .systemSleep: "system_sleep"
+        case .systemWake: "system_wake"
+        case let .commandIntent(kindForLog, _): "command_intent:\(kindForLog)"
         }
     }
 
@@ -184,16 +273,18 @@ enum WMEvent: Equatable {
             "focus_lease_changed owner=\(lease?.owner.rawValue ?? "nil") reason=\(lease?.reason ?? "")"
         case let .managedFocusRequested(token, workspaceId, monitorId, _):
             "managed_focus_requested token=\(token) workspace=\(workspaceId.uuidString) monitor=\(String(describing: monitorId))"
-        case let .managedFocusConfirmed(token, workspaceId, monitorId, appFullscreen, _):
-            "managed_focus_confirmed token=\(token) workspace=\(workspaceId.uuidString) monitor=\(String(describing: monitorId)) fullscreen=\(appFullscreen)"
-        case let .managedFocusCancelled(token, workspaceId, _):
-            "managed_focus_cancelled token=\(token.map(String.init(describing:)) ?? "nil") workspace=\(workspaceId?.uuidString ?? "nil")"
+        case let .managedFocusConfirmed(token, workspaceId, monitorId, appFullscreen, _, originatingTransactionEpoch):
+            "managed_focus_confirmed token=\(token) workspace=\(workspaceId.uuidString) monitor=\(String(describing: monitorId)) fullscreen=\(appFullscreen) origin_txn=\(originatingTransactionEpoch.value)"
+        case let .managedFocusCancelled(token, workspaceId, _, originatingTransactionEpoch):
+            "managed_focus_cancelled token=\(token.map(String.init(describing:)) ?? "nil") workspace=\(workspaceId?.uuidString ?? "nil") origin_txn=\(originatingTransactionEpoch.value)"
         case let .nonManagedFocusChanged(active, appFullscreen, preserveFocusedToken, _):
             "non_managed_focus_changed active=\(active) fullscreen=\(appFullscreen) preserve=\(preserveFocusedToken)"
         case .systemSleep:
             "system_sleep"
         case .systemWake:
             "system_wake"
+        case let .commandIntent(kindForLog, source):
+            "command_intent kind=\(kindForLog) source=\(source.rawValue)"
         }
     }
 }

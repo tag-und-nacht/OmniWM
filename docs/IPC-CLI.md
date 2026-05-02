@@ -52,7 +52,6 @@ This document covers the OmniWM automation surface. For the docs hub, see [Docum
 - [Error Codes](#error-codes)
 - [Output Formats](#output-formats)
 - [Environment Variables](#environment-variables)
-- [Aliases](#aliases)
 
 ---
 
@@ -113,8 +112,8 @@ IPCWire.encodeRequestLine()  ──▶  Unix socket  ──▶  IPCServer
                                      └─ route to IPCCommandRouter
                                            │
                                            ▼
-                                   WMController.commandHandler
-                                     (same path as hotkey commands)
+                                   WMRuntime.dispatchHotkey
+                                     (typed command runtime path)
                                            │
                                            ▼
                                    ExternalCommandResult
@@ -162,7 +161,17 @@ Turning **Enable IPC** on starts the server immediately and creates the Unix soc
 
 ## IPC Protocol
 
-**Protocol version:** 3
+**Protocol version:** 5
+
+### Versioning & Compatibility
+
+| Version | Changes |
+|---------|---------|
+| 5 | `IPCWorkspaceRequest` requires the structured `workspaceTarget` field (`{kind, value}`) and no longer accepts the obsolete bare `workspaceName: String` payload shape. |
+| 4 | `IPCWorkspaceRequest` required clients to emit `workspaceTarget` but still decoded `workspaceName` as a temporary compatibility fallback. |
+| 3 | `IPCWorkspaceRequest` accepted either `workspaceName: String` or `workspaceTarget: {kind, value}`. |
+
+A stale but decodable client request fails the version handshake with `protocol_mismatch`. An obsolete workspace request that only contains `workspaceName` is malformed in protocol 5 and fails before routing with `invalid_request`.
 
 ### Socket & Authorization
 
@@ -344,7 +353,7 @@ Workspace IDs are positive numeric strings. Direct hotkeys stay limited to `1-9`
 |---------|-----------|--------|-------------|
 | `command toggle-focused-window-floating` | — | shared | Toggle focused window between tiled and floating |
 | `command raise-all-floating-windows` | — | shared | Raise all visible floating windows |
-| `command rescue-offscreen-windows` | — | shared | Clamp tracked floating windows back onto their visible monitors |
+| `command rescue-offscreen-windows` | — | shared | Clamp visible-workspace floating windows back onto their monitors and clear stale workspace-inactive hidden state |
 | `command scratchpad assign` | — | shared | Assign the focused window to the scratchpad |
 | `command scratchpad toggle` | — | shared | Show or hide the scratchpad window |
 
@@ -492,7 +501,8 @@ Numeric inputs are resolved as raw workspace IDs first. Display-name lookup is a
 
 ## Rules
 
-Manage persisted window rules that control how windows are tiled, floated, or assigned to workspaces.
+Manage persisted window rules that control layout behavior and default workspace placement for matching windows.
+Rule add, replace, and config reload update initial placement defaults; existing managed windows stay on their current workspace unless `rule apply` is used.
 
 ```
 omniwmctl rule <action> [arguments...] [options...]
@@ -509,7 +519,7 @@ omniwmctl rule <action> [arguments...] [options...]
 | `--ax-role` | `<role>` | Match accessibility role |
 | `--ax-subrole` | `<subrole>` | Match accessibility subrole |
 | `--layout` | `<auto\|tile\|float>` | Layout action (`auto` = default behavior) |
-| `--assign-to-workspace` | `<raw-name>` | Assign matching windows to this workspace raw name |
+| `--assign-to-workspace` | `<raw-name>` | Open first matching app windows on this workspace raw name |
 | `--min-width` | `<points>` | Minimum window width in points |
 | `--min-height` | `<points>` | Minimum window height in points |
 
@@ -523,7 +533,7 @@ Bundle IDs must match the pattern: `^[a-zA-Z0-9]+([.-][a-zA-Z0-9]+)*$`
 omniwmctl rule add --bundle-id <bundle-id> [options...]
 ```
 
-Appends a new rule to the end of the rule list.
+Appends a new rule to the end of the rule list. First matching app windows use its placement defaults; already managed windows are not moved.
 
 **Replace a rule:**
 
@@ -531,7 +541,7 @@ Appends a new rule to the end of the rule list.
 omniwmctl rule replace <rule-id> --bundle-id <bundle-id> [options...]
 ```
 
-Replaces a rule in-place by its UUID. The rule ID is preserved.
+Replaces a rule in-place by its UUID. The rule ID is preserved. Already managed windows are not moved until rules are explicitly applied.
 
 **Remove a rule:**
 
@@ -555,7 +565,7 @@ Moves a rule to a new one-based position in the rule list.
 omniwmctl rule apply [--focused | --window <opaque-id> | --pid <pid>]
 ```
 
-Re-evaluates the current rule set against the target. Defaults to `--focused` if no target is specified.
+Re-evaluates the current rule set against the target. Defaults to `--focused` if no target is specified. This is the explicit path for applying placement rules to already managed windows.
 
 | Target | Description |
 |--------|-------------|
@@ -569,7 +579,7 @@ Re-evaluates the current rule set against the target. Defaults to `--focused` if
 # Float all Finder windows
 omniwmctl rule add --bundle-id com.apple.finder --layout float
 
-# Tile Safari and assign to workspace 2
+# Tile initial Safari windows on workspace 2
 omniwmctl rule add --bundle-id com.apple.Safari --layout tile --assign-to-workspace 2
 
 # Float windows with "Preferences" in the title
@@ -578,7 +588,7 @@ omniwmctl rule add --bundle-id com.apple.Safari --title-substring Preferences --
 # Remove a rule
 omniwmctl rule remove 550e8400-e29b-41d4-a716-446655440000
 
-# Reapply rules to all windows of a specific app
+# Explicitly reapply rules to all windows of a specific app
 omniwmctl rule apply --pid 12345
 ```
 
@@ -713,7 +723,7 @@ Completions are context-aware: query names, selectors, field names, command path
 
 ```json
 {
-  "version": 3,
+  "version": 5,
   "id": "<uuid>",
   "kind": "<ping|version|command|query|rule|workspace|window|subscribe>",
   "authorizationToken": "<token>",
@@ -771,7 +781,10 @@ Completions are context-aware: query names, selectors, field names, command path
 ```json
 {
   "name": "focus-name",
-  "workspaceName": "main"
+  "workspaceTarget": {
+    "kind": "display-name",
+    "value": "main"
+  }
 }
 ```
 
@@ -787,7 +800,7 @@ Completions are context-aware: query names, selectors, field names, command path
 
 ```json
 {
-  "version": 3,
+  "version": 5,
   "id": "<request-id>",
   "ok": true,
   "kind": "<ping|version|command|query|rule|workspace|window|subscribe>",
@@ -804,7 +817,7 @@ Authorization, protocol, validation, and routing failures keep the originating r
 
 ```json
 {
-  "version": 3,
+  "version": 5,
   "id": "<request-id>",
   "ok": false,
   "kind": "query",
@@ -821,7 +834,7 @@ Events are sent on subscription connections after the initial response.
 
 ```json
 {
-  "version": 3,
+  "version": 5,
   "id": "<event-id>",
   "kind": "event",
   "channel": "focus",
@@ -899,17 +912,3 @@ ow_…  5678   Safari    GitHub        web        Built-in  tiling   no       ye
 | `OMNIWM_EVENT_CHANNEL` | (watch child) Subscription channel name |
 | `OMNIWM_EVENT_KIND` | (watch child) Event result kind |
 | `OMNIWM_EVENT_ID` | (watch child) Event ID |
-
----
-
-## Aliases
-
-The CLI accepts these aliases transparently:
-
-| Alias | Resolves to |
-|-------|-------------|
-| `query monitors` | `query displays` |
-| `query --monitor` | `query --display` |
-| `command focus-monitor previous` | `command focus-monitor prev` |
-| `command switch-workspace previous` | `command switch-workspace prev` |
-| `command switch-workspace back` | `command switch-workspace back-and-forth` |

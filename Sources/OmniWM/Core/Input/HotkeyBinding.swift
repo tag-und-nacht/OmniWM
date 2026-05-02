@@ -63,14 +63,14 @@ extension KeyBinding: Codable {
 
 struct HotkeyBinding: Codable, Equatable, Identifiable {
     let id: String
-    let command: HotkeyCommand
+    let command: InputBindingTrigger
     var binding: KeyBinding
 
     var category: HotkeyCategory {
         ActionCatalog.category(for: id) ?? .focus
     }
 
-    init(id: String, command: HotkeyCommand, binding: KeyBinding) {
+    init(id: String, command: InputBindingTrigger, binding: KeyBinding) {
         self.id = id
         self.command = command
         self.binding = HotkeyBindingRegistry.canonicalizeBinding(binding)
@@ -149,7 +149,7 @@ enum HotkeyBindingRegistry {
         defaultBindings
     }
 
-    static func command(for id: String) -> HotkeyCommand? {
+    static func command(for id: String) -> InputBindingTrigger? {
         bindingsByID[id]?.command
     }
 

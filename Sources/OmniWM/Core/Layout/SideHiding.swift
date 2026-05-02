@@ -57,6 +57,10 @@ struct HiddenPlacementMonitorContext {
     init(_ monitor: NiriMonitor) {
         self.init(id: monitor.id, frame: monitor.frame, visibleFrame: monitor.visibleFrame)
     }
+
+    init(_ node: MonitorTopologyState.DisplayNode) {
+        self.init(id: node.monitorId, frame: node.frame.raw, visibleFrame: node.visibleFrame.raw)
+    }
 }
 
 struct HiddenWindowPlacement {

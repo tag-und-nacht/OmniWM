@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
 import AppKit
 import Foundation
+import OSLog
+
+private let shutdownRaceLog = Logger(
+    subsystem: "com.omniwm.core",
+    category: "ServiceLifecycleManager.ShutdownRace"
+)
 
 enum ActivationEventSource: String, Sendable, Equatable {
     case focusedWindowChanged
@@ -91,6 +97,12 @@ final class ServiceLifecycleManager {
             controller?.axEventHandler.handleAppActivation(
                 pid: pid,
                 source: .focusedWindowChanged
+            )
+        }
+        AppAXContext.onWindowFrameChanged = { [weak controller] pid, windowId in
+            controller?.axEventHandler.handleWindowFrameObserved(
+                pid: pid,
+                windowId: windowId
             )
         }
         FrontmostApplicationState.shared.primeFromWorkspace()
@@ -193,7 +205,10 @@ final class ServiceLifecycleManager {
         guard !currentMonitors.isEmpty else { return }
         guard currentMonitors.allSatisfy({ $0.frame.width > 1 && $0.frame.height > 1 }) else { return }
 
-        controller.workspaceManager.applyMonitorConfigurationChange(currentMonitors)
+        guard let runtime = controller.runtime else {
+            preconditionFailure("ServiceLifecycleManager.applyMonitorConfigurationChanged requires WMRuntime to be attached")
+        }
+        runtime.applyMonitorConfigurationChange(currentMonitors)
         controller.syncMouseWarpPolicy(for: controller.workspaceManager.monitors)
         guard performPostUpdateActions else { return }
 
@@ -201,7 +216,10 @@ final class ServiceLifecycleManager {
 
         let focusedWsId = controller.workspaceManager.focusedToken
             .flatMap { controller.workspaceManager.workspace(for: $0) }
-        controller.workspaceManager.garbageCollectUnusedWorkspaces(focusedWorkspaceId: focusedWsId)
+        runtime.garbageCollectUnusedWorkspaces(
+            focusedWorkspaceId: focusedWsId,
+            source: .service
+        )
 
         controller.layoutRefreshController.requestFullRescan(reason: .monitorConfigurationChanged)
     }
@@ -209,7 +227,15 @@ final class ServiceLifecycleManager {
     func handleAppTerminated(pid: pid_t) {
         guard let controller else { return }
         controller.axEventHandler.cleanupFocusStateForTerminatedApp(pid: pid)
-        let affectedWorkspaces = controller.workspaceManager.removeWindowsForApp(pid: pid)
+        guard let runtime = controller.runtime else {
+            shutdownRaceLog.notice("ServiceLifecycleManager.handleAppTerminated: WMRuntime detached during shutdown; skipping quarantine + window-removal for pid=\(pid, privacy: .public)")
+            return
+        }
+        _ = runtime.quarantineWindowsForTerminatedApp(pid: pid, source: .ax)
+        let affectedWorkspaces = runtime.removeWindowsForApp(
+            pid: pid,
+            source: .ax
+        )
         for workspaceId in affectedWorkspaces {
             if let monitorId = controller.workspaceManager.monitorId(for: workspaceId),
                controller.workspaceManager.activeWorkspace(on: monitorId)?.id == workspaceId
@@ -380,6 +406,7 @@ final class ServiceLifecycleManager {
         AppAXContext.onWindowDestroyed = nil
         AppAXContext.onWindowMinimizedChanged = nil
         AppAXContext.onFocusedWindowChanged = nil
+        AppAXContext.onWindowFrameChanged = nil
         controller.axManager.onAppLaunched = nil
         controller.axManager.onAppTerminated = nil
         controller.workspaceManager.onGapsChanged = nil

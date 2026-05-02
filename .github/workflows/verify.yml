@@ -1,0 +1,69 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# ABI-10 (Phase 06): CI hook that enforces `make verify` on every push and
+# pull request. Wraps the local-developer flow:
+#   - `make kernels-test` runs the Zig kernel tests and updates the marker
+#     that `check-kernels-test-required` consumes.
+#   - `make verify` runs lint + direct-mutation gate + transcript coverage
+#     + kernel ABI goldens drift check + kernels-test-required gate +
+#     build + test.
+#
+# Macos runners are required because OmniWM is macOS-only (private APIs,
+# AppKit, Accessibility, SkyLight). Zig is pinned via
+# `Scripts/build-metadata.env` (OMNIWM_REQUIRED_ZIG_VERSION).
+#
+# Maintenance:
+#   - Bump the macOS runner image when the deployment target rises.
+#   - Bump the Zig version when `build-metadata.env` rises.
+#   - Add caching for `.build/` and `.build/zig-kernels/` if CI runtime
+#     becomes a bottleneck.
+
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Read pinned Zig version
+        id: zig-version
+        run: |
+          version=$(grep '^OMNIWM_REQUIRED_ZIG_VERSION=' Scripts/build-metadata.env | cut -d= -f2)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: ${{ steps.zig-version.outputs.version }}
+
+      - name: Show toolchain versions
+        run: |
+          swift --version
+          zig version
+
+      - name: kernels-test
+        # Runs Zig kernel tests and updates the
+        # `.build/.kernels-test-passed` marker that `verify` requires.
+        run: make kernels-test
+
+      - name: verify
+        # Runs lint, the four bridge / mutation / transcript gates, build,
+        # and the full Swift test suite.
+        run: make verify

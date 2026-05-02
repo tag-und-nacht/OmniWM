@@ -19,7 +19,8 @@ private func makeSettingsTestMonitor(
     x: CGFloat = 0,
     y: CGFloat = 0,
     width: CGFloat = 1920,
-    height: CGFloat = 1080
+    height: CGFloat = 1080,
+    displayUUID: String? = nil
 ) -> Monitor {
     let frame = CGRect(x: x, y: y, width: width, height: height)
     return Monitor(
@@ -28,7 +29,8 @@ private func makeSettingsTestMonitor(
         frame: frame,
         visibleFrame: frame,
         hasNotch: false,
-        name: name
+        name: name,
+        displayUUID: displayUUID
     )
 }
 
@@ -68,15 +70,50 @@ private func makePersistedRestoreCatalogFixture(
 
 private func writeSettingsExport(
     _ export: SettingsExport,
-    to url: URL,
-    preserveVersion: Bool = false
+    to url: URL
 ) throws {
-    var canonical = export
-    if !preserveVersion {
-        canonical.version = SettingsFilePersistence.configVersion
-    }
     try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-    try SettingsTOMLCodec.encode(canonical).write(to: url, options: .atomic)
+    try SettingsTOMLCodec.encode(export).write(to: url, options: .atomic)
+}
+
+private func writeSettingsExportInPlace(
+    _ export: SettingsExport,
+    to url: URL
+) throws {
+    let data = try SettingsTOMLCodec.encode(export)
+    let handle = try FileHandle(forWritingTo: url)
+    defer {
+        try? handle.close()
+    }
+
+    try handle.truncate(atOffset: 0)
+    try handle.write(contentsOf: data)
+}
+
+private func atomicallyReplaceSettingsDataForTests(
+    _ data: Data,
+    at url: URL,
+    preservingModificationDate modificationDate: Date
+) throws {
+    let directory = url.deletingLastPathComponent()
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+    let tempURL = directory.appendingPathComponent(".settings.toml.\(UUID().uuidString).tmp", isDirectory: false)
+    try data.write(to: tempURL, options: .withoutOverwriting)
+    try FileManager.default.setAttributes([.modificationDate: modificationDate], ofItemAtPath: tempURL.path)
+
+    let result = tempURL.withUnsafeFileSystemRepresentation { sourcePath -> CInt in
+        guard let sourcePath else { return -1 }
+        return url.withUnsafeFileSystemRepresentation { destinationPath -> CInt in
+            guard let destinationPath else { return -1 }
+            return Darwin.rename(sourcePath, destinationPath)
+        }
+    }
+
+    if result != 0 {
+        try? FileManager.default.removeItem(at: tempURL)
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
 }
 
 @Suite struct MonitorSettingsStoreTests {
@@ -108,6 +145,29 @@ private func writeSettingsExport(
         #expect(settings[1].maxVisibleColumns == 4)
     }
 
+    @Test func updateDoesNotReplaceDifferentDisplayUUIDWithSameName() {
+        var settings = [
+            MonitorNiriSettings(
+                monitorName: "Studio Display",
+                monitorDisplayUUID: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
+                maxVisibleColumns: 2
+            )
+        ]
+        let updated = MonitorNiriSettings(
+            monitorName: "Studio Display",
+            monitorDisplayUUID: "11111111-2222-3333-4444-555555555555",
+            maxVisibleColumns: 5
+        )
+
+        MonitorSettingsStore.update(updated, in: &settings)
+
+        #expect(settings.count == 2)
+        #expect(settings[0].monitorDisplayUUID == "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")
+        #expect(settings[0].maxVisibleColumns == 2)
+        #expect(settings[1].monitorDisplayUUID == "11111111-2222-3333-4444-555555555555")
+        #expect(settings[1].maxVisibleColumns == 5)
+    }
+
     @Test func removeDeletesAllMatches() {
         var settings = [
             MonitorNiriSettings(monitorName: "A"),
@@ -117,6 +177,26 @@ private func writeSettingsExport(
         MonitorSettingsStore.remove(for: "A", from: &settings)
         #expect(settings.count == 1)
         #expect(settings[0].monitorName == "B")
+    }
+
+    @Test func removeDoesNotDeleteDifferentDisplayUUIDWithSameName() {
+        var settings = [
+            MonitorNiriSettings(
+                monitorName: "Studio Display",
+                monitorDisplayUUID: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
+                maxVisibleColumns: 2
+            )
+        ]
+        let monitor = makeSettingsTestMonitor(
+            displayId: 42,
+            name: "Studio Display",
+            displayUUID: "11111111-2222-3333-4444-555555555555"
+        )
+
+        MonitorSettingsStore.remove(for: monitor, from: &settings)
+
+        #expect(settings.count == 1)
+        #expect(settings[0].monitorDisplayUUID == "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")
     }
 
     @Test func monitorLookupPrefersDisplayIdOverNameFallback() {
@@ -130,16 +210,42 @@ private func writeSettingsExport(
         #expect(result?.maxVisibleColumns == 3)
     }
 
-    @Test func rebindPromotesLegacyNameEntryToDisplayId() {
-        let monitor = makeSettingsTestMonitor(displayId: 99, name: "Legacy")
+    @Test func monitorLookupDoesNotFallbackToDifferentDisplayUUIDWithSameName() {
+        let monitor = makeSettingsTestMonitor(
+            displayId: 99,
+            name: "Studio Display",
+            displayUUID: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
+        )
         let settings = [
-            MonitorNiriSettings(monitorName: "Legacy", maxVisibleColumns: 2),
+            MonitorNiriSettings(
+                monitorName: "Studio Display",
+                monitorDisplayUUID: "11111111-2222-3333-4444-555555555555",
+                maxVisibleColumns: 2
+            )
         ]
 
-        let rebound = MonitorSettingsStore.rebound(settings, to: [monitor])
-        #expect(rebound.first?.monitorDisplayId == 99)
-        #expect(rebound.first?.monitorName == "Legacy")
+        let result = MonitorSettingsStore.get(for: monitor, in: settings)
+        #expect(result == nil)
     }
+
+    @Test func monitorLookupPrefersDisplayUUIDAcrossReconnect() {
+        let monitor = makeSettingsTestMonitor(
+            displayId: 99,
+            name: "",
+            displayUUID: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
+        )
+        let settings = [
+            MonitorBarSettings(
+                monitorName: "",
+                monitorDisplayUUID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                enabled: false
+            )
+        ]
+
+        let result = MonitorSettingsStore.get(for: monitor, in: settings)
+        #expect(result?.enabled == false)
+    }
+
 }
 
 @Suite @MainActor struct RuntimeStateStoreTests {
@@ -176,23 +282,6 @@ private func writeSettingsExport(
         #expect(FileManager.default.fileExists(atPath: persistence.fileURL.path))
     }
 
-    @Test func unsupportedSchemaVersionIsRenamedAsideAndReplacedWithDefaults() throws {
-        let defaults = makeTestDefaults()
-        let directory = configurationDirectoryForTests(defaults: defaults)
-        let url = directory.appendingPathComponent("settings.toml", isDirectory: false)
-        var export = SettingsExport.defaults()
-        export.version = SettingsFilePersistence.configVersion + 1
-        try writeSettingsExport(export, to: url, preserveVersion: true)
-
-        let persistence = SettingsFilePersistence(directory: directory, startWatching: false)
-        let loaded = persistence.load()
-        let corruptURL = directory.appendingPathComponent("settings.toml.corrupt", isDirectory: false)
-
-        #expect(loaded == SettingsExport.defaults())
-        #expect(FileManager.default.fileExists(atPath: url.path))
-        #expect(FileManager.default.fileExists(atPath: corruptURL.path))
-    }
-
     @Test func corruptFileIsRenamedAsideAndReplacedWithDefaults() throws {
         let defaults = makeTestDefaults()
         let directory = configurationDirectoryForTests(defaults: defaults)
@@ -209,31 +298,17 @@ private func writeSettingsExport(
         #expect(FileManager.default.fileExists(atPath: corruptURL.path))
     }
 
-    @Test func legacySettingsJsonIsIgnoredWhenTomlMissing() throws {
-        let defaults = makeTestDefaults()
-        let directory = configurationDirectoryForTests(defaults: defaults)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let legacyJsonURL = directory.appendingPathComponent("settings.json", isDirectory: false)
-        let tomlURL = directory.appendingPathComponent("settings.toml", isDirectory: false)
-        let legacyJsonPayload = #"{"version": 4, "hotkeysEnabled": false}"#
-        try Data(legacyJsonPayload.utf8).write(to: legacyJsonURL)
-
-        let persistence = SettingsFilePersistence(directory: directory, startWatching: false)
-        let export = persistence.load()
-
-        #expect(export == SettingsExport.defaults())
-        #expect(FileManager.default.fileExists(atPath: tomlURL.path))
-        #expect(FileManager.default.fileExists(atPath: legacyJsonURL.path))
-        let legacyContents = try String(contentsOf: legacyJsonURL, encoding: .utf8)
-        #expect(legacyContents == legacyJsonPayload)
-    }
 }
 
 @Suite @MainActor struct SettingsStorePersistenceTests {
     @Test func settingsChangesRoundTripThroughCanonicalSettingsFile() {
         let defaults = makeTestDefaults()
         let settings = SettingsStore(defaults: defaults)
-        let output = OutputId(displayId: 777, name: "Studio Display")
+        let output = OutputId(
+            displayUUID: "77777777-7777-7777-7777-777777777777",
+            displayId: 777,
+            name: "Studio Display"
+        )
 
         settings.focusFollowsWindowToMonitor = true
         settings.mouseWarpAxis = .vertical
@@ -251,17 +326,6 @@ private func writeSettingsExport(
         #expect(reloaded.focusFollowsWindowToMonitor == true)
         #expect(reloaded.mouseWarpAxis == .vertical)
         #expect(reloaded.workspaceConfigurations == settings.workspaceConfigurations)
-    }
-
-    @Test func missingCanonicalFileIgnoresLegacyDefaultsKeys() {
-        let defaults = makeTestDefaults()
-        defaults.set(true, forKey: "settings.focusFollowsWindowToMonitor")
-        defaults.set(false, forKey: "settings.hotkeysEnabled")
-
-        let settings = SettingsStore(defaults: defaults)
-
-        #expect(settings.focusFollowsWindowToMonitor == SettingsExport.defaults().focusFollowsWindowToMonitor)
-        #expect(settings.hotkeysEnabled == SettingsExport.defaults().hotkeysEnabled)
     }
 
     @Test func runtimeStateSidecarKeepsRestoreCatalogOutOfSettingsFile() throws {
@@ -300,6 +364,49 @@ private func writeSettingsExport(
 
         #expect(settings.workspaceConfigurations.map(\.name) == ["2", "10"])
         #expect(settings.workspaceConfigurations.first?.monitorAssignment == .main)
+    }
+
+    @Test func quakeTerminalPercentSettingsNormalizeOnAssignmentAndImport() {
+        let defaults = makeTestDefaults()
+        let settings = SettingsStore(defaults: defaults)
+
+        settings.quakeTerminalWidthPercent = 5
+        settings.quakeTerminalHeightPercent = 150
+
+        #expect(settings.quakeTerminalWidthPercent == 10)
+        #expect(settings.quakeTerminalHeightPercent == 100)
+
+        var export = SettingsExport.defaults()
+        export.quakeTerminalWidthPercent = Double.nan
+        export.quakeTerminalHeightPercent = -Double.infinity
+        settings.applyExport(export, monitors: [])
+
+        #expect(settings.quakeTerminalWidthPercent == 50)
+        #expect(settings.quakeTerminalHeightPercent == 50)
+    }
+
+    @Test func quakeTerminalCustomFrameRejectsInvalidPersistedGeometry() {
+        let defaults = makeTestDefaults()
+        let settings = SettingsStore(defaults: defaults)
+
+        settings.quakeTerminalUseCustomFrame = true
+        settings.quakeTerminalCustomFrame = CGRect(x: 0, y: 0, width: CGFloat.infinity, height: 300)
+
+        #expect(settings.quakeTerminalUseCustomFrame == false)
+        #expect(settings.quakeTerminalCustomFrame == nil)
+
+        var export = SettingsExport.defaults()
+        export.quakeTerminalUseCustomFrame = true
+        export.quakeTerminalCustomFrame = QuakeTerminalFrameExport(
+            x: 0,
+            y: 0,
+            width: 70_000,
+            height: 300
+        )
+        settings.applyExport(export, monitors: [])
+
+        #expect(settings.quakeTerminalUseCustomFrame == false)
+        #expect(settings.quakeTerminalCustomFrame == nil)
     }
 
     @Test func mouseWarpAxisRoundTripsThroughCanonicalSettingsFile() {
@@ -345,16 +452,51 @@ private func writeSettingsExport(
         #expect(settings.effectiveMouseWarpMonitorOrder(for: [left, right]) == [right.id, left.id])
     }
 
-    @Test func rebindMonitorReferencesUpdatesMouseWarpMonitorOrderToReplacementOutputIdentity() {
+    @Test func rebindMonitorReferencesPreservesPersistedMouseWarpIdentityAcrossReconnect() {
         let defaults = makeTestDefaults()
         let settings = SettingsStore(defaults: defaults)
-        let original = OutputId(displayId: 10, name: "Studio Display")
-        let replacement = makeSettingsTestMonitor(displayId: 20, name: "Studio Display", x: 0)
+        let stableUUID = "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
+        let original = OutputId(displayUUID: stableUUID, displayId: 10, name: "Studio Display")
+        let replacement = makeSettingsTestMonitor(
+            displayId: 20,
+            name: "Studio Display",
+            x: 0,
+            displayUUID: stableUUID
+        )
 
         settings.mouseWarpMonitorOrder = [original]
         settings.rebindMonitorReferences(to: [replacement])
 
-        #expect(settings.mouseWarpMonitorOrder == [OutputId(from: replacement)])
+        #expect(settings.mouseWarpMonitorOrder == [original])
+        #expect(settings.effectiveMouseWarpMonitorOrder(for: [replacement]) == [replacement.id])
+    }
+
+    @Test func outputIdEqualityIgnoresRuntimeDisplayIdWhenDisplayUUIDIsStable() {
+        let first = OutputId(displayUUID: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE", displayId: 13, name: "")
+        let second = OutputId(displayUUID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", displayId: 14, name: "DELL U2723QE")
+
+        #expect(first == second)
+        #expect(Set([first, second]).count == 1)
+    }
+
+    @Test func topologyReconnectDoesNotMutateMouseWarpMonitorOrderOrSettingsFile() throws {
+        let defaults = makeTestDefaults()
+        let settings = SettingsStore(defaults: defaults)
+        let stableUUID = "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
+        let original = OutputId(displayUUID: stableUUID, displayId: 13, name: "")
+        settings.mouseWarpMonitorOrder = [original]
+        settings.flushNow()
+        let before = try String(contentsOf: settings.settingsFileURL, encoding: .utf8)
+
+        let manager = WorkspaceManager(settings: settings)
+        let reconnected = makeSettingsTestMonitor(displayId: 14, name: "", displayUUID: stableUUID)
+        manager.applyMonitorConfigurationChange([reconnected])
+        settings.flushNow()
+        let after = try String(contentsOf: settings.settingsFileURL, encoding: .utf8)
+
+        #expect(settings.mouseWarpMonitorOrder == [original])
+        #expect(settings.effectiveMouseWarpMonitorOrder(for: [reconnected]) == [reconnected.id])
+        #expect(after == before)
     }
 
     @Test func rebindMonitorReferencesDoesNotCollapseDuplicateNamedOutputsOntoOneMonitor() {
@@ -421,6 +563,115 @@ private func writeSettingsExport(
         #expect(reloaded)
     }
 
+    @Test func externalInPlaceTruncateAndWriteReloadsLiveSettings() async throws {
+        let defaults = makeTestDefaults()
+        let directory = configurationDirectoryForTests(defaults: defaults)
+        let settings = SettingsStore(
+            persistence: SettingsFilePersistence(directory: directory),
+            runtimeState: RuntimeStateStore(directory: directory)
+        )
+        var reloadCount = 0
+        settings.onExternalSettingsReloaded = {
+            reloadCount += 1
+        }
+
+        var export = settings.toExport()
+        export.focusFollowsWindowToMonitor = true
+        try writeSettingsExportInPlace(export, to: settings.settingsFileURL)
+
+        let reloaded = await waitForConditionForTests(
+            timeoutNanoseconds: 20_000_000_000
+        ) {
+            reloadCount == 1 && settings.focusFollowsWindowToMonitor == true
+        }
+
+        #expect(reloaded)
+    }
+
+    @Test func externalAtomicReplacementReloadsWhenSizeAndModificationDateMatchLastWrite() async throws {
+        let defaults = makeTestDefaults()
+        let directory = configurationDirectoryForTests(defaults: defaults)
+        let settings = SettingsStore(
+            persistence: SettingsFilePersistence(directory: directory),
+            runtimeState: RuntimeStateStore(directory: directory)
+        )
+        var reloadCount = 0
+        settings.onExternalSettingsReloaded = {
+            reloadCount += 1
+        }
+
+        let originalData = try Data(contentsOf: settings.settingsFileURL)
+        let originalModificationDate = try #require(
+            settings.settingsFileURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+        )
+
+        let export = try SettingsTOMLCodec.decode(originalData)
+        let sameDigitGapCandidates = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map(Double.init)
+        var replacementExport: SettingsExport?
+        var replacementData: Data?
+        for gapSize in sameDigitGapCandidates where gapSize != export.gapSize {
+            var candidate = export
+            candidate.gapSize = gapSize
+            let candidateData = try SettingsTOMLCodec.encode(candidate)
+            guard candidateData.count == originalData.count else { continue }
+            replacementExport = candidate
+            replacementData = candidateData
+            break
+        }
+        let unwrappedReplacementExport = try #require(replacementExport)
+        let unwrappedReplacementData = try #require(replacementData)
+
+        try atomicallyReplaceSettingsDataForTests(
+            unwrappedReplacementData,
+            at: settings.settingsFileURL,
+            preservingModificationDate: originalModificationDate
+        )
+
+        let reloaded = await waitForConditionForTests(
+            timeoutNanoseconds: 20_000_000_000
+        ) {
+            reloadCount == 1 && settings.gapSize == unwrappedReplacementExport.gapSize
+        }
+
+        #expect(reloaded)
+    }
+
+    @Test func atomicReplacementRearmsWatcherForLaterInPlaceEdits() async throws {
+        let defaults = makeTestDefaults()
+        let directory = configurationDirectoryForTests(defaults: defaults)
+        let settings = SettingsStore(
+            persistence: SettingsFilePersistence(directory: directory),
+            runtimeState: RuntimeStateStore(directory: directory)
+        )
+        var reloadCount = 0
+        settings.onExternalSettingsReloaded = {
+            reloadCount += 1
+        }
+
+        var replacementExport = settings.toExport()
+        replacementExport.gapSize = 7
+        try writeSettingsExport(replacementExport, to: settings.settingsFileURL)
+
+        let replaced = await waitForConditionForTests(
+            timeoutNanoseconds: 20_000_000_000
+        ) {
+            reloadCount == 1 && settings.gapSize == replacementExport.gapSize
+        }
+        #expect(replaced)
+
+        var inPlaceExport = settings.toExport()
+        inPlaceExport.focusFollowsWindowToMonitor = true
+        try writeSettingsExportInPlace(inPlaceExport, to: settings.settingsFileURL)
+
+        let inPlaceReloaded = await waitForConditionForTests(
+            timeoutNanoseconds: 20_000_000_000
+        ) {
+            reloadCount == 2 && settings.focusFollowsWindowToMonitor == true
+        }
+
+        #expect(inPlaceReloaded)
+    }
+
     @Test func invalidExternalEditLeavesCurrentSettingsUnchanged() async throws {
         let defaults = makeTestDefaults()
         let directory = configurationDirectoryForTests(defaults: defaults)
@@ -441,61 +692,5 @@ private func writeSettingsExport(
         #expect(reloadCount == 0)
         let rawData = try Data(contentsOf: settings.settingsFileURL)
         #expect(String(data: rawData, encoding: .utf8) == invalidPayload)
-    }
-}
-
-@Suite struct CodableBackwardCompatTests {
-    @Test func monitorNiriDecodesLegacyStringFields() throws {
-        let json = """
-        {
-            "id": "00000000-0000-0000-0000-000000000001",
-            "monitorName": "Test",
-            "centerFocusedColumn": "always",
-            "singleWindowAspectRatio": "4:3"
-        }
-        """
-        let decoded = try JSONDecoder().decode(MonitorNiriSettings.self, from: Data(json.utf8))
-        #expect(decoded.centerFocusedColumn == .always)
-        #expect(decoded.singleWindowAspectRatio == .ratio4x3)
-    }
-
-    @Test func monitorNiriDecodesUnknownEnumAsNil() throws {
-        let json = """
-        {
-            "id": "00000000-0000-0000-0000-000000000001",
-            "monitorName": "Test",
-            "centerFocusedColumn": "futureValue",
-            "singleWindowAspectRatio": "99:1"
-        }
-        """
-        let decoded = try JSONDecoder().decode(MonitorNiriSettings.self, from: Data(json.utf8))
-        #expect(decoded.centerFocusedColumn == nil)
-        #expect(decoded.singleWindowAspectRatio == nil)
-    }
-
-    @Test func monitorBarDecodesUnknownPositionAsNil() throws {
-        let json = """
-        {
-            "id": "00000000-0000-0000-0000-000000000001",
-            "monitorName": "Test",
-            "position": "unknownPosition",
-            "windowLevel": "unknownLevel"
-        }
-        """
-        let decoded = try JSONDecoder().decode(MonitorBarSettings.self, from: Data(json.utf8))
-        #expect(decoded.position == nil)
-        #expect(decoded.windowLevel == nil)
-    }
-
-    @Test func monitorDwindleDecodesUnknownRatioAsNil() throws {
-        let json = """
-        {
-            "id": "00000000-0000-0000-0000-000000000001",
-            "monitorName": "Test",
-            "singleWindowAspectRatio": "unknownRatio"
-        }
-        """
-        let decoded = try JSONDecoder().decode(MonitorDwindleSettings.self, from: Data(json.utf8))
-        #expect(decoded.singleWindowAspectRatio == nil)
     }
 }

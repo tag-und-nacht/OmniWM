@@ -36,9 +36,17 @@ struct DwindleAnimationFrames {
     let animationsActive: Bool
 }
 
+struct DwindleWindowSwapTarget: Equatable {
+    let currentToken: WindowToken
+    let neighborToken: WindowToken
+    let currentLogicalId: LogicalWindowId
+    let neighborLogicalId: LogicalWindowId
+}
+
 final class DwindleLayoutEngine {
     private var roots: [WorkspaceDescriptor.ID: DwindleNode] = [:]
     private var tokenToNode: [WindowToken: DwindleNode] = [:]
+    private var logicalIdToNode: [LogicalWindowId: DwindleNode] = [:]
     private var selectedNodeId: [WorkspaceDescriptor.ID: DwindleNodeId] = [:]
     private var preselection: [WorkspaceDescriptor.ID: Direction] = [:]
     private var windowConstraints: [WindowToken: WindowSizeConstraints] = [:]
@@ -73,6 +81,9 @@ final class DwindleLayoutEngine {
     func removeLayout(for workspaceId: WorkspaceDescriptor.ID) {
         if let root = roots.removeValue(forKey: workspaceId) {
             for window in root.collectAllWindows() {
+                if let node = tokenToNode[window], node.logicalId.isValid {
+                    logicalIdToNode.removeValue(forKey: node.logicalId)
+                }
                 tokenToNode.removeValue(forKey: window)
                 windowConstraints.removeValue(forKey: window)
             }
@@ -89,6 +100,55 @@ final class DwindleLayoutEngine {
         tokenToNode[token]
     }
 
+    func findNode(forLogicalId logicalId: LogicalWindowId) -> DwindleNode? {
+        guard logicalId.isValid else { return nil }
+        return logicalIdToNode[logicalId]
+    }
+
+    func assignLogicalId(_ logicalId: LogicalWindowId, to node: DwindleNode) {
+        guard logicalId.isValid else { return }
+        if let existing = logicalIdToNode[logicalId], existing !== node {
+            existing.logicalId = .invalid
+        }
+        if node.logicalId.isValid, node.logicalId != logicalId {
+            logicalIdToNode.removeValue(forKey: node.logicalId)
+        }
+        node.logicalId = logicalId
+        logicalIdToNode[logicalId] = node
+    }
+
+    @MainActor
+    func syncLogicalIds(from registry: any LogicalWindowRegistryReading) {
+        var currentLogicalIds: Set<LogicalWindowId> = []
+        var currentNodes: Set<ObjectIdentifier> = []
+
+        for (token, node) in tokenToNode {
+            switch registry.lookup(token: token) {
+            case let .current(logicalId):
+                assignLogicalId(logicalId, to: node)
+                currentLogicalIds.insert(logicalId)
+                currentNodes.insert(ObjectIdentifier(node))
+            case .staleAlias, .retired, .unknown:
+                if node.logicalId.isValid {
+                    logicalIdToNode.removeValue(forKey: node.logicalId)
+                    node.logicalId = .invalid
+                }
+            }
+        }
+
+        let indexedEntries = Array(logicalIdToNode)
+        for (logicalId, node) in indexedEntries {
+            if !currentLogicalIds.contains(logicalId)
+                || !currentNodes.contains(ObjectIdentifier(node))
+            {
+                logicalIdToNode.removeValue(forKey: logicalId)
+                if node.logicalId == logicalId {
+                    node.logicalId = .invalid
+                }
+            }
+        }
+    }
+
     func windowCount(in workspaceId: WorkspaceDescriptor.ID) -> Int {
         roots[workspaceId]?.collectAllWindows().count ?? 0
     }
@@ -97,6 +157,19 @@ final class DwindleLayoutEngine {
         guard let nodeId = selectedNodeId[workspaceId],
               let root = roots[workspaceId] else { return nil }
         return findNodeById(nodeId, in: root)
+    }
+
+    func fullscreenWindowTokens(in workspaceId: WorkspaceDescriptor.ID) -> Set<WindowToken> {
+        guard let root = roots[workspaceId] else { return [] }
+        return Set(root.collectAllLeaves().compactMap { node in
+            guard case let .leaf(handle, fullscreen) = node.kind,
+                  fullscreen,
+                  let handle
+            else {
+                return nil
+            }
+            return handle
+        })
     }
 
     func setSelectedNode(_ node: DwindleNode?, in workspaceId: WorkspaceDescriptor.ID) {
@@ -186,7 +259,11 @@ final class DwindleLayoutEngine {
             )
         }
 
-        let existingLeaf = DwindleNode(kind: .leaf(handle: existingHandle, fullscreen: fullscreen))
+        let existingLogicalId = leaf.logicalId
+        let existingLeaf = DwindleNode(
+            kind: .leaf(handle: existingHandle, fullscreen: fullscreen),
+            logicalId: existingLogicalId
+        )
         let newLeaf = DwindleNode(kind: .leaf(handle: newWindow, fullscreen: false))
         if let targetRect {
             newLeaf.insertionSeed = DwindleInsertionSeed(
@@ -197,6 +274,7 @@ final class DwindleLayoutEngine {
         }
 
         leaf.kind = .split(orientation: orientation, ratio: settings.defaultSplitRatio)
+        leaf.logicalId = .invalid
 
         if newFirst {
             leaf.replaceChildren(first: newLeaf, second: existingLeaf)
@@ -206,6 +284,9 @@ final class DwindleLayoutEngine {
 
         if let existingHandle {
             tokenToNode[existingHandle] = existingLeaf
+            if existingLogicalId.isValid {
+                logicalIdToNode[existingLogicalId] = existingLeaf
+            }
         }
 
         return newLeaf
@@ -259,6 +340,11 @@ final class DwindleLayoutEngine {
         guard let node = tokenToNode.removeValue(forKey: token) else { return }
         windowConstraints.removeValue(forKey: token)
 
+        if node.logicalId.isValid {
+            logicalIdToNode.removeValue(forKey: node.logicalId)
+            node.logicalId = .invalid
+        }
+
         if case .leaf = node.kind {
             node.kind = .leaf(handle: nil, fullscreen: false)
         }
@@ -308,6 +394,7 @@ final class DwindleLayoutEngine {
         node.detach()
 
         parent.kind = sibling.kind
+        parent.logicalId = sibling.logicalId
         parent.children = sibling.children
         for child in parent.children {
             child.parent = parent
@@ -316,6 +403,9 @@ final class DwindleLayoutEngine {
         for window in sibling.collectAllWindows() {
             if let leafNode = findLeafContaining(window, in: parent) {
                 tokenToNode[window] = leafNode
+                if leafNode.logicalId.isValid {
+                    logicalIdToNode[leafNode.logicalId] = leafNode
+                }
             }
         }
 
@@ -392,6 +482,76 @@ final class DwindleLayoutEngine {
         }
 
         return toRemove
+    }
+
+    func syncWindows(
+        _ windows: [LayoutWindowSnapshot],
+        in workspaceId: WorkspaceDescriptor.ID,
+        focusedToken: WindowToken?,
+        bootstrapScreen: CGRect? = nil
+    ) -> Set<WindowToken> {
+        reconcileLogicalMembership(for: windows, in: workspaceId)
+        let removed = syncWindows(
+            windows.map(\.token),
+            in: workspaceId,
+            focusedToken: focusedToken,
+            bootstrapScreen: bootstrapScreen
+        )
+        for window in windows {
+            guard let node = tokenToNode[window.token] else { continue }
+            assignLogicalId(window.logicalId, to: node)
+        }
+        return removed
+    }
+
+    private func reconcileLogicalMembership(
+        for windows: [LayoutWindowSnapshot],
+        in workspaceId: WorkspaceDescriptor.ID
+    ) {
+        for window in windows where window.logicalId.isValid {
+            guard let node = logicalIdToNode[window.logicalId],
+                  nodeBelongsToWorkspace(node, workspaceId),
+                  node.windowToken != window.token
+            else {
+                continue
+            }
+            rebindNode(node, to: window.token)
+        }
+    }
+
+    private func rebindNode(_ node: DwindleNode, to newToken: WindowToken) {
+        guard case let .leaf(oldToken, fullscreen) = node.kind,
+              oldToken != newToken
+        else {
+            return
+        }
+        if let existing = tokenToNode[newToken], existing !== node {
+            return
+        }
+        if let oldToken {
+            tokenToNode.removeValue(forKey: oldToken)
+            if let constraints = windowConstraints.removeValue(forKey: oldToken) {
+                windowConstraints[newToken] = constraints
+            }
+        }
+        tokenToNode[newToken] = node
+        node.kind = .leaf(handle: newToken, fullscreen: fullscreen)
+    }
+
+    private func nodeBelongsToWorkspace(
+        _ candidate: DwindleNode,
+        _ workspaceId: WorkspaceDescriptor.ID
+    ) -> Bool {
+        guard let root = roots[workspaceId] else { return false }
+        return containsNode(candidate, in: root)
+    }
+
+    private func containsNode(_ candidate: DwindleNode, in root: DwindleNode) -> Bool {
+        if root === candidate { return true }
+        for child in root.children where containsNode(candidate, in: child) {
+            return true
+        }
+        return false
     }
 
     func calculateLayout(
@@ -821,19 +981,71 @@ final class DwindleLayoutEngine {
         return neighborHandle
     }
 
-    func swapWindows(direction: Direction, in workspaceId: WorkspaceDescriptor.ID) -> Bool {
+    func swapTarget(
+        direction: Direction,
+        in workspaceId: WorkspaceDescriptor.ID
+    ) -> DwindleWindowSwapTarget? {
         guard let current = selectedNode(in: workspaceId),
-              case let .leaf(currentHandle, currentFullscreen) = current.kind,
+              case let .leaf(currentHandle, _) = current.kind,
               let ch = currentHandle,
               let neighborHandle = findGeometricNeighbor(from: ch, direction: direction, in: workspaceId),
               let neighbor = findNode(for: neighborHandle),
+              case let .leaf(nh, _) = neighbor.kind,
+              let neighborToken = nh
+        else {
+            return nil
+        }
+
+        return DwindleWindowSwapTarget(
+            currentToken: ch,
+            neighborToken: neighborToken,
+            currentLogicalId: current.logicalId,
+            neighborLogicalId: neighbor.logicalId
+        )
+    }
+
+    func swapWindows(
+        target: DwindleWindowSwapTarget,
+        in workspaceId: WorkspaceDescriptor.ID
+    ) -> Bool {
+        guard let current = findNode(for: target.currentToken),
+              let neighbor = findNode(for: target.neighborToken),
+              nodeBelongsToWorkspace(current, workspaceId),
+              nodeBelongsToWorkspace(neighbor, workspaceId),
+              current.logicalId == target.currentLogicalId,
+              neighbor.logicalId == target.neighborLogicalId
+        else {
+            return false
+        }
+        return swapLeafWindows(current: current, neighbor: neighbor, in: workspaceId)
+    }
+
+    func swapWindows(direction: Direction, in workspaceId: WorkspaceDescriptor.ID) -> Bool {
+        guard let target = swapTarget(direction: direction, in: workspaceId) else {
+            return false
+        }
+        return swapWindows(target: target, in: workspaceId)
+    }
+
+    private func swapLeafWindows(
+        current: DwindleNode,
+        neighbor: DwindleNode,
+        in workspaceId: WorkspaceDescriptor.ID
+    ) -> Bool {
+        guard case let .leaf(currentHandle, currentFullscreen) = current.kind,
+              let ch = currentHandle,
               case let .leaf(nh, neighborFullscreen) = neighbor.kind
         else {
             return false
         }
 
+        let currentLogicalId = current.logicalId
+        let neighborLogicalId = neighbor.logicalId
+
         current.kind = .leaf(handle: nh, fullscreen: neighborFullscreen)
         neighbor.kind = .leaf(handle: currentHandle, fullscreen: currentFullscreen)
+        current.logicalId = neighborLogicalId
+        neighbor.logicalId = currentLogicalId
 
         let currentCachedFrame = current.cachedFrame
         current.cachedFrame = neighbor.cachedFrame
@@ -850,8 +1062,16 @@ final class DwindleLayoutEngine {
         neighbor.sizeHAnimation = nil
 
         tokenToNode[ch] = neighbor
+        if currentLogicalId.isValid {
+            logicalIdToNode[currentLogicalId] = neighbor
+        }
         if let nh {
             tokenToNode[nh] = current
+            if neighborLogicalId.isValid {
+                logicalIdToNode[neighborLogicalId] = current
+            }
+        } else if neighborLogicalId.isValid {
+            logicalIdToNode.removeValue(forKey: neighborLogicalId)
         }
 
         selectedNodeId[workspaceId] = neighbor.id
@@ -915,6 +1135,7 @@ final class DwindleLayoutEngine {
 
         let preservedConstraints = windowConstraints[token]
         let preservedFullscreen = sourceNode.isFullscreen
+        let preservedLogicalId = sourceNode.logicalId
 
         removeWindow(token: token, from: workspaceId)
 
@@ -939,6 +1160,9 @@ final class DwindleLayoutEngine {
         }
         if preservedFullscreen {
             reinsertedLeaf.kind = .leaf(handle: token, fullscreen: true)
+        }
+        if preservedLogicalId.isValid {
+            assignLogicalId(preservedLogicalId, to: reinsertedLeaf)
         }
 
         return true

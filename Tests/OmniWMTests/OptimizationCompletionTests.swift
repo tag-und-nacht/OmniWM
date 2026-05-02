@@ -32,6 +32,16 @@ private func makeOverviewWindowItem(
     )
 }
 
+private func windowTokens(
+    in workspaceId: WorkspaceDescriptor.ID,
+    model: WindowModel
+) -> [WindowToken] {
+    model.allEntries()
+        .filter { $0.workspaceId == workspaceId }
+        .sorted { $0.windowId < $1.windowId }
+        .map(\.token)
+}
+
 @Suite struct OptimizationCompletionTests {
     @MainActor
     @Test func appInfoCacheEvictRemovesCachedEntry() {
@@ -48,7 +58,7 @@ private func makeOverviewWindowItem(
         #expect(cache.hasCachedInfo(for: pid) == false)
     }
 
-    @Test func windowModelWorkspaceReassignmentKeepsOrderAndNoDuplicates() {
+    @Test func windowModelWorkspaceReassignmentUpdatesEntryWorkspaceAndNoDuplicates() {
         let model = WindowModel()
         let ws1 = WorkspaceDescriptor.ID()
         let ws2 = WorkspaceDescriptor.ID()
@@ -56,17 +66,17 @@ private func makeOverviewWindowItem(
         let handle1 = model.upsert(window: makeAXWindowRef(windowId: 101), pid: 77, windowId: 101, workspace: ws1)
         let handle2 = model.upsert(window: makeAXWindowRef(windowId: 102), pid: 77, windowId: 102, workspace: ws1)
 
-        #expect(model.windows(in: ws1).map(\.token) == [handle1, handle2])
+        #expect(windowTokens(in: ws1, model: model) == [handle1, handle2])
 
         model.updateWorkspace(for: handle1, workspace: ws2)
-        #expect(model.windows(in: ws1).map(\.token) == [handle2])
-        #expect(model.windows(in: ws2).map(\.token) == [handle1])
+        #expect(windowTokens(in: ws1, model: model) == [handle2])
+        #expect(windowTokens(in: ws2, model: model) == [handle1])
 
         model.updateWorkspace(for: handle1, workspace: ws2)
-        #expect(model.windows(in: ws2).map(\.token) == [handle1])
+        #expect(windowTokens(in: ws2, model: model) == [handle1])
 
         model.updateWorkspace(for: handle1, workspace: ws1)
-        #expect(model.windows(in: ws1).map(\.token) == [handle2, handle1])
+        #expect(windowTokens(in: ws1, model: model) == [handle1, handle2])
     }
 
     @Test func windowModelConfirmedMissingKeysMaintainIndexConsistency() {
@@ -86,11 +96,11 @@ private func makeOverviewWindowItem(
             _ = model.removeWindow(key: key)
         }
         #expect(model.entry(forWindowId: 202) == nil)
-        #expect(model.windows(in: ws1).map(\.windowId) == [201, 203])
+        #expect(windowTokens(in: ws1, model: model) == [h1, h3])
 
         model.updateWorkspace(for: h3, workspace: ws2)
-        #expect(model.windows(in: ws1).map(\.token) == [h1])
-        #expect(model.windows(in: ws2).map(\.token) == [h3])
+        #expect(windowTokens(in: ws1, model: model) == [h1])
+        #expect(windowTokens(in: ws2, model: model) == [h3])
     }
 
     @Test func windowModelConfirmedMissingKeysRequireConsecutiveMissesWhenConfigured() {
@@ -148,7 +158,7 @@ private func makeOverviewWindowItem(
 
         #expect(token1 == token2)
         #expect(handle1 === handle2)
-        #expect(model.windows(in: workspaceId).count == 1)
+        #expect(windowTokens(in: workspaceId, model: model).count == 1)
         #expect(model.entry(for: token1)?.axRef.windowId == secondRef.windowId)
     }
 

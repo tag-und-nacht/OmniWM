@@ -80,7 +80,7 @@ private func prepareIPCNiriState(
         let router = makeIPCCommandRouter(for: controller)
 
         let result = router.handle(
-            IPCWorkspaceRequest(name: .focusName, workspaceName: "2")
+            IPCWorkspaceRequest(name: .focusName, target: WorkspaceTarget(parsing: "2"))
         )
 
         #expect(result == .executed)
@@ -97,7 +97,7 @@ private func prepareIPCNiriState(
         let router = makeIPCCommandRouter(for: controller)
 
         let result = router.handle(
-            IPCWorkspaceRequest(name: .focusName, workspaceName: "Code")
+            IPCWorkspaceRequest(name: .focusName, target: WorkspaceTarget(parsing: "Code"))
         )
 
         #expect(result == .executed)
@@ -114,7 +114,7 @@ private func prepareIPCNiriState(
         let router = makeIPCCommandRouter(for: controller)
 
         let result = router.handle(
-            IPCWorkspaceRequest(name: .focusName, workspaceName: "10")
+            IPCWorkspaceRequest(name: .focusName, target: WorkspaceTarget(parsing: "10"))
         )
 
         #expect(result == .executed)
@@ -131,7 +131,7 @@ private func prepareIPCNiriState(
         let router = makeIPCCommandRouter(for: controller)
 
         let result = router.handle(
-            IPCWorkspaceRequest(name: .focusName, workspaceName: "Code")
+            IPCWorkspaceRequest(name: .focusName, target: WorkspaceTarget(parsing: "Code"))
         )
 
         #expect(result == .invalidArguments)
@@ -231,6 +231,39 @@ private func prepareIPCNiriState(
         #expect(controller.workspaceManager.workspace(for: token) == targetWorkspaceId)
     }
 
+    @Test func moveToWorkspaceMovesFocusedFloatingWindowWithoutNiriNode() throws {
+        let controller = makeLayoutPlanTestController()
+        controller.enableNiriLayout()
+        controller.syncMonitorsToNiriEngine()
+        let router = makeIPCCommandRouter(for: controller)
+        let sourceWorkspaceId = try #require(controller.workspaceManager.workspaceId(for: "1", createIfMissing: false))
+        let targetWorkspaceId = try #require(controller.workspaceManager.workspaceId(for: "2", createIfMissing: false))
+        let monitor = try #require(controller.workspaceManager.monitor(for: sourceWorkspaceId))
+        let floatingWindow = addFloatingLayoutPlanTestWindow(
+            to: controller,
+            workspaceId: sourceWorkspaceId,
+            referenceMonitorId: monitor.id,
+            windowId: 2002,
+            frame: CGRect(x: 100, y: 120, width: 480, height: 320),
+            normalizedOrigin: CGPoint(x: 0.1, y: 0.2)
+        )
+        _ = controller.workspaceManager.setManagedFocus(floatingWindow.token, in: sourceWorkspaceId, onMonitor: monitor.id)
+        #expect(controller.niriEngine?.findNode(for: floatingWindow.token) == nil)
+
+        let result = router.handle(
+            .moveToWorkspace(workspaceNumber: 2)
+        )
+
+        let graph = controller.workspaceManager.workspaceGraphSnapshot()
+        #expect(result == .executed)
+        #expect(controller.workspaceManager.workspace(for: floatingWindow.token) == targetWorkspaceId)
+        #expect(controller.workspaceManager.windowMode(for: floatingWindow.token) == .floating)
+        #expect(controller.workspaceManager.floatingState(for: floatingWindow.token) == floatingWindow.floatingState)
+        #expect(!graph.floatingMembership(in: sourceWorkspaceId).contains { $0.logicalId == floatingWindow.logicalId })
+        #expect(graph.floatingMembership(in: targetWorkspaceId).contains { $0.logicalId == floatingWindow.logicalId })
+        #expect(controller.workspaceManager.lastFloatingFocusedToken(in: targetWorkspaceId) == floatingWindow.token)
+    }
+
     @Test func moveToWorkspaceSupportsWorkspace10() throws {
         let controller = makeLayoutPlanTestController(
             workspaceConfigurations: [
@@ -305,6 +338,17 @@ private func prepareIPCNiriState(
         #expect(result == .ignoredDisabled)
     }
 
+    @Test func disabledControllerRejectsColumnLayoutWindowAndUICommands() {
+        let controller = makeLayoutPlanTestController()
+        controller.isEnabled = false
+        let router = makeIPCCommandRouter(for: controller)
+
+        #expect(router.handle(.moveColumn(direction: .right)) == .ignoredDisabled)
+        #expect(router.handle(.toggleSplit) == .ignoredDisabled)
+        #expect(router.handle(.toggleFullscreen) == .ignoredDisabled)
+        #expect(router.handle(.openCommandPalette) == .ignoredDisabled)
+    }
+
     @Test func setWorkspaceLayoutUpdatesActiveWorkspaceConfiguration() {
         let controller = makeLayoutPlanTestController()
         let router = makeIPCCommandRouter(for: controller)
@@ -329,11 +373,33 @@ private func prepareIPCNiriState(
         let router = makeIPCCommandRouter(for: controller)
 
         let result = router.handle(
-            IPCWorkspaceRequest(name: .focusName, workspaceName: "2")
+            IPCWorkspaceRequest(name: .focusName, target: WorkspaceTarget(parsing: "2"))
         )
 
         #expect(controller.isOverviewOpen())
         #expect(result == .ignoredOverview)
+    }
+
+    @Test func overviewRejectsColumnLayoutWindowAndUICommandsButAllowsToggleOverview() {
+        let controller = makeLayoutPlanTestController()
+        controller.setAnimationsEnabled(false, persist: false)
+        defer {
+            if controller.isOverviewOpen() {
+                controller.toggleOverview()
+            }
+            resetSharedControllerStateForTests()
+        }
+        controller.toggleOverview()
+        let router = makeIPCCommandRouter(for: controller)
+
+        #expect(router.handle(.moveColumn(direction: .right)) == .ignoredOverview)
+        #expect(router.handle(.toggleSplit) == .ignoredOverview)
+        #expect(router.handle(.toggleFullscreen) == .ignoredOverview)
+        #expect(router.handle(.openCommandPalette) == .ignoredOverview)
+
+        let toggleResult = router.handle(.toggleOverview)
+        #expect(toggleResult == .executed)
+        #expect(!controller.isOverviewOpen())
     }
 
     @Test func switchWorkspaceRejectsNonPositiveNumbers() {
@@ -402,7 +468,7 @@ private func prepareIPCNiriState(
         let router = makeIPCCommandRouter(for: controller)
 
         let result = router.handle(
-            IPCWorkspaceRequest(name: .focusName, workspaceName: "999")
+            IPCWorkspaceRequest(name: .focusName, target: WorkspaceTarget(parsing: "999"))
         )
 
         #expect(result == .notFound)

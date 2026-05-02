@@ -47,7 +47,9 @@ private func waitUntilCGSEvents(
 }
 
 @Suite(.serialized) struct CGSEventObserverTests {
-    @Test @MainActor func malformedAndShortPayloadsAreDroppedSafely() {
+    @Test @MainActor func malformedAndShortPayloadsAreDroppedSafely() async {
+        let cgsObserverLease = await acquireCGSEventObserverLeaseForTests()
+        defer { cgsObserverLease.release() }
         let observer = CGSEventObserver.shared
         let recorder = RecordingCGSEventDelegate()
         observer.resetDebugStateForTests()
@@ -71,7 +73,9 @@ private func waitUntilCGSEvents(
         #expect(observer.cgsDebugSnapshot().malformedPayloadDrops == 2)
     }
 
-    @Test @MainActor func rawPayloadsDecodeIntoTypedEvents() {
+    @Test @MainActor func rawPayloadsDecodeIntoTypedEvents() async {
+        let cgsObserverLease = await acquireCGSEventObserverLeaseForTests()
+        defer { cgsObserverLease.release() }
         let observer = CGSEventObserver.shared
         let recorder = RecordingCGSEventDelegate()
         observer.resetDebugStateForTests()
@@ -97,7 +101,9 @@ private func waitUntilCGSEvents(
         ])
     }
 
-    @Test @MainActor func frameChangedBurstCoalescesWhileTopologyRemainsFIFO() {
+    @Test @MainActor func frameChangedBurstCoalescesWhileTopologyRemainsFIFO() async {
+        let cgsObserverLease = await acquireCGSEventObserverLeaseForTests()
+        defer { cgsObserverLease.release() }
         let observer = CGSEventObserver.shared
         let recorder = RecordingCGSEventDelegate()
         observer.resetDebugStateForTests()
@@ -127,7 +133,9 @@ private func waitUntilCGSEvents(
         #expect(snapshot.drainedEvents == 4)
     }
 
-    @Test @MainActor func closeClearsPendingFrameChangeBeforeDelivery() {
+    @Test @MainActor func closeClearsPendingFrameChangeBeforeDelivery() async {
+        let cgsObserverLease = await acquireCGSEventObserverLeaseForTests()
+        defer { cgsObserverLease.release() }
         let observer = CGSEventObserver.shared
         let recorder = RecordingCGSEventDelegate()
         observer.resetDebugStateForTests()
@@ -149,7 +157,9 @@ private func waitUntilCGSEvents(
         #expect(observer.cgsDebugSnapshot().clearedFrameEventsOnDestroy == 1)
     }
 
-    @Test @MainActor func destroyClearsPendingFrameChangeBeforeDelivery() {
+    @Test @MainActor func destroyClearsPendingFrameChangeBeforeDelivery() async {
+        let cgsObserverLease = await acquireCGSEventObserverLeaseForTests()
+        defer { cgsObserverLease.release() }
         let observer = CGSEventObserver.shared
         let recorder = RecordingCGSEventDelegate()
         observer.resetDebugStateForTests()
@@ -172,6 +182,8 @@ private func waitUntilCGSEvents(
     }
 
     @Test @MainActor func scheduledDrainProcessesOneBurstWithoutManualFlush() async {
+        let cgsObserverLease = await acquireCGSEventObserverLeaseForTests()
+        defer { cgsObserverLease.release() }
         let observer = CGSEventObserver.shared
         let recorder = RecordingCGSEventDelegate()
         observer.resetDebugStateForTests()
@@ -202,7 +214,9 @@ private func waitUntilCGSEvents(
         #expect(snapshot.drainedEvents == 3)
     }
 
-    @Test @MainActor func releasingReferenceCountedSubscriptionDropsOwnershipWhenUnsubscribeIsUnavailable() {
+    @Test @MainActor func releasingReferenceCountedSubscriptionDropsOwnershipWhenUnsubscribeIsUnavailable() async {
+        let cgsObserverLease = await acquireCGSEventObserverLeaseForTests()
+        defer { cgsObserverLease.release() }
         let observer = CGSEventObserver.shared
         var requests: [[UInt32]] = []
         var unrequests: [[UInt32]] = []
@@ -234,7 +248,9 @@ private func waitUntilCGSEvents(
         #expect(observer.windowNotificationStateForTests().retainedWindowSubscriptionCounts == [501: 1])
     }
 
-    @Test @MainActor func successfulUnderlyingUnsubscribeClearsStickyRequestState() {
+    @Test @MainActor func successfulUnderlyingUnsubscribeClearsStickyRequestState() async {
+        let cgsObserverLease = await acquireCGSEventObserverLeaseForTests()
+        defer { cgsObserverLease.release() }
         let observer = CGSEventObserver.shared
         var requests: [[UInt32]] = []
         var unrequests: [[UInt32]] = []

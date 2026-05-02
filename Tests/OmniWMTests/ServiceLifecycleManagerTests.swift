@@ -10,6 +10,16 @@ import Testing
 
 private let lifecycleIPCCommandRouterSessionToken = "service-lifecycle-tests"
 
+@MainActor
+private var _retainedLifecycleTestRuntimes: [WMRuntime] = []
+
+@MainActor
+private func makeLifecycleTestController(settings: SettingsStore) -> WMController {
+    let runtime = WMRuntime(settings: settings)
+    _retainedLifecycleTestRuntimes.append(runtime)
+    return runtime.controller
+}
+
 private func makeLifecycleTestDefaults() -> UserDefaults {
     let suiteName = "com.omniwm.lifecycle.test.\(UUID().uuidString)"
     return UserDefaults(suiteName: suiteName)!
@@ -75,7 +85,7 @@ private func waitUntilServiceLifecycleTest(
     @Test @MainActor func accessibilityGrantStartsServicesAfterDeniedStartup() async {
         let defaults = makeLifecycleTestDefaults()
         let settings = SettingsStore(defaults: defaults)
-        let controller = WMController(settings: settings)
+        let controller = makeLifecycleTestController(settings: settings)
         let lifecycleManager = controller.serviceLifecycleManager
         var currentPermissionGranted = false
         let permissionStream = makeLifecyclePermissionStream(initial: false)
@@ -123,7 +133,7 @@ private func waitUntilServiceLifecycleTest(
             WorkspaceConfiguration(name: "1", monitorAssignment: .main),
             WorkspaceConfiguration(name: "2", monitorAssignment: .main)
         ]
-        let controller = WMController(settings: settings)
+        let controller = makeLifecycleTestController(settings: settings)
         let lifecycleManager = controller.serviceLifecycleManager
         let router = makeLifecycleIPCCommandRouter(for: controller)
         var currentPermissionGranted = true
@@ -157,7 +167,7 @@ private func waitUntilServiceLifecycleTest(
             controller.hasStartedServices && controller.isEnabled && controller.hotkeysEnabled
         }
 
-        #expect(controller.commandHandler.performCommand(.focus(.left)) == .executed)
+        #expect(controller.runtime!.dispatchHotkey(.focus(.left)) == .executed)
         #expect(router.handle(.setWorkspaceLayout(layout: .dwindle)) == .executed)
         #expect(settings.layoutType(for: "1") == .dwindle)
 
@@ -168,7 +178,7 @@ private func waitUntilServiceLifecycleTest(
             controller.hasStartedServices && !controller.isEnabled && !controller.hotkeysEnabled
         }
 
-        #expect(controller.commandHandler.performCommand(.focus(.left)) == .ignoredDisabled)
+        #expect(controller.runtime!.dispatchHotkey(.focus(.left)) == .ignoredDisabled)
         #expect(router.handle(.setWorkspaceLayout(layout: .dwindle)) == .ignoredDisabled)
         #expect(controller.desiredEnabled)
         #expect(controller.desiredHotkeysEnabled)
@@ -181,7 +191,7 @@ private func waitUntilServiceLifecycleTest(
         }
 
         #expect(controller.workspaceManager.setActiveWorkspace(workspaceTwo, on: monitor.id))
-        #expect(controller.commandHandler.performCommand(.focus(.left)) == .executed)
+        #expect(controller.runtime!.dispatchHotkey(.focus(.left)) == .executed)
         #expect(router.handle(.setWorkspaceLayout(layout: .dwindle)) == .executed)
         #expect(settings.layoutType(for: "2") == .dwindle)
         #expect(controller.desiredEnabled)
@@ -193,7 +203,7 @@ private func waitUntilServiceLifecycleTest(
     @Test @MainActor func workspaceActivationObserversUpdateFrontmostMirrorAndMetrics() async {
         let defaults = makeLifecycleTestDefaults()
         let settings = SettingsStore(defaults: defaults)
-        let controller = WMController(settings: settings)
+        let controller = makeLifecycleTestController(settings: settings)
         let lifecycleManager = controller.serviceLifecycleManager
         let currentPermissionGranted = true
         let permissionStream = makeLifecyclePermissionStream(initial: true)
@@ -243,7 +253,7 @@ private func waitUntilServiceLifecycleTest(
     @Test @MainActor func secureInputSuppressionPersistsAcrossPermissionRestoreUntilSecureInputEnds() async {
         let defaults = makeLifecycleTestDefaults()
         let settings = SettingsStore(defaults: defaults)
-        let controller = WMController(settings: settings)
+        let controller = makeLifecycleTestController(settings: settings)
         let lifecycleManager = controller.serviceLifecycleManager
         var currentPermissionGranted = true
         let permissionStream = makeLifecyclePermissionStream(initial: true)
@@ -326,7 +336,7 @@ private func waitUntilServiceLifecycleTest(
             WorkspaceConfiguration(name: "3", monitorAssignment: .secondary)
         ]
 
-        let controller = WMController(settings: settings)
+        let controller = makeLifecycleTestController(settings: settings)
         let lifecycleManager = ServiceLifecycleManager(controller: controller)
 
         let oldLeft = makeLifecycleMonitor(displayId: 100, name: "L", x: 0, y: 0)
@@ -369,7 +379,7 @@ private func waitUntilServiceLifecycleTest(
             WorkspaceConfiguration(name: "2", monitorAssignment: .main)
         ]
 
-        let controller = WMController(settings: settings)
+        let controller = makeLifecycleTestController(settings: settings)
         let lifecycleManager = ServiceLifecycleManager(controller: controller)
         let monitor = makeLifecycleMonitor(displayId: 100, name: "Main", x: 0, y: 0)
         controller.workspaceManager.applyMonitorConfigurationChange([monitor])
@@ -458,7 +468,7 @@ private func waitUntilServiceLifecycleTest(
             WorkspaceConfiguration(name: "2", monitorAssignment: .secondary)
         ]
 
-        let controller = WMController(settings: settings)
+        let controller = makeLifecycleTestController(settings: settings)
         let lifecycleManager = ServiceLifecycleManager(controller: controller)
 
         let oldLeft = makeLifecycleMonitor(displayId: 100, name: "L", x: 0, y: 0)
@@ -500,7 +510,7 @@ private func waitUntilServiceLifecycleTest(
             WorkspaceConfiguration(name: "2", monitorAssignment: .secondary)
         ]
 
-        let controller = WMController(settings: settings)
+        let controller = makeLifecycleTestController(settings: settings)
         let lifecycleManager = ServiceLifecycleManager(controller: controller)
 
         let left = makeLifecycleMonitor(displayId: 100, name: "Left", x: 0, y: 0)
@@ -551,7 +561,7 @@ private func waitUntilServiceLifecycleTest(
             WorkspaceConfiguration(name: "1", monitorAssignment: .main)
         ]
 
-        let controller = WMController(settings: settings)
+        let controller = makeLifecycleTestController(settings: settings)
         let lifecycleManager = ServiceLifecycleManager(controller: controller)
         let oldMonitor = makeLifecycleMonitor(displayId: 100, name: "Old", x: 0, y: 0)
         controller.workspaceManager.applyMonitorConfigurationChange([oldMonitor])
@@ -580,7 +590,7 @@ private func waitUntilServiceLifecycleTest(
     @Test @MainActor func monitorTopologyChangesRecomputeMouseWarpPolicyAndPreserveSavedOrder() {
         let defaults = makeLifecycleTestDefaults()
         let settings = SettingsStore(defaults: defaults)
-        let controller = WMController(settings: settings)
+        let controller = makeLifecycleTestController(settings: settings)
         let lifecycleManager = ServiceLifecycleManager(controller: controller)
 
         let left = makeLifecycleMonitor(displayId: 100, name: "Left", x: 0, y: 0)
@@ -593,7 +603,7 @@ private func waitUntilServiceLifecycleTest(
         )
 
         #expect(controller.isMouseWarpPolicyEnabled)
-        #expect(settings.mouseWarpMonitorOrder == [OutputId(from: left), OutputId(from: right)])
+        #expect(settings.mouseWarpMonitorOrder == [])
         #expect(settings.effectiveMouseWarpMonitorOrder(for: [left, right]) == [left.id, right.id])
 
         lifecycleManager.applyMonitorConfigurationChanged(
@@ -602,7 +612,7 @@ private func waitUntilServiceLifecycleTest(
         )
 
         #expect(!controller.isMouseWarpPolicyEnabled)
-        #expect(settings.mouseWarpMonitorOrder == [OutputId(from: left), OutputId(from: right)])
+        #expect(settings.mouseWarpMonitorOrder == [])
         #expect(settings.effectiveMouseWarpMonitorOrder(for: [left]) == [left.id])
 
         lifecycleManager.applyMonitorConfigurationChanged(
@@ -611,7 +621,7 @@ private func waitUntilServiceLifecycleTest(
         )
 
         #expect(controller.isMouseWarpPolicyEnabled)
-        #expect(settings.mouseWarpMonitorOrder == [OutputId(from: left), OutputId(from: right)])
+        #expect(settings.mouseWarpMonitorOrder == [])
         #expect(settings.effectiveMouseWarpMonitorOrder(for: [left, right]) == [left.id, right.id])
     }
 }

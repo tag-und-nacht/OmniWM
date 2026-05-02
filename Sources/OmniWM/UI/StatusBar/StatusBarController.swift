@@ -1,9 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-only
 import AppKit
+import OSLog
+
+private let statusBarRecoveryLog = Logger(
+    subsystem: "com.omniwm",
+    category: "StatusBar.Recovery"
+)
 
 @MainActor
 final class StatusBarController: NSObject {
-    nonisolated static let mainAutosaveName = "omniwm_main"
+    nonisolated static let mainAutosaveName = StatusItemPersistence.OwnedItem.main.autosaveName
 
     private var statusItem: NSStatusItem?
     private var menuBuilder: StatusBarMenuBuilder?
@@ -39,13 +45,60 @@ final class StatusBarController: NSObject {
         installOwnedStatusItems()
     }
 
-    nonisolated static func clearOwnedPreferredPositions(defaults: UserDefaults = .standard) {
-        defaults.removeObject(forKey: preferredPositionKey(for: mainAutosaveName))
-        defaults.removeObject(forKey: preferredPositionKey(for: HiddenBarController.separatorAutosaveName))
+    @discardableResult
+    nonisolated static func clearInvalidOwnedPreferredPositions(
+        defaults: UserDefaults = .standard,
+        screenFrames: [CGRect]
+    ) -> Bool {
+        StatusItemPersistence.clearInvalidOwnedPreferredPositions(
+            defaults: defaults,
+            screenFrames: screenFrames
+        )
     }
 
-    nonisolated private static func preferredPositionKey(for autosaveName: String) -> String {
-        "NSStatusItem Preferred Position \(autosaveName)"
+    nonisolated static func clearOwnedPreferredPositions(defaults: UserDefaults = .standard) {
+        StatusItemPersistence.clearOwnedPreferredPositions(defaults: defaults)
+    }
+
+    @discardableResult
+    nonisolated static func clearInvalidOwnedVisibilityPreferences(defaults: UserDefaults = .standard) -> Bool {
+        StatusItemPersistence.clearInvalidOwnedVisibilityPreferences(defaults: defaults)
+    }
+
+    nonisolated static func clearOwnedVisibilityPreferences(defaults: UserDefaults = .standard) {
+        StatusItemPersistence.clearOwnedVisibilityPreferences(defaults: defaults)
+    }
+
+    nonisolated static func storedPreferredPositionIsVisible(
+        _ storedValue: Any?,
+        screenFrames: [CGRect]
+    ) -> Bool {
+        StatusItemPersistence.storedPreferredPositionCanBeKept(
+            storedValue,
+            screenFrames: screenFrames
+        )
+    }
+
+    nonisolated static func preferredPositionXIsVisible(
+        _ positionX: CGFloat,
+        screenFrames: [CGRect]
+    ) -> Bool {
+        StatusItemPersistence.preferredPositionXCanBeKept(
+            positionX,
+            screenFrames: screenFrames
+        )
+    }
+
+    nonisolated static func storedVisibilityPreferenceIsVisible(_ storedValue: Any?) -> Bool {
+        StatusItemPersistence.storedVisibilityPreferenceCanBeKept(storedValue)
+    }
+
+    nonisolated static func preferredPositionKeyForTests(for autosaveName: String) -> String {
+        StatusItemPersistence.preferredPositionKey(for: autosaveName)
+    }
+
+    nonisolated static func visibilityKeysForTests(for autosaveName: String) -> [String] {
+        StatusItemPersistence.visibilityKeys(for: autosaveName)
     }
 
     static let maxStatusBarAppNameLength = 15
@@ -53,7 +106,11 @@ final class StatusBarController: NSObject {
     private func installOwnedStatusItems() {
         guard statusItem == nil, let controller else { return }
 
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        repairOwnedStatusItemRestoreStateBeforeInstall()
+
+        let ownedStatusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        StatusItemPersistence.configureMandatoryItem(ownedStatusItem, as: .main)
+        statusItem = ownedStatusItem
 
         guard let button = statusItem?.button else { return }
         button.image = NSImage(systemSymbolName: "o.circle", accessibilityDescription: "OmniWM")
@@ -61,8 +118,6 @@ final class StatusBarController: NSObject {
         button.target = self
         button.action = #selector(handleClick(_:))
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
-
-        statusItem?.autosaveName = Self.mainAutosaveName
 
         let menuBuilder = StatusBarMenuBuilder(settings: settings, controller: controller)
         menuBuilder.ipcMenuEnabled = cliManager != nil
@@ -84,7 +139,7 @@ final class StatusBarController: NSObject {
         refreshWorkspaces()
     }
 
-    @objc private func handleClick(_ sender: NSStatusBarButton) {
+    @objc private func handleClick(_: NSStatusBarButton) {
         guard let event = NSApp.currentEvent else { return }
 
         if event.type == .rightMouseUp {
@@ -159,6 +214,14 @@ final class StatusBarController: NSObject {
         statusItem?.button?.imagePosition
     }
 
+    func statusItemAutosaveNameForTests() -> String? {
+        statusItem?.autosaveName
+    }
+
+    func statusItemIsVisibleForTests() -> Bool? {
+        statusItem?.isVisible
+    }
+
     func cleanup() {
         cleanupOwnedStatusItems()
     }
@@ -180,7 +243,27 @@ final class StatusBarController: NSObject {
 
         settings.hiddenBarIsCollapsed = false
         Self.clearOwnedPreferredPositions(defaults: defaults)
+        Self.clearOwnedVisibilityPreferences(defaults: defaults)
         cleanupOwnedStatusItems()
         installOwnedStatusItems()
+    }
+
+    private func repairOwnedStatusItemRestoreStateBeforeInstall() {
+        let didClearPositions = Self.clearInvalidOwnedPreferredPositions(
+            defaults: defaults,
+            screenFrames: NSScreen.screens.map(\.frame)
+        )
+        if didClearPositions {
+            statusBarRecoveryLog.notice(
+                "Cleared invalid OmniWM status item preferred positions before install"
+            )
+        }
+
+        let didClearVisibility = Self.clearInvalidOwnedVisibilityPreferences(defaults: defaults)
+        if didClearVisibility {
+            statusBarRecoveryLog.notice(
+                "Cleared invalid OmniWM status item visibility preferences before install"
+            )
+        }
     }
 }

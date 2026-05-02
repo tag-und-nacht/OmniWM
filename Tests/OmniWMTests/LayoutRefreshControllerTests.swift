@@ -70,6 +70,51 @@ private func layoutRefreshHasNiriScrollDirective(
         #expect(snapshot.workingFrame == CGRect(x: 0, y: 0, width: 1000, height: 748))
     }
 
+    @Test @MainActor func buildWindowSnapshotsApplyRuleMinimumsWithoutResolvingAXConstraints() {
+        let controller = makeLayoutPlanTestController()
+        guard let workspaceId = controller.activeWorkspace()?.id else {
+            Issue.record("Missing active workspace")
+            return
+        }
+
+        let windowId = 122
+        let cachedMinWidth: CGFloat = 220
+        let cachedMinHeight: CGFloat = 160
+        let ruleMinWidth: Double = 500
+        let ruleMinHeight: Double = 300
+        let token = controller.workspaceManager.addWindow(
+            makeLayoutPlanTestWindow(windowId: windowId),
+            pid: getpid(),
+            windowId: windowId,
+            to: workspaceId,
+            ruleEffects: ManagedWindowRuleEffects(
+                minWidth: ruleMinWidth,
+                minHeight: ruleMinHeight
+            )
+        )
+        controller.workspaceManager.setCachedConstraints(
+            WindowSizeConstraints(
+                minSize: CGSize(width: cachedMinWidth, height: cachedMinHeight),
+                maxSize: .zero,
+                isFixed: false
+            ),
+            for: token
+        )
+
+        let graph = controller.workspaceManager.workspaceGraphSnapshot()
+        let entries = graph.tiledMembership(in: workspaceId).compactMap {
+            controller.workspaceManager.entry(for: $0.token)
+        }
+        let snapshots = controller.layoutRefreshController.buildWindowSnapshots(
+            for: entries,
+            resolveConstraints: false
+        )
+
+        let windowSnapshot = snapshots.first { $0.token == token }
+        #expect(windowSnapshot?.constraints.minSize.width == CGFloat(ruleMinWidth))
+        #expect(windowSnapshot?.constraints.minSize.height == CGFloat(ruleMinHeight))
+    }
+
     @Test @MainActor func backingScaleLookupUsesScreenCacheAfterFirstResolution() {
         let monitor = makeLayoutPlanPrimaryTestMonitor()
         let controller = makeLayoutPlanTestController(monitors: [monitor])
@@ -477,7 +522,7 @@ private func layoutRefreshHasNiriScrollDirective(
 
         let snapshot = controller.workspaceManager.managedRestoreSnapshot(for: secondToken)
         #expect(controller.axManager.lastAppliedFrame(for: secondToken.windowId) == nil)
-        #expect(snapshot?.token == secondToken)
+        #expect(snapshot != nil)
         #expect(snapshot?.niriState?.nodeId == secondNode.id)
     }
 
@@ -1786,6 +1831,7 @@ private func layoutRefreshHasNiriScrollDirective(
         defer { axHooksLease.release() }
 
         let controller = makeLayoutPlanTestController()
+        controller.axManager.clearFrameApplyOverridePositionConfirmationForTests()
         AXWindowService.fastFrameProviderForTests = { _ in nil }
         defer {
             AXWindowService.fastFrameProviderForTests = nil
@@ -2373,6 +2419,7 @@ private func layoutRefreshHasNiriScrollDirective(
         defer { axHooksLease.release() }
 
         let controller = makeLayoutPlanTestController()
+        controller.axManager.clearFrameApplyOverridePositionConfirmationForTests()
         AXWindowService.fastFrameProviderForTests = { _ in nil }
         defer {
             AXWindowService.fastFrameProviderForTests = nil
@@ -2394,7 +2441,6 @@ private func layoutRefreshHasNiriScrollDirective(
         let hintFrame = CGRect(x: 140, y: 160, width: 720, height: 460)
         _ = controller.workspaceManager.setManagedRestoreSnapshot(
             ManagedWindowRestoreSnapshot(
-                token: token,
                 workspaceId: inactiveWorkspaceId,
                 frame: hintFrame,
                 topologyProfile: controller.workspaceManager.topologyProfile,
@@ -2430,6 +2476,7 @@ private func layoutRefreshHasNiriScrollDirective(
         defer { axHooksLease.release() }
 
         let controller = makeLayoutPlanTestController()
+        controller.axManager.clearFrameApplyOverridePositionConfirmationForTests()
         AXWindowService.fastFrameProviderForTests = { _ in nil }
         defer {
             AXWindowService.fastFrameProviderForTests = nil
@@ -2474,6 +2521,7 @@ private func layoutRefreshHasNiriScrollDirective(
         defer { axHooksLease.release() }
 
         let controller = makeLayoutPlanTestController()
+        controller.axManager.clearFrameApplyOverridePositionConfirmationForTests()
         AXWindowService.fastFrameProviderForTests = { _ in nil }
         defer {
             AXWindowService.fastFrameProviderForTests = nil
@@ -2597,7 +2645,9 @@ private func layoutRefreshHasNiriScrollDirective(
     }
 
     @Test @MainActor func failedBatchHideDoesNotFinalizeNativeFullscreenRestoreForUnverifiedToken() async {
+        let axHooksLease = await acquireAXTestHooksLeaseForTests()
         let controller = makeLayoutPlanTestController()
+        controller.axManager.clearFrameApplyOverridePositionConfirmationForTests()
         guard let monitor = controller.workspaceManager.monitors.first,
               let workspaceId = controller.workspaceManager.activeWorkspaceOrFirst(on: monitor.id)?.id
         else {
@@ -2620,7 +2670,6 @@ private func layoutRefreshHasNiriScrollDirective(
             failureToken.windowId: failureVisibleFrame
         ]
         let failingWindowIds: Set<Int> = [failureToken.windowId]
-        let axHooksLease = await acquireAXTestHooksLeaseForTests()
         AXWindowService.fastFrameProviderForTests = { axRef in framesByWindowId[axRef.windowId] }
         AXWindowService.setFrameResultProviderForTests = { axRef, frame, currentFrameHint in
             if failingWindowIds.contains(axRef.windowId) {
@@ -2762,6 +2811,7 @@ private func layoutRefreshHasNiriScrollDirective(
         defer { axHooksLease.release() }
 
         let controller = makeLayoutPlanTestController()
+        controller.axManager.clearFrameApplyOverridePositionConfirmationForTests()
         AXWindowService.fastFrameProviderForTests = { _ in nil }
         defer {
             AXWindowService.fastFrameProviderForTests = nil

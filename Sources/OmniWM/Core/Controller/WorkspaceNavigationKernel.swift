@@ -676,12 +676,17 @@ enum WorkspaceNavigationKernel {
         workspaceId: WorkspaceDescriptor.ID,
         mode: TrackedWindowMode
     ) -> WindowToken? {
+        let graph = manager.workspaceGraphSnapshot()
         let entries: [WindowModel.Entry]
         switch mode {
         case .tiling:
-            entries = manager.tiledEntries(in: workspaceId)
+            entries = graph.tiledMembership(in: workspaceId).compactMap {
+                manager.entry(for: $0.token)
+            }
         case .floating:
-            entries = manager.floatingEntries(in: workspaceId)
+            entries = graph.floatingMembership(in: workspaceId).compactMap {
+                manager.entry(for: $0.token)
+            }
         }
         return entries.first {
             isFocusResolutionEligible($0, in: workspaceId, mode: mode)

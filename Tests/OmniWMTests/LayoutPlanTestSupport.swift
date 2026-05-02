@@ -5,6 +5,15 @@ import Foundation
 
 @testable import OmniWM
 
+@MainActor
+private var _retainedLayoutPlanTestRuntimes: [WMRuntime] = []
+
+struct LayoutPlanFloatingTestWindow {
+    let token: WindowToken
+    let logicalId: LogicalWindowId
+    let floatingState: WindowModel.FloatingState
+}
+
 func makeLayoutPlanTestDefaults() -> UserDefaults {
     let suiteName = "com.omniwm.layout-plan.test.\(UUID().uuidString)"
     return UserDefaults(suiteName: suiteName)!
@@ -108,6 +117,7 @@ func installSynchronousFrameApplySuccessOverride(on controller: WMController) {
             )
         }
     }
+    controller.axManager.markFrameApplyOverrideConfirmsPositionPlansForTests()
 }
 
 @MainActor
@@ -127,12 +137,62 @@ func installAsynchronousFrameApplyContextForLayoutPlanTests(
 }
 
 @MainActor
+func makeLayoutPlanTestPlatform() -> WMPlatform {
+    WMPlatform(
+        activateApplication: { _ in },
+        focusSpecificWindow: { _, _, _ in },
+        raiseWindow: { _ in },
+        closeWindow: { _ in },
+        orderWindowAbove: { _ in },
+        visibleWindowInfo: { [] },
+        axWindowRef: { _, _ in nil },
+        visibleOwnedWindows: { [] },
+        frontOwnedWindow: { _ in },
+        performMenuAction: { _ in }
+    )
+}
+
+@MainActor
+func addFloatingLayoutPlanTestWindow(
+    to controller: WMController,
+    workspaceId: WorkspaceDescriptor.ID,
+    referenceMonitorId: Monitor.ID,
+    windowId: Int,
+    frame: CGRect,
+    normalizedOrigin: CGPoint
+) -> LayoutPlanFloatingTestWindow {
+    let token = controller.workspaceManager.addWindow(
+        makeLayoutPlanTestWindow(windowId: windowId),
+        pid: getpid(),
+        windowId: windowId,
+        to: workspaceId,
+        mode: .floating
+    )
+    let floatingState = WindowModel.FloatingState(
+        lastFrame: frame,
+        normalizedOrigin: normalizedOrigin,
+        referenceMonitorId: referenceMonitorId,
+        restoreToFloating: true
+    )
+    controller.workspaceManager.setFloatingState(floatingState, for: token)
+    guard let logicalId = controller.workspaceManager.logicalWindowRegistry.lookup(token: token).liveLogicalId else {
+        fatalError("Expected logical identity for seeded floating layout-plan test window")
+    }
+    return LayoutPlanFloatingTestWindow(
+        token: token,
+        logicalId: logicalId,
+        floatingState: floatingState
+    )
+}
+
+@MainActor
 func makeLayoutPlanTestController(
     monitors: [Monitor] = [makeLayoutPlanTestMonitor()],
     workspaceConfigurations: [WorkspaceConfiguration] = [
         WorkspaceConfiguration(name: "1", monitorAssignment: .main),
         WorkspaceConfiguration(name: "2", monitorAssignment: .main)
     ],
+    platform: WMPlatform = makeLayoutPlanTestPlatform(),
     windowFocusOperations: WindowFocusOperations? = nil
 ) -> WMController {
     resetSharedControllerStateForTests()
@@ -143,15 +203,18 @@ func makeLayoutPlanTestController(
     )
     let settings = SettingsStore(defaults: makeLayoutPlanTestDefaults())
     settings.workspaceConfigurations = workspaceConfigurations
-    let controller = WMController(
+    let runtime = WMRuntime(
         settings: settings,
+        platform: platform,
         windowFocusOperations: operations
     )
+    _retainedLayoutPlanTestRuntimes.append(runtime)
+    let controller = runtime.controller
 
 
     controller.setAnimationsEnabled(true, persist: false)
     installSynchronousFrameApplySuccessOverride(on: controller)
-    controller.workspaceManager.applyMonitorConfigurationChange(monitors)
+    runtime.applyMonitorConfigurationChange(monitors)
     return controller
 }
 

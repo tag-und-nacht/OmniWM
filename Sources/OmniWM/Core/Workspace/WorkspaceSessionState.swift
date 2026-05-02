@@ -20,8 +20,6 @@ struct WorkspaceSessionState {
 
         var focusedToken: WindowToken?
         var pendingManagedFocus = PendingManagedFocusRequest()
-        var lastTiledFocusedByWorkspace: [WorkspaceDescriptor.ID: WindowToken] = [:]
-        var lastFloatingFocusedByWorkspace: [WorkspaceDescriptor.ID: WindowToken] = [:]
         var focusLease: FocusPolicyLease?
         var isNonManagedFocusActive = false
         var isAppFullscreenActive = false

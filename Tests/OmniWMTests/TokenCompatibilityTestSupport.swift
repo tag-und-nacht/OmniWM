@@ -68,9 +68,20 @@ extension WorkspaceManager {
     @discardableResult
     func resolveAndSetWorkspaceFocus(
         in workspaceId: WorkspaceDescriptor.ID,
-        onMonitor monitorId: Monitor.ID? = nil
+        onMonitor _: Monitor.ID? = nil
     ) -> WindowHandle? {
-        resolveAndSetWorkspaceFocusToken(in: workspaceId, onMonitor: monitorId).flatMap(handle(for:))
+        guard let plan = resolveWorkspaceFocusPlan(in: workspaceId) else {
+            return nil
+        }
+        if let token = plan.resolvedFocusToken {
+            _ = rememberFocus(token, in: workspaceId)
+            return handle(for: token)
+        }
+        _ = applyResolvedWorkspaceFocusClearMirror(
+            in: workspaceId,
+            scope: plan.focusClearAction
+        )
+        return nil
     }
 
     func setWorkspace(for handle: WindowHandle, to workspace: WorkspaceDescriptor.ID) {

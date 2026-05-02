@@ -5,6 +5,7 @@ import Foundation
 struct MonitorBarSettings: MonitorSettingsType {
     let id: UUID
     var monitorName: String
+    var monitorDisplayUUID: String?
     var monitorDisplayId: CGDirectDisplayID?
 
     var enabled: Bool?
@@ -24,6 +25,7 @@ struct MonitorBarSettings: MonitorSettingsType {
     init(
         id: UUID = UUID(),
         monitorName: String,
+        monitorDisplayUUID: String? = nil,
         monitorDisplayId: CGDirectDisplayID? = nil,
         enabled: Bool? = nil,
         showLabels: Bool? = nil,
@@ -41,6 +43,7 @@ struct MonitorBarSettings: MonitorSettingsType {
     ) {
         self.id = id
         self.monitorName = monitorName
+        self.monitorDisplayUUID = monitorDisplayUUID
         self.monitorDisplayId = monitorDisplayId
         self.enabled = enabled
         self.showLabels = showLabels
@@ -58,7 +61,8 @@ struct MonitorBarSettings: MonitorSettingsType {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, monitorName, monitorDisplayId, enabled, showLabels, showFloatingWindows, deduplicateAppIcons
+        case id, monitorName, monitorDisplayUUID, monitorDisplayId, enabled, showLabels, showFloatingWindows
+        case deduplicateAppIcons
         case hideEmptyWorkspaces, reserveLayoutSpace, notchAware, position, windowLevel
         case height, backgroundOpacity, xOffset, yOffset
     }
@@ -67,6 +71,7 @@ struct MonitorBarSettings: MonitorSettingsType {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(UUID.self, forKey: .id)
         monitorName = try container.decode(String.self, forKey: .monitorName)
+        monitorDisplayUUID = try container.decodeIfPresent(String.self, forKey: .monitorDisplayUUID)
         monitorDisplayId = try container.decodeIfPresent(CGDirectDisplayID.self, forKey: .monitorDisplayId)
         enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled)
         showLabels = try container.decodeIfPresent(Bool.self, forKey: .showLabels)
@@ -75,10 +80,8 @@ struct MonitorBarSettings: MonitorSettingsType {
         hideEmptyWorkspaces = try container.decodeIfPresent(Bool.self, forKey: .hideEmptyWorkspaces)
         reserveLayoutSpace = try container.decodeIfPresent(Bool.self, forKey: .reserveLayoutSpace)
         notchAware = try container.decodeIfPresent(Bool.self, forKey: .notchAware)
-        position = try container.decodeIfPresent(String.self, forKey: .position)
-            .flatMap { WorkspaceBarPosition(rawValue: $0) }
-        windowLevel = try container.decodeIfPresent(String.self, forKey: .windowLevel)
-            .flatMap { WorkspaceBarWindowLevel(rawValue: $0) }
+        position = try container.decodeIfPresent(WorkspaceBarPosition.self, forKey: .position)
+        windowLevel = try container.decodeIfPresent(WorkspaceBarWindowLevel.self, forKey: .windowLevel)
         height = try container.decodeIfPresent(Double.self, forKey: .height)
         backgroundOpacity = try container.decodeIfPresent(Double.self, forKey: .backgroundOpacity)
         xOffset = try container.decodeIfPresent(Double.self, forKey: .xOffset)
@@ -89,7 +92,7 @@ struct MonitorBarSettings: MonitorSettingsType {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(id, forKey: .id)
         try container.encode(monitorName, forKey: .monitorName)
-        try container.encodeIfPresent(monitorDisplayId, forKey: .monitorDisplayId)
+        try container.encodeIfPresent(monitorDisplayUUID, forKey: .monitorDisplayUUID)
         try container.encodeIfPresent(enabled, forKey: .enabled)
         try container.encodeIfPresent(showLabels, forKey: .showLabels)
         try container.encodeIfPresent(showFloatingWindows, forKey: .showFloatingWindows)
@@ -97,8 +100,8 @@ struct MonitorBarSettings: MonitorSettingsType {
         try container.encodeIfPresent(hideEmptyWorkspaces, forKey: .hideEmptyWorkspaces)
         try container.encodeIfPresent(reserveLayoutSpace, forKey: .reserveLayoutSpace)
         try container.encodeIfPresent(notchAware, forKey: .notchAware)
-        try container.encodeIfPresent(position?.rawValue, forKey: .position)
-        try container.encodeIfPresent(windowLevel?.rawValue, forKey: .windowLevel)
+        try container.encodeIfPresent(position, forKey: .position)
+        try container.encodeIfPresent(windowLevel, forKey: .windowLevel)
         try container.encodeIfPresent(height, forKey: .height)
         try container.encodeIfPresent(backgroundOpacity, forKey: .backgroundOpacity)
         try container.encodeIfPresent(xOffset, forKey: .xOffset)

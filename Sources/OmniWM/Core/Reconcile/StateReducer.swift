@@ -252,7 +252,7 @@ enum StateReducer {
                 monitorId: monitorId
             )
 
-        case let .managedFocusConfirmed(token, workspaceId, monitorId, appFullscreen, _):
+        case let .managedFocusConfirmed(token, workspaceId, monitorId, appFullscreen, _, _):
             return makeEvent(
                 kind: UInt32(OMNIWM_RECONCILE_EVENT_MANAGED_FOCUS_CONFIRMED),
                 token: token,
@@ -261,7 +261,7 @@ enum StateReducer {
                 appFullscreen: appFullscreen
             )
 
-        case let .managedFocusCancelled(token, workspaceId, _):
+        case let .managedFocusCancelled(token, workspaceId, _, _):
             return makeEvent(
                 kind: UInt32(OMNIWM_RECONCILE_EVENT_MANAGED_FOCUS_CANCELLED),
                 secondaryToken: token,
@@ -281,6 +281,11 @@ enum StateReducer {
 
         case .systemWake:
             return makeEvent(kind: UInt32(OMNIWM_RECONCILE_EVENT_SYSTEM_WAKE))
+
+        case .commandIntent:
+            preconditionFailure(
+                "WMEvent.commandIntent reached StateReducer; commandIntent must be handled in WMRuntime, not the reconcile kernel"
+            )
         }
     }
 

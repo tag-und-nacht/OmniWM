@@ -7,14 +7,6 @@ import Testing
 @testable import OmniWM
 
 @Suite(.serialized) struct WMControllerNativeFullscreenRestoreTests {
-    // When a window is first observed already in macOS native fullscreen
-    // (e.g. app launches fullscreen, Space handoff races our attach), the
-    // managed restore snapshot ends up holding the display rect as the
-    // "pre-fullscreen" frame. If we trusted it, the toggle-out-of-fullscreen
-    // restore would be a visual no-op. The seed resolver is supposed to
-    // notice this (via the cached niri state reporting a non-full-width
-    // column) and fall through to the pre-fullscreen tile frame we still
-    // have in AX. Regression test that guard.
     @Test @MainActor func `suspend seed skips managed snapshot frame when it matches display bounds and niri indicates tiled column`() {
         let fixture = makeTwoMonitorLayoutPlanTestController()
         let controller = fixture.controller
@@ -27,22 +19,14 @@ import Testing
             windowId: windowId
         )
 
-        // Simulate the tile frame that was already applied to the window
-        // before macOS put it into fullscreen — this is the frame the
-        // fallback (`preservedManagedGeometryFrame` → `axManager.lastAppliedFrame`)
-        // should surface once the display-bounds guard trips.
         let tileFrame = CGRect(x: 160, y: 120, width: 800, height: 600)
         controller.axManager.applyFramesParallel([(token.pid, token.windowId, tileFrame)])
 
-        // Plant the poisoned managed snapshot: frame == display.visibleFrame
-        // but the paired niri state reports a normal tile (isFullWidth=false
-        // at a 50% column width). This is the exact shape seen in the bug
-        // logs for pid=69017 wid=32111.
         let poisonedNiriState = ManagedWindowRestoreSnapshot.NiriState(
             nodeId: nil,
             columnIndex: 0,
             tileIndex: 0,
-            columnWindowTokens: [token],
+            columnWindowMembers: [LogicalWindowId(value: 1)],
             columnSizing: .init(
                 width: .proportion(0.5),
                 cachedWidth: tileFrame.width,
@@ -63,7 +47,6 @@ import Testing
             )
         )
         let poisonedSnapshot = ManagedWindowRestoreSnapshot(
-            token: token,
             workspaceId: workspaceId,
             frame: monitor.visibleFrame,
             topologyProfile: controller.workspaceManager.topologyProfile,
@@ -102,11 +85,6 @@ import Testing
         }
     }
 
-    // Same guard must NOT fire when the managed snapshot frame equals the
-    // display bounds but niri actually reports a full-width column (e.g. the
-    // user genuinely asked niri for a fullscreen-width column that happens
-    // to coincide with the display rect). In that case the managed-snapshot
-    // branch is correct and should be preserved.
     @Test @MainActor func `suspend seed keeps managed snapshot frame when niri indicates full width column`() {
         let fixture = makeTwoMonitorLayoutPlanTestController()
         let controller = fixture.controller
@@ -127,7 +105,7 @@ import Testing
             nodeId: nil,
             columnIndex: 0,
             tileIndex: 0,
-            columnWindowTokens: [token],
+            columnWindowMembers: [LogicalWindowId(value: 1)],
             columnSizing: .init(
                 width: .proportion(1.0),
                 cachedWidth: monitor.visibleFrame.width,
@@ -148,7 +126,6 @@ import Testing
             )
         )
         let legitimateSnapshot = ManagedWindowRestoreSnapshot(
-            token: token,
             workspaceId: workspaceId,
             frame: monitor.visibleFrame,
             topologyProfile: controller.workspaceManager.topologyProfile,
@@ -183,10 +160,6 @@ import Testing
         }
     }
 
-    // Once the record is already suspended with a seeded snapshot, follow-up
-    // suspend calls (from the periodic rescan and from repeated AX
-    // fullscreen-change notifications) must short-circuit so they do not
-    // re-run seed resolution or re-log `suspend`.
     @Test @MainActor func `repeated suspend calls short circuit once the record is suspended`() {
         let fixture = makeTwoMonitorLayoutPlanTestController()
         let controller = fixture.controller
@@ -206,7 +179,7 @@ import Testing
             nodeId: nil,
             columnIndex: 0,
             tileIndex: 0,
-            columnWindowTokens: [token],
+            columnWindowMembers: [LogicalWindowId(value: 1)],
             columnSizing: .init(
                 width: .proportion(0.5),
                 cachedWidth: tileFrame.width,
@@ -229,7 +202,6 @@ import Testing
         #expect(
             controller.workspaceManager.setManagedRestoreSnapshot(
                 ManagedWindowRestoreSnapshot(
-                    token: token,
                     workspaceId: workspaceId,
                     frame: tileFrame,
                     topologyProfile: controller.workspaceManager.topologyProfile,
@@ -258,7 +230,7 @@ import Testing
         )
         #expect(third == false, "third suspend (repeated AX notification) must short-circuit")
 
-        _ = monitor  // silence unused warning if dropped
+        _ = monitor
     }
 
     @Test @MainActor func `rekey migrates cached niri column members to replacement token`() {
@@ -276,12 +248,15 @@ import Testing
             windowId: 8_405
         )
 
+        let registry = controller.workspaceManager.logicalWindowRegistry
+        let originalLogicalId = registry.resolveForWrite(token: originalToken)!
+        let siblingLogicalId = registry.resolveForWrite(token: siblingToken)!
         controller.setLastKnownNiriStateForTests(
             ManagedWindowRestoreSnapshot.NiriState(
                 nodeId: nil,
                 columnIndex: 0,
                 tileIndex: 0,
-                columnWindowTokens: [originalToken, siblingToken],
+                columnWindowMembers: [originalLogicalId, siblingLogicalId],
                 columnSizing: .init(
                     width: .proportion(0.5),
                     cachedWidth: 820,
@@ -304,8 +279,8 @@ import Testing
             for: originalToken
         )
         #expect(
-            controller.lastKnownNiriStateForTests(token: originalToken)?.columnWindowTokens
-                == [originalToken, siblingToken]
+            controller.lastKnownNiriStateForTests(token: originalToken)?.columnWindowMembers
+                == [originalLogicalId, siblingLogicalId]
         )
 
         let replacementToken = WindowToken(pid: originalToken.pid, windowId: 8_406)
@@ -319,8 +294,8 @@ import Testing
 
         #expect(controller.lastKnownNiriStateForTests(token: originalToken) == nil)
         #expect(
-            controller.lastKnownNiriStateForTests(token: replacementToken)?.columnWindowTokens
-                == [replacementToken, siblingToken]
+            controller.lastKnownNiriStateForTests(token: replacementToken)?.columnWindowMembers
+                == [originalLogicalId, siblingLogicalId]
         )
     }
 
@@ -338,11 +313,14 @@ import Testing
             windowId: 8_408
         )
 
+        let registry2 = controller.workspaceManager.logicalWindowRegistry
+        let primaryLogicalId = registry2.resolveForWrite(token: primaryToken)!
+        let secondaryLogicalId = registry2.resolveForWrite(token: secondaryToken)!
         let staleNiriState = ManagedWindowRestoreSnapshot.NiriState(
             nodeId: nil,
             columnIndex: 0,
             tileIndex: 0,
-            columnWindowTokens: [primaryToken, secondaryToken],
+            columnWindowMembers: [primaryLogicalId, secondaryLogicalId],
             columnSizing: .init(
                 width: .proportion(0.5),
                 cachedWidth: 820,

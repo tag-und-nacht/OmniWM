@@ -1,6 +1,18 @@
 // SPDX-License-Identifier: GPL-2.0-only
 import AppKit
 import Foundation
+import OSLog
+
+/// Soft-fallback log for the case where `WMController.runtime` (a weak ref)
+/// is observed nil from inside an AX/CGS callback or async continuation. The
+/// runtime is owned strongly by `AppDelegate`; during AppKit teardown that
+/// strong ref can be released while in-flight observer queues and pending
+/// `Task.sleep` continuations still fire. Crashing here would crash the WM
+/// at shutdown for no user benefit; we log and soft-return instead.
+private let shutdownRaceLog = Logger(
+    subsystem: "com.omniwm.core",
+    category: "AXEventHandler.ShutdownRace"
+)
 
 enum ActivationRetryReason: String, Equatable {
     case missingFocusedWindow = "missing_focused_window"
@@ -132,29 +144,8 @@ final class AXEventHandler: CGSEventDelegate {
     private static let stabilizationRetryDelay: Duration = .milliseconds(100)
     private static let createdWindowRetryLimit = 5
 
-    /// Same-app focus can move to a sibling immediately before the window
-    /// server reports the previously focused window as destroyed. Keep only
-    /// a short, exact-token candidate so ordinary later background closes do
-    /// not inherit focused-removal recovery policy.
     private static let sameAppFocusPreemptionMaxAgeSeconds: TimeInterval = 0.75
 
-    /// After a CGS `windowDestroyed` notification, AX enumeration for the
-    /// same `windowId` can briefly continue to return the destroyed ref.
-    /// That happens most visibly during native-FS space transitions, where
-    /// macOS thrashes a window's AX identity: destroy → enumeration still
-    /// shows it → second destroy → fresh create. The full-rescan path is
-    /// driven by AX enumeration, so it would re-admit the zombie entry
-    /// between the two destroys. Suppressing re-admission makes the
-    /// follow-up `windowCreated` notification the single source of truth
-    /// for the replacement window.
-    ///
-    /// The TTL is the upper bound the guard can survive without a
-    /// confirming `windowCreated` signal. `trackPreparedCreate` clears
-    /// the mark as soon as a replacement admission is observed, so the
-    /// TTL only matters when macOS never sends the matching create —
-    /// e.g. the window was actually destroyed for good. Two seconds
-    /// comfortably covers the observed space-transition thrash window
-    /// without pinning stale ids forever.
     private static let recentlyDestroyedWindowTTL: Duration = .seconds(2)
     private var recentlyDestroyedWindowIds: [Int: ContinuousClock.Instant] = [:]
 
@@ -170,8 +161,6 @@ final class AXEventHandler: CGSEventDelegate {
     private var pendingWindowStabilizationTasks: [WindowToken: Task<Void, Never>] = [:]
     private var pendingCreatedWindowRetryTasks: [UInt32: Task<Void, Never>] = [:]
     private var createdWindowRetryCountById: [UInt32: Int] = [:]
-    private var pendingActivationRetryTask: Task<Void, Never>?
-    private var pendingActivationRetryRequestId: UInt64?
     private var focusedRemovalActivationSuppression: FocusedRemovalActivationSuppression?
     private var sameAppFocusPreemptionsByToken: [WindowToken: SameAppFocusPreemption] = [:]
     private var nextManagedReplacementEventSequence: UInt64 = 0
@@ -205,7 +194,6 @@ final class AXEventHandler: CGSEventDelegate {
         resetNativeFullscreenReplacementState()
         resetWindowStabilizationState()
         resetCreatedWindowRetryState()
-        resetActivationRetryState()
         resetFocusedRemovalActivationSuppression()
         resetSameAppFocusPreemptions()
         pendingWindowRuleReevaluationTask?.cancel()
@@ -223,11 +211,19 @@ final class AXEventHandler: CGSEventDelegate {
             handleCGSWindowCreated(windowId: windowId)
 
         case let .destroyed(windowId, _):
-            _ = controller.borderCoordinator.reconcile(event: .cgsDestroyed(windowId: windowId))
+            if let runtime = controller.runtime {
+                _ = runtime.reconcileBorderOwnership(event: .cgsDestroyed(windowId: windowId))
+            } else {
+                shutdownRaceLog.notice("AXEventHandler.cgsEventObserver: WMRuntime detached during shutdown; skipping border-ownership reconcile")
+            }
             handleCGSWindowDestroyed(windowId: windowId)
 
         case let .closed(windowId):
-            _ = controller.borderCoordinator.reconcile(event: .cgsClosed(windowId: windowId))
+            if let runtime = controller.runtime {
+                _ = runtime.reconcileBorderOwnership(event: .cgsClosed(windowId: windowId))
+            } else {
+                shutdownRaceLog.notice("AXEventHandler.cgsEventObserver: WMRuntime detached during shutdown; skipping border-ownership reconcile")
+            }
             handleCGSWindowDestroyed(windowId: windowId)
 
         case let .frameChanged(windowId):
@@ -316,7 +312,6 @@ final class AXEventHandler: CGSEventDelegate {
         resetNativeFullscreenReplacementState()
         resetWindowStabilizationState()
         resetCreatedWindowRetryState()
-        resetActivationRetryState()
         resetFocusedRemovalActivationSuppression()
         resetSameAppFocusPreemptions()
         controller?.focusBridge.reset()
@@ -371,7 +366,11 @@ final class AXEventHandler: CGSEventDelegate {
 
         if entry.mode == .floating {
             if let frame = observedFrame {
-                controller.workspaceManager.updateFloatingGeometry(frame: frame, for: token)
+                guard let runtime = controller.runtime else {
+                    shutdownRaceLog.notice("AXEventHandler.applyAXFrameUpdate (floating): WMRuntime detached during shutdown; soft-returning")
+                    return
+                }
+                runtime.updateFloatingGeometry(frame: frame, for: token, source: .ax)
             }
             let shouldRetryWorkspaceHide = controller.layoutRefreshController.handleFreshFrameEvent(for: token)
             if hasPendingFrameWrite, let frame = observedFrame {
@@ -418,6 +417,13 @@ final class AXEventHandler: CGSEventDelegate {
         AXWindowService.invalidateCachedTitle(windowId: windowId)
         cancelCreatedWindowRetry(windowId: windowId)
         removeDeferredCreatedWindow(windowId)
+        if let probeToken = resolveTrackedToken(windowId), let controller {
+            if let runtime = controller.runtime {
+                _ = runtime.recordStaleCGSDestroy(probeToken: probeToken)
+            } else {
+                shutdownRaceLog.notice("AXEventHandler.handleCGSWindowDestroyed: WMRuntime detached during shutdown; skipping stale-CGS-destroy record")
+            }
+        }
         handleWindowDestroyed(windowId: windowId, pidHint: nil)
     }
 
@@ -469,10 +475,6 @@ final class AXEventHandler: CGSEventDelegate {
         guard let controller else { return }
         cancelCreatedWindowRetry(windowId: candidate.windowId)
 
-        // A genuine AX create notification is the authoritative "the
-        // replacement window is here" signal; drop the recently-destroyed
-        // guard immediately so subsequent rescans admit this window
-        // normally instead of waiting out the remainder of the TTL.
         clearRecentlyDestroyedWindow(windowId: candidate.token.windowId)
 
         if restoreNativeFullscreenReplacementIfNeeded(
@@ -486,14 +488,19 @@ final class AXEventHandler: CGSEventDelegate {
             return
         }
 
-        let trackedToken = controller.workspaceManager.addWindow(
+        guard let runtime = controller.runtime else {
+            shutdownRaceLog.notice("AXEventHandler.admitWindow: WMRuntime detached during shutdown; soft-returning")
+            return
+        }
+        let trackedToken = runtime.admitWindow(
             candidate.axRef,
             pid: candidate.token.pid,
             windowId: candidate.token.windowId,
             to: candidate.workspaceId,
             mode: candidate.mode,
             ruleEffects: candidate.ruleEffects,
-            managedReplacementMetadata: candidate.replacementMetadata
+            managedReplacementMetadata: candidate.replacementMetadata,
+            source: .ax
         )
         guard let trackedEntry = controller.workspaceManager.entry(for: trackedToken) else {
             scheduleAXContextWarmup(for: candidate.token.pid)
@@ -520,10 +527,11 @@ final class AXEventHandler: CGSEventDelegate {
             if let observedFrame {
                 updateManagedReplacementFrame(observedFrame, for: trackedEntry)
                 if controller.workspaceManager.floatingState(for: trackedToken) == nil {
-                    controller.workspaceManager.updateFloatingGeometry(
+                    runtime.updateFloatingGeometry(
                         frame: observedFrame,
                         for: trackedToken,
-                        referenceMonitor: preferredMonitor
+                        referenceMonitor: preferredMonitor,
+                        source: .ax
                     )
                 }
             }
@@ -782,9 +790,14 @@ final class AXEventHandler: CGSEventDelegate {
             } ?? false
         } ?? false
         controller.layoutRefreshController.discardHiddenTracking(for: token)
-        _ = controller.workspaceManager.removeWindow(
+        guard let runtime = controller.runtime else {
+            shutdownRaceLog.notice("AXEventHandler.handleCGSWindowDestroyed: WMRuntime detached during shutdown; soft-returning")
+            return
+        }
+        _ = runtime.removeWindow(
             pid: token.pid,
-            windowId: token.windowId
+            windowId: token.windowId,
+            source: .ax
         )
         markWindowRecentlyDestroyed(windowId: token.windowId)
         controller.clearManualWindowOverride(for: token)
@@ -815,6 +828,12 @@ final class AXEventHandler: CGSEventDelegate {
                     suppressedActivationPid: token.pid,
                     expectedRecoveryToken: niriStrictRecoveryToken
                 )
+                if let removedLogicalId = controller.workspaceManager
+                    .logicalWindowRegistry
+                    .lookup(token: token).anyLogicalId
+                {
+                    runtime.recordFocusedManagedWindowRemoved(removedLogicalId)
+                }
             }
         }
         scheduleWindowRuleReevaluationIfNeeded(targets: [.pid(token.pid)])
@@ -1033,6 +1052,8 @@ final class AXEventHandler: CGSEventDelegate {
               suppression.expectedRecoveryToken == token
         else { return false }
 
+        controller?.runtime?.recordFocusObservationSettled(token)
+
         resetFocusedRemovalActivationSuppression()
         return true
     }
@@ -1181,11 +1202,11 @@ final class AXEventHandler: CGSEventDelegate {
             return
         }
 
-        // Some apps (e.g. WeChat) close windows via NSWindow.orderOut and reopen via
-        // orderFront, which produces no kCGSpaceWindowCreated event. Activation is then
-        // the only signal that a manageable window exists, so attempt admission here
-        // before falling back to the unmanaged path.
-        processCreatedWindow(windowId: UInt32(axRef.windowId))
+        let entryExists = controller.workspaceManager.entry(for: token) != nil
+        let profilePrefersRecovery = focusActivationRequiresRecovery(forToken: token)
+        if !entryExists || profilePrefersRecovery {
+            processCreatedWindow(windowId: UInt32(axRef.windowId))
+        }
         if let admittedEntry = controller.workspaceManager.entry(for: token) {
             if appFullscreen {
                 suspendManagedWindowForNativeFullscreen(admittedEntry)
@@ -1263,32 +1284,18 @@ final class AXEventHandler: CGSEventDelegate {
         confirmRequest: Bool = true
     ) {
         guard let controller else { return }
-        if let runtime = controller.runtime {
-            _ = runtime.observeActivation(
-                .init(
-                    source: source,
-                    origin: origin,
-                    match: match
-                ),
-                observedAXRef: observedAXRef,
-                managedEntry: managedEntry,
-                confirmRequest: confirmRequest
-            )
+        guard let runtime = controller.runtime else {
+            shutdownRaceLog.notice("AXEventHandler.applyActivationObservation: WMRuntime detached during shutdown; soft-returning")
             return
         }
-
-        guard let result = activationOrchestrationResult(
-            source: source,
-            origin: origin,
-            match: match
-        ) else {
-            return
-        }
-        applyActivationOrchestrationResult(
-            result,
+        _ = runtime.observeActivation(
+            .init(
+                source: source,
+                origin: origin,
+                match: match
+            ),
             observedAXRef: observedAXRef,
             managedEntry: managedEntry,
-            source: source,
             confirmRequest: confirmRequest
         )
     }
@@ -1347,21 +1354,46 @@ final class AXEventHandler: CGSEventDelegate {
         let preActivationHiddenState = controller.workspaceManager.hiddenState(for: entry.token)
         let previousFocusedToken = controller.workspaceManager.focusedToken
 
+        let originEpoch = controller.focusBridge.originTransactionEpoch(forToken: entry.token)
+
+        guard let runtime = controller.runtime else {
+            shutdownRaceLog.notice("AXEventHandler.applyActivationOrchestrationResult: WMRuntime detached during shutdown; soft-returning")
+            return
+        }
         if confirmRequest {
-            _ = controller.workspaceManager.confirmManagedFocus(
-                entry.token,
-                in: wsId,
-                onMonitor: monitorId,
-                appFullscreen: appFullscreen,
-                activateWorkspaceOnMonitor: shouldActivateWorkspace
-            )
-            cancelActivationRetry()
+            if let originEpoch {
+                _ = runtime.confirmManagedFocus(
+                    entry.token,
+                    in: wsId,
+                    onMonitor: monitorId,
+                    appFullscreen: appFullscreen,
+                    activateWorkspaceOnMonitor: shouldActivateWorkspace,
+                    originatingTransactionEpoch: originEpoch
+                )
+            } else {
+                _ = runtime.observeExternalManagedFocus(
+                    entry.token,
+                    in: wsId,
+                    onMonitor: monitorId,
+                    appFullscreen: appFullscreen,
+                    activateWorkspaceOnMonitor: shouldActivateWorkspace
+                )
+            }
         } else {
-            _ = controller.workspaceManager.setManagedFocus(
-                entry.token,
-                in: wsId,
-                onMonitor: monitorId
-            )
+            if let originEpoch {
+                _ = runtime.setManagedFocus(
+                    entry.token,
+                    in: wsId,
+                    onMonitor: monitorId,
+                    originatingTransactionEpoch: originEpoch
+                )
+            } else {
+                _ = runtime.observeExternalManagedFocusSet(
+                    entry.token,
+                    in: wsId,
+                    onMonitor: monitorId
+                )
+            }
         }
         recordSameAppFocusPreemptionIfNeeded(
             previousFocusedToken: previousFocusedToken,
@@ -1408,7 +1440,7 @@ final class AXEventHandler: CGSEventDelegate {
            let monitor = controller.workspaceManager.monitor(for: wsId)
         {
             if controller.workspaceManager.hiddenState(for: entry.token) == nil {
-                controller.workspaceManager.setHiddenState(hiddenState, for: entry.token)
+                runtime.setHiddenState(hiddenState, for: entry.token, source: .ax)
             }
             controller.axManager.markWindowActive(entry.windowId)
             controller.layoutRefreshController.unhideWindow(entry, monitor: monitor)
@@ -1430,13 +1462,12 @@ final class AXEventHandler: CGSEventDelegate {
                     )
                     : .init(layoutRefresh: isWorkspaceActive, axFocus: false)
             )
-            _ = controller.workspaceManager.applySessionPatch(
-                .init(
-                    workspaceId: wsId,
-                    viewportState: state,
-                    rememberedFocusToken: nil
-                )
+            let patch = WorkspaceSessionPatch(
+                workspaceId: wsId,
+                viewportState: state,
+                rememberedFocusToken: nil
             )
+            _ = runtime.applySessionPatch(patch, source: .ax)
 
             let preferredFrame = activationRevealFrame(
                 preferredFrame: node.renderedFrame ?? node.frame,
@@ -1514,10 +1545,14 @@ final class AXEventHandler: CGSEventDelegate {
         assert(entry.workspaceId == workspaceId, "Activation workspace drift for \(entry.token)")
         let wsId = workspaceId
         let shouldActivateWorkspace = !isWorkspaceActive && !controller.isTransferringWindow
-        if shouldActivateWorkspace, let monitorId {
-            _ = controller.workspaceManager.setActiveWorkspace(wsId, on: monitorId)
+        guard let runtime = controller.runtime else {
+            shutdownRaceLog.notice("AXEventHandler.beginNativeFullscreenRestoreActivation: WMRuntime detached during shutdown; soft-returning")
+            return
         }
-        _ = controller.workspaceManager.beginManagedFocusRequest(
+        if shouldActivateWorkspace, let monitorId {
+            _ = runtime.setActiveWorkspace(wsId, on: monitorId, source: .ax)
+        }
+        _ = runtime.beginManagedFocusRequest(
             entry.token,
             in: wsId,
             onMonitor: monitorId
@@ -1562,9 +1597,9 @@ final class AXEventHandler: CGSEventDelegate {
                 for: entry.token,
                 path: .fullRescanNativeFullscreenRestore
             )
-            return controller.workspaceManager.beginNativeFullscreenRestore(for: entry.token) != nil
+            return controller.routeBeginNativeFullscreenRestore(for: entry.token) != nil
         }
-        return controller.workspaceManager.restoreNativeFullscreenRecord(for: entry.token) != nil
+        return controller.routeRestoreNativeFullscreenRecord(for: entry.token) != nil
     }
 
     @discardableResult
@@ -1576,6 +1611,13 @@ final class AXEventHandler: CGSEventDelegate {
         appFullscreen: Bool
     ) -> Bool {
         guard let controller else { return false }
+        let profile = resolveCapabilityProfile(forPid: token.pid, windowId: token.windowId)
+            ?? .standard
+        if !profile.shouldAttemptNativeFullscreenReplacementMatch(
+            hasPendingTransition: controller.workspaceManager.hasPendingNativeFullscreenTransition
+        ) {
+            return false
+        }
         let replacementMetadata = nativeFullscreenReplacementMetadata(
             token: token,
             windowId: windowId,
@@ -1603,9 +1645,14 @@ final class AXEventHandler: CGSEventDelegate {
                 return false
             }
             if let normalizedReplacementMetadata {
-                _ = controller.workspaceManager.setManagedReplacementMetadata(
+                guard let runtime = controller.runtime else {
+                    shutdownRaceLog.notice("AXEventHandler.processNativeFullscreenRestoreCandidate: WMRuntime detached during shutdown; soft-returning false")
+                    return false
+                }
+                _ = runtime.setManagedReplacementMetadata(
                     normalizedReplacementMetadata,
-                    for: token
+                    for: token,
+                    source: .ax
                 )
             }
             cancelNativeFullscreenLifecycleTasks(for: record.originalToken)
@@ -1619,7 +1666,7 @@ final class AXEventHandler: CGSEventDelegate {
                     for: token,
                     path: .fullRescanNativeFullscreenRestore
                 )
-                _ = controller.workspaceManager.beginNativeFullscreenRestore(for: token)
+                controller.routeBeginNativeFullscreenRestore(for: token)
             }
             return true
         }
@@ -1645,7 +1692,7 @@ final class AXEventHandler: CGSEventDelegate {
                 for: token,
                 path: .fullRescanNativeFullscreenRestore
             )
-            _ = controller.workspaceManager.beginNativeFullscreenRestore(for: token)
+            controller.routeBeginNativeFullscreenRestore(for: token)
         }
 
         return true
@@ -1715,30 +1762,21 @@ final class AXEventHandler: CGSEventDelegate {
         axRef: AXWindowRef,
         managedReplacementMetadata: ManagedReplacementMetadata? = nil
     ) -> WindowModel.Entry? {
-        guard let controller,
-              let entry = controller.workspaceManager.rekeyWindow(
-                  from: oldToken,
-                  to: newToken,
-                  newAXRef: axRef,
-                  managedReplacementMetadata: managedReplacementMetadata
-              )
-        else {
+        guard let controller else { return nil }
+        let entryOrNil: WindowModel.Entry?
+        guard let runtime = controller.runtime else {
+            shutdownRaceLog.notice("AXEventHandler.rekeyManagedWindowIdentity: WMRuntime detached during shutdown; soft-returning nil")
             return nil
         }
-
-        _ = controller.niriEngine?.rekeyWindow(from: oldToken, to: newToken)
-        if let workspaceId = controller.workspaceManager.workspace(for: newToken) {
-            _ = controller.dwindleEngine?.rekeyWindow(from: oldToken, to: newToken, in: workspaceId)
-        }
-
-        controller.focusBridge.rekeyPendingFocus(from: oldToken, to: newToken)
-        controller.focusBridge.rekeyManagedRequest(from: oldToken, to: newToken)
-        controller.focusBridge.rekeyFocusedTarget(
+        entryOrNil = runtime.rekeyWindow(
             from: oldToken,
             to: newToken,
-            axRef: axRef,
-            workspaceId: entry.workspaceId
+            newAXRef: axRef,
+            managedReplacementMetadata: managedReplacementMetadata,
+            source: .ax
         )
+        guard let entry = entryOrNil else { return nil }
+
         controller.axManager.rekeyWindowState(
             pid: newToken.pid,
             oldWindowId: oldToken.windowId,
@@ -1773,9 +1811,11 @@ final class AXEventHandler: CGSEventDelegate {
             return false
         }
 
-        guard let unavailableRecord = controller.workspaceManager.markNativeFullscreenTemporarilyUnavailable(
-            token
-        ) else {
+        guard let runtime = controller.runtime else {
+            shutdownRaceLog.notice("AXEventHandler.handleNativeFullscreenDestroy: WMRuntime detached during shutdown; soft-returning false")
+            return false
+        }
+        guard let unavailableRecord = runtime.markNativeFullscreenTemporarilyUnavailable(token, source: .ax) else {
             return false
         }
 
@@ -1796,14 +1836,18 @@ final class AXEventHandler: CGSEventDelegate {
            activeRequest.token.pid == pid
         {
             _ = controller.focusBridge.cancelManagedRequest(requestId: activeRequest.requestId)
-            cancelActivationRetry(requestId: activeRequest.requestId)
             controller.focusBridge.discardPendingFocus(activeRequest.token)
+        }
+        guard let runtime = controller.runtime else {
+            shutdownRaceLog.notice("AXEventHandler.handleAppHidden: WMRuntime detached during shutdown; soft-returning")
+            return
         }
         if controller.currentKeyboardFocusTargetForRendering()?.pid == pid {
             controller.clearKeyboardFocusTarget(pid: pid)
-            _ = controller.workspaceManager.enterNonManagedFocus(
+            _ = runtime.enterNonManagedFocus(
                 appFullscreen: false,
-                preserveFocusedToken: true
+                preserveFocusedToken: true,
+                source: .ax
             )
             controller.hideKeyboardFocusBorder(
                 source: .appHide,
@@ -1813,7 +1857,7 @@ final class AXEventHandler: CGSEventDelegate {
         }
 
         for entry in controller.workspaceManager.entries(forPid: pid) {
-            controller.workspaceManager.setLayoutReason(.macosHiddenApp, for: entry.token)
+            runtime.setLayoutReason(.macosHiddenApp, for: entry.token, source: .ax)
         }
         controller.layoutRefreshController.requestVisibilityRefresh(reason: .appHidden)
     }
@@ -1822,9 +1866,13 @@ final class AXEventHandler: CGSEventDelegate {
         guard let controller else { return }
         controller.hiddenAppPIDs.remove(pid)
 
+        guard let runtime = controller.runtime else {
+            shutdownRaceLog.notice("AXEventHandler.handleAppUnhidden: WMRuntime detached during shutdown; soft-returning")
+            return
+        }
         for entry in controller.workspaceManager.entries(forPid: pid) {
             if controller.workspaceManager.layoutReason(for: entry.token) == .macosHiddenApp {
-                _ = controller.workspaceManager.restoreFromNativeState(for: entry.token)
+                _ = runtime.restoreFromNativeState(for: entry.token, source: .ax)
             }
         }
         _ = controller.renderKeyboardFocusBorder(
@@ -1850,6 +1898,26 @@ final class AXEventHandler: CGSEventDelegate {
         _ = controller.renderKeyboardFocusBorder(
             policy: .direct,
             source: .windowMinimizedChanged
+        )
+    }
+
+    func handleWindowFrameObserved(pid: pid_t, windowId: Int) {
+        guard let controller, let runtime = controller.runtime else { return }
+        let token = WindowToken(pid: pid, windowId: windowId)
+        guard controller.workspaceManager.logicalWindowRegistry
+            .lookup(token: token).liveLogicalId != nil
+        else { return }
+        guard let entry = controller.workspaceManager.entry(for: token),
+              let frame = AXWindowService.fastFrame(entry.axRef)
+        else { return }
+        let originatingEpoch = runtime.observedFrameOriginEpoch(for: token, source: .ax)
+        _ = runtime.submit(
+            WMEffectConfirmation.observedFrame(
+                token: token,
+                frame: frame,
+                source: .ax,
+                originatingTransactionEpoch: originatingEpoch
+            )
         )
     }
 
@@ -1937,6 +2005,7 @@ final class AXEventHandler: CGSEventDelegate {
 
         guard let trackedMode else { return nil }
 
+        let resolvedBundleId = bundleId ?? evaluation.facts.ax.bundleId
         let workspaceId = controller.resolveWorkspaceForNewWindow(
             workspaceName: evaluation.decision.workspaceName,
             axRef: axRef,
@@ -1950,7 +2019,7 @@ final class AXEventHandler: CGSEventDelegate {
             axRef: axRef,
             ruleEffects: evaluation.decision.ruleEffects,
             replacementMetadata: makeManagedReplacementMetadata(
-                bundleId: bundleId ?? evaluation.facts.ax.bundleId,
+                bundleId: resolvedBundleId,
                 workspaceId: workspaceId,
                 mode: trackedMode,
                 facts: evaluation.facts
@@ -2017,12 +2086,6 @@ final class AXEventHandler: CGSEventDelegate {
         windowId: UInt32,
         pidHint: pid_t?
     ) {
-        // Refresh the recently-destroyed mark for every destroy signal,
-        // even ones that don't reach `handleRemoved(token:)` (e.g. the
-        // second destroy of a native-FS ping-pong, where the entry is
-        // already gone and no candidate can be prepared). Without this,
-        // a later full rescan would re-admit a windowId whose
-        // destruction macOS kept repeating.
         markWindowRecentlyDestroyed(windowId: Int(windowId))
 
         let resolvedToken = resolveTrackedToken(windowId)
@@ -2054,7 +2117,7 @@ final class AXEventHandler: CGSEventDelegate {
     }
 
     private func shouldDelayManagedReplacementCreate(_ candidate: PreparedCreate) -> Bool {
-        guard let _ = managedReplacementCorrelationPolicy(for: candidate.replacementMetadata) else {
+        guard managedReplacementCorrelationPolicy(for: candidate.replacementMetadata) != nil else {
             return false
         }
 
@@ -2372,12 +2435,24 @@ final class AXEventHandler: CGSEventDelegate {
         guard let controller else { return }
         guard controller.currentKeyboardFocusTargetForRendering()?.token == entry.token else { return }
 
+        let registry = controller.workspaceManager.logicalWindowRegistry
+        guard let logicalId = registry.resolveForWrite(token: entry.token),
+              let replacementEpoch = registry.record(for: logicalId)?.replacementEpoch
+        else {
+            return
+        }
+
         let preferredFrame = controller.niriEngine?.findNode(for: entry.token).flatMap { $0.renderedFrame ?? $0.frame }
             ?? frameProvider?(entry.axRef)
-        _ = controller.borderCoordinator.reconcile(
+        guard let runtime = controller.runtime else {
+            shutdownRaceLog.notice("AXEventHandler.refreshBorderAfterManagedRekey: WMRuntime detached during shutdown; soft-returning")
+            return
+        }
+        _ = runtime.reconcileBorderOwnership(
             event: .managedRekey(
-                from: oldToken,
-                to: entry.token,
+                logicalId: logicalId,
+                replacementEpoch: replacementEpoch,
+                newToken: entry.token,
                 workspaceId: entry.workspaceId,
                 axRef: entry.axRef,
                 preferredFrame: preferredFrame,
@@ -2421,7 +2496,11 @@ final class AXEventHandler: CGSEventDelegate {
             else {
                 return
             }
-            let removedEntries = controller.workspaceManager.expireStaleTemporarilyUnavailableNativeFullscreenRecords()
+            guard let runtime = controller.runtime else {
+                shutdownRaceLog.notice("AXEventHandler.scheduleNativeFullscreenFollowup: WMRuntime detached during shutdown; soft-returning")
+                return
+            }
+            let removedEntries = runtime.expireStaleTemporarilyUnavailableNativeFullscreenRecords(source: .ax)
             guard !removedEntries.isEmpty else { return }
             controller.layoutRefreshController.requestFullRescan(reason: .activeSpaceChanged)
         }
@@ -2493,7 +2572,11 @@ final class AXEventHandler: CGSEventDelegate {
 
     private func updateManagedReplacementFrame(_ frame: CGRect, for entry: WindowModel.Entry) {
         guard let controller else { return }
-        _ = controller.workspaceManager.updateManagedReplacementFrame(frame, for: entry.token)
+        guard let runtime = controller.runtime else {
+            shutdownRaceLog.notice("AXEventHandler.updateManagedReplacementFrame: WMRuntime detached during shutdown; soft-returning")
+            return
+        }
+        _ = runtime.updateManagedReplacementFrame(frame, for: entry.token, source: .ax)
     }
 
     private func updateManagedReplacementTitle(windowId: UInt32, token: WindowToken) {
@@ -2503,7 +2586,11 @@ final class AXEventHandler: CGSEventDelegate {
         else {
             return
         }
-        _ = controller.workspaceManager.updateManagedReplacementTitle(title, for: entry.token)
+        guard let runtime = controller.runtime else {
+            shutdownRaceLog.notice("AXEventHandler.updateManagedReplacementTitle: WMRuntime detached during shutdown; soft-returning")
+            return
+        }
+        _ = runtime.updateManagedReplacementTitle(title, for: entry.token, source: .ax)
     }
 
     private func scheduleWindowStabilizationRetryIfNeeded(
@@ -2575,12 +2662,6 @@ final class AXEventHandler: CGSEventDelegate {
         recentlyDestroyedWindowIds.removeValue(forKey: windowId)
     }
 
-    /// Returns true if the given windowId was destroyed via a CGS
-    /// `windowDestroyed` notification within
-    /// `recentlyDestroyedWindowTTL`. The full-rescan admission path uses
-    /// this to ignore stale AX enumeration hits during native-FS space
-    /// transitions, letting the follow-up `windowCreated` notification
-    /// be the single source of truth.
     func isWindowRecentlyDestroyed(windowId: Int) -> Bool {
         guard let destroyedAt = recentlyDestroyedWindowIds[windowId] else {
             return false
@@ -2621,7 +2702,11 @@ final class AXEventHandler: CGSEventDelegate {
             nextManagedRequestId: result.snapshot.focus.nextManagedRequestId,
             activeManagedRequest: result.snapshot.focus.activeManagedRequest
         )
-        _ = controller.workspaceManager.applyOrchestrationFocusState(result.snapshot.focus)
+        guard let runtime = controller.runtime else {
+            shutdownRaceLog.notice("AXEventHandler.applyActivationOrchestrationResult: WMRuntime detached during shutdown; soft-returning")
+            return
+        }
+        _ = runtime.applyOrchestrationFocusState(result.snapshot.focus, source: .ax)
 
         for action in result.plan.actions {
             switch action {
@@ -2631,15 +2716,14 @@ final class AXEventHandler: CGSEventDelegate {
                     matching: token,
                     workspaceId: workspaceId
                 )
-            case let .continueManagedFocusRequest(requestId, reason, source, origin):
-                guard let request = controller.focusBridge.activeManagedRequest(requestId: requestId) else {
-                    continue
-                }
-                continueManagedFocusRequest(
-                    request,
-                    source: source,
-                    origin: origin,
-                    reason: reason
+            case let .continueManagedFocusRequest(requestId, reason, source, _):
+                let activeRequest = controller.focusBridge
+                    .activeManagedRequest(requestId: requestId)
+                runtime.recordActivationFailure(
+                    reason: focusFailureReason(for: reason),
+                    requestId: requestId,
+                    token: activeRequest?.token,
+                    source: focusFailureEventSource(for: source)
                 )
             case let .confirmManagedActivation(token, workspaceId, monitorId, isWorkspaceActive, appFullscreen, source):
                 guard let entry = managedEntry ?? controller.workspaceManager.entry(for: token) else {
@@ -2671,7 +2755,10 @@ final class AXEventHandler: CGSEventDelegate {
                     if let resolvedAXRef {
                         let target = controller.keyboardFocusTarget(for: token, axRef: resolvedAXRef)
                         controller.focusBridge.setFocusedTarget(target)
-                        _ = controller.workspaceManager.enterNonManagedFocus(appFullscreen: appFullscreen)
+                        _ = runtime.enterNonManagedFocus(
+                            appFullscreen: appFullscreen,
+                            source: .ax
+                        )
                         _ = controller.renderKeyboardFocusBorder(
                             for: target,
                             policy: .direct,
@@ -2679,9 +2766,11 @@ final class AXEventHandler: CGSEventDelegate {
                         )
                     }
                 } else {
-                    cancelActivationRetry()
                     controller.focusBridge.setFocusedTarget(nil)
-                    _ = controller.workspaceManager.enterNonManagedFocus(appFullscreen: appFullscreen)
+                    _ = runtime.enterNonManagedFocus(
+                        appFullscreen: appFullscreen,
+                        source: .ax
+                    )
                     controller.hideKeyboardFocusBorder(
                         source: borderReconcileSource(for: source),
                         reason: "missing focused window during fallback transition",
@@ -2689,12 +2778,8 @@ final class AXEventHandler: CGSEventDelegate {
                     )
                 }
 
-            case let .cancelActivationRetry(requestId):
-                if let requestId {
-                    cancelActivationRetry(requestId: requestId)
-                } else {
-                    cancelActivationRetry()
-                }
+            case .cancelActivationRetry:
+                break
             case let .enterOwnedApplicationFallback(pid, source):
                 resetSameAppFocusPreemptions()
                 controller.clearKeyboardFocusTarget(pid: pid)
@@ -2715,10 +2800,38 @@ final class AXEventHandler: CGSEventDelegate {
             }
         }
 
-        if case let .focusRequestCancelled(_, token) = result.decision,
+        if case let .focusRequestCancelled(requestId, token) = result.decision,
            let token
         {
+            runtime.recordActivationFailure(
+                reason: .retryExhausted,
+                requestId: requestId,
+                token: token,
+                source: focusFailureEventSource(for: source)
+            )
             handleActivationRetryExhausted(pid: token.pid, source: source)
+        }
+    }
+
+    private func focusFailureReason(
+        for retryReason: ActivationRetryReason
+    ) -> FocusState.FocusFailureReason {
+        switch retryReason {
+        case .missingFocusedWindow: .missingFocusedWindow
+        case .pendingFocusMismatch: .pendingFocusMismatch
+        case .pendingFocusUnmanagedToken: .pendingFocusUnmanagedToken
+        case .retryExhausted: .retryExhausted
+        }
+    }
+
+    private func focusFailureEventSource(
+        for source: ActivationEventSource
+    ) -> WMEventSource {
+        switch source {
+        case .focusedWindowChanged,
+             .workspaceDidActivateApplication,
+             .cgsFrontAppChanged:
+            .ax
         }
     }
 
@@ -2779,19 +2892,28 @@ final class AXEventHandler: CGSEventDelegate {
         guard let controller else { return }
 
         controller.focusBridge.discardPendingFocus(token)
-        let canceledRequest = controller.focusBridge.cancelManagedRequest(
+        let originEpochForCancel = controller.focusBridge.originTransactionEpoch(forToken: token)
+        _ = controller.focusBridge.cancelManagedRequest(
             matching: token,
             workspaceId: workspaceId
         )
-        if let requestId {
-            cancelActivationRetry(requestId: requestId)
-        } else if let canceledRequest {
-            cancelActivationRetry(requestId: canceledRequest.requestId)
+        _ = requestId
+        guard let runtime = controller.runtime else {
+            shutdownRaceLog.notice("AXEventHandler.clearManagedFocusState: WMRuntime detached during shutdown; soft-returning")
+            return
         }
-        _ = controller.workspaceManager.cancelManagedFocusRequest(
-            matching: token,
-            workspaceId: workspaceId
-        )
+        if let originEpochForCancel, let workspaceId {
+            _ = runtime.cancelManagedFocusRequest(
+                matching: token,
+                workspaceId: workspaceId,
+                originatingTransactionEpoch: originEpochForCancel
+            )
+        } else {
+            _ = runtime.observeExternalManagedFocusCancellation(
+                matching: token,
+                workspaceId: workspaceId
+            )
+        }
         if let workspaceId {
             completeFocusedRemovalRecoveryIfExpected(token: token, workspaceId: workspaceId)
         } else if focusedRemovalActivationSuppression?.expectedRecoveryToken == token {
@@ -2815,57 +2937,11 @@ final class AXEventHandler: CGSEventDelegate {
         )
     }
 
-    private func continueManagedFocusRequest(
-        _ request: ManagedFocusRequest,
-        source: ActivationEventSource,
-        origin: ActivationCallOrigin,
-        reason: ActivationRetryReason
-    ) {
-        scheduleActivationRetry(
-            request: request,
-            source: source,
-            origin: origin,
-            reason: reason
-        )
-    }
-
-    private func scheduleActivationRetry(
-        request: ManagedFocusRequest,
-        source: ActivationEventSource,
-        origin: ActivationCallOrigin,
-        reason: ActivationRetryReason
-    ) {
-        guard controller != nil else { return }
-        cancelActivationRetry()
-        pendingActivationRetryRequestId = request.requestId
-        let retryOrigin: ActivationCallOrigin = origin == .probe ? .probe : .retry
-        pendingActivationRetryTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: Self.stabilizationRetryDelay)
-            guard !Task.isCancelled, let self else { return }
-            let requestId = request.requestId
-            guard self.pendingActivationRetryRequestId == requestId else { return }
-            self.pendingActivationRetryTask = nil
-            self.pendingActivationRetryRequestId = nil
-            guard let controller = self.controller,
-                  let liveRequest = controller.focusBridge.activeManagedRequest(requestId: requestId)
-            else {
-                return
-            }
-            self.handleAppActivation(
-                pid: liveRequest.token.pid,
-                source: source,
-                origin: retryOrigin
-            )
-        }
-    }
-
     private func handleActivationRetryExhausted(
         pid: pid_t,
-        source: ActivationEventSource
+        source _: ActivationEventSource
     ) {
         guard let controller else { return }
-
-        cancelActivationRetry()
 
         if let target = controller.currentKeyboardFocusTargetForRendering(),
            controller.renderKeyboardFocusBorder(
@@ -2882,21 +2958,6 @@ final class AXEventHandler: CGSEventDelegate {
                 matchingPid: pid
             )
         }
-    }
-
-    private func cancelActivationRetry() {
-        pendingActivationRetryTask?.cancel()
-        pendingActivationRetryTask = nil
-        pendingActivationRetryRequestId = nil
-    }
-
-    private func cancelActivationRetry(requestId: UInt64) {
-        guard pendingActivationRetryRequestId == requestId else { return }
-        cancelActivationRetry()
-    }
-
-    private func resetActivationRetryState() {
-        cancelActivationRetry()
     }
 
     private func deferCreatedWindow(_ windowId: UInt32) {
@@ -2997,5 +3058,47 @@ final class AXEventHandler: CGSEventDelegate {
             return bundleIdProvider(pid)
         }
         return controller.appInfoCache.bundleId(for: pid) ?? NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
+    }
+
+    private func focusActivationRequiresRecovery(forToken token: WindowToken) -> Bool {
+        guard let resolved = resolveCapabilityProfile(forPid: token.pid, windowId: token.windowId) else {
+            return false
+        }
+        return resolved.focusActivation == .requiresActivationRecovery
+    }
+
+    private func resolveCapabilityProfile(
+        forPid pid: pid_t,
+        windowId: Int?
+    ) -> WindowCapabilityProfile? {
+        guard let controller, let runtime = controller.runtime else { return nil }
+        guard let bundleId = controller.appInfoCache.bundleId(for: pid) else { return nil }
+        let level: Int?
+        if let windowId, let windowIdU32 = UInt32(exactly: windowId),
+           let info = windowInfoProvider?(windowIdU32) ?? SkyLight.shared.queryWindowInfo(windowIdU32)
+        {
+            level = Int(info.level)
+        } else {
+            level = nil
+        }
+        let facts = WindowRuleFacts(
+            appName: controller.appInfoCache.name(for: pid),
+            ax: AXWindowFacts(
+                role: nil,
+                subrole: nil,
+                title: nil,
+                hasCloseButton: false,
+                hasFullscreenButton: false,
+                fullscreenButtonEnabled: nil,
+                hasZoomButton: false,
+                hasMinimizeButton: false,
+                appPolicy: nil,
+                bundleId: bundleId,
+                attributeFetchSucceeded: false
+            ),
+            sizeConstraints: nil,
+            windowServer: nil
+        )
+        return runtime.capabilityProfileResolver.resolve(for: facts, level: level).profile
     }
 }
