@@ -201,13 +201,6 @@ final class MouseWarpHandler: NSObject {
                     return
                 }
             }
-            mouseWarpClampCursorToNearestMonitor(
-                location: location,
-                margin: margin,
-                axis: axis,
-                effectiveOrder: effectiveOrder,
-                topology: topology
-            )
             return
         }
 
@@ -244,7 +237,7 @@ final class MouseWarpHandler: NSObject {
                     if attemptedWarp {
                         return
                     }
-                    mouseWarpBackToMonitor(lastMonitor, location: location, margin: margin, axis: axis)
+                    state.lastMonitorId = currentMonitor.id
                     return
                 }
             } else {
@@ -414,92 +407,6 @@ final class MouseWarpHandler: NSObject {
         return false
     }
 
-    private func mouseWarpBackToMonitor(_ monitor: Monitor, location: CGPoint, margin: CGFloat, axis: MouseWarpAxis) {
-        let frame = monitor.frame
-        let clampedPoint: CGPoint
-
-        switch axis {
-        case .horizontal:
-            var clampedY = location.y
-
-            if location.y > frame.maxY {
-                clampedY = frame.maxY - margin - 1
-            } else if location.y < frame.minY {
-                clampedY = frame.minY + margin + 1
-            } else {
-                return
-            }
-
-            let clampedX = min(max(location.x, frame.minX + margin + 1), frame.maxX - margin - 1)
-            clampedPoint = CGPoint(x: clampedX, y: clampedY)
-        case .vertical:
-            var clampedX = location.x
-
-            if location.x > frame.maxX {
-                clampedX = frame.maxX - margin - 1
-            } else if location.x < frame.minX {
-                clampedX = frame.minX + margin + 1
-            } else {
-                return
-            }
-
-            let clampedY = min(max(location.y, frame.minY + margin + 1), frame.maxY - margin - 1)
-            clampedPoint = CGPoint(x: clampedX, y: clampedY)
-        }
-
-        state.isWarping = true
-        state.lastMonitorId = monitor.id
-        let warpPoint = ScreenCoordinateSpace.toWindowServer(point: clampedPoint)
-        warpCursor(warpPoint)
-
-        scheduleWarpCooldownReset()
-    }
-
-    private func mouseWarpClampCursorToNearestMonitor(
-        location: CGPoint,
-        margin: CGFloat,
-        axis: MouseWarpAxis,
-        effectiveOrder: [Monitor.ID],
-        topology: MonitorTopologyState
-    ) {
-        if let lastMonitorId = state.lastMonitorId,
-           let lastMonitor = monitor(forId: lastMonitorId, in: topology)
-        {
-            mouseWarpBackToMonitor(lastMonitor, location: location, margin: margin, axis: axis)
-            return
-        }
-
-        guard let sourceMonitor = mouseWarpNearestMonitor(
-            to: location,
-            in: effectiveOrder,
-            topology: topology
-        ) else { return }
-
-        let frame = sourceMonitor.frame
-        let clampedPoint = CGPoint(
-            x: mouseWarpClampCoordinate(
-                location.x,
-                minCoordinate: frame.minX,
-                maxCoordinate: frame.maxX,
-                margin: margin
-            ),
-            y: mouseWarpClampCoordinate(
-                location.y,
-                minCoordinate: frame.minY,
-                maxCoordinate: frame.maxY,
-                margin: margin
-            )
-        )
-
-        if clampedPoint != location {
-            state.isWarping = true
-            let warpPoint = ScreenCoordinateSpace.toWindowServer(point: clampedPoint)
-            warpCursor(warpPoint)
-
-            scheduleWarpCooldownReset()
-        }
-    }
-
     private func mouseWarpToMonitor(
         id targetMonitorId: Monitor.ID,
         edge: Edge,
@@ -539,34 +446,6 @@ final class MouseWarpHandler: NSObject {
         in topology: MonitorTopologyState
     ) -> Monitor? {
         topology.node(id)?.monitor
-    }
-
-    private func mouseWarpNearestMonitor(
-        to location: CGPoint,
-        in effectiveOrder: [Monitor.ID],
-        topology: MonitorTopologyState
-    ) -> Monitor? {
-        var best: (monitor: Monitor, distance: CGFloat)?
-        for monitorId in effectiveOrder {
-            guard let monitor = monitor(forId: monitorId, in: topology) else { continue }
-            let distance = mouseWarpDistanceSquared(to: monitor.frame, from: location)
-            guard let current = best else {
-                best = (monitor, distance)
-                continue
-            }
-            if distance < current.distance {
-                best = (monitor, distance)
-            }
-        }
-        return best?.monitor
-    }
-
-    private func mouseWarpDistanceSquared(to frame: CGRect, from point: CGPoint) -> CGFloat {
-        let clampedX = min(max(point.x, frame.minX), frame.maxX)
-        let clampedY = min(max(point.y, frame.minY), frame.maxY)
-        let dx = point.x - clampedX
-        let dy = point.y - clampedY
-        return dx * dx + dy * dy
     }
 
     private func mouseWarpDestinationPoint(
