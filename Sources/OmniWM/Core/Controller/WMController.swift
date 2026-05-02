@@ -432,7 +432,11 @@ final class WMController {
             && hasStartedServices
             && !serviceLifecycleManager.isSecureInputActive
         hotkeysEnabled = shouldEnableHotkeys
-        shouldEnableHotkeys ? hotkeys.start() : hotkeys.stop()
+        if shouldEnableHotkeys {
+            hotkeys.start()
+        } else {
+            hotkeys.stop()
+        }
     }
 
     func setGapSize(_ size: Double) {
